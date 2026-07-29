@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.6.0
+// @version      0.8.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -243,6 +243,7 @@
     parsed.players = parsed.players || {};
     parsed.hands = parsed.hands || [];
     parsed.hero = parsed.hero || { hands: 0, netChips: 0 };
+    parsed.session = parsed.session || { startedAt: 0, hands: 0, net: 0, lastHandAt: 0 };
     STORE = parsed;
     saveStore();
   }
@@ -259,6 +260,7 @@
       players: { ...local.players },
       hands: mergeHands(local.hands || [], remote.hands || [], local.settings.historyLimit),
       hero: local.hero,
+      session: local.session, // session is per-device; never taken from remote
       settings: local.settings,
     };
     for (const xid of Object.keys(remote.players || {})) {
@@ -436,25 +438,36 @@
   // active HandState. Wording is a best guess (mixing past/present tense)
   // per the public "posts/posted the (small|big) blind" style referenced by
   // similar Torn scripts — add more alternates here during calibration.
+  // Torn writes the log in PAST tense with status glyphs ("* ImEx called"), and
+  // amounts are not always present. Every pattern therefore accepts both tenses
+  // and treats the amount as optional; a missing amount costs chip accuracy but
+  // still records the action. Verified against real observed wording.
   const LOG_PATTERNS = [
-    { type: 'newHandMarker', re: /dealing (a )?new hand/i },
-    { type: 'postSB', re: /^(.+?) posts?(?:ed)? the small blind \$?([\d,]+)/i },
-    { type: 'postBB', re: /^(.+?) posts?(?:ed)? the big blind \$?([\d,]+)/i },
-    { type: 'fold', re: /^(.+?) folds?/i },
-    { type: 'check', re: /^(.+?) checks?/i },
-    { type: 'call', re: /^(.+?) calls? \$?([\d,]+)/i },
-    { type: 'bet', re: /^(.+?) bets? \$?([\d,]+)/i },
-    { type: 'raise', re: /^(.+?) raises? to \$?([\d,]+)/i },
-    // All-in: the amount is optional because it's still unconfirmed whether Torn
-    // prints one. With no amount the action still records as aggression, just
-    // without the chips — strictly better than dropping the event.
+    { type: 'newHandMarker', re: /(dealing|starting)\s+(a\s+)?new\s+hand/i },
+    { type: 'postSB', re: /^(.+?)\s+post(?:s|ed)?\s+(?:the\s+)?small\s*blind(?:\s*\$?([\d,]+))?/i },
+    { type: 'postBB', re: /^(.+?)\s+post(?:s|ed)?\s+(?:the\s+)?big\s*blind(?:\s*\$?([\d,]+))?/i },
     { type: 'allin', re: /^(.+?)\s+(?:is\s+|goes\s+|went\s+)?all[\s-]?in(?:\s*(?:for|with)?\s*\$?([\d,]+))?/i },
-    { type: 'flop', re: /^flop:?\s*(.+)/i },
-    { type: 'turn', re: /^turn:?\s*(.+)/i },
-    { type: 'river', re: /^river:?\s*(.+)/i },
-    { type: 'shows', re: /^(.+?) shows? (.+)/i },
-    { type: 'wins', re: /^(.+?) wins? \$?([\d,]+)/i },
+    { type: 'fold', re: /^(.+?)\s+fold(?:s|ed)?\b/i },
+    { type: 'check', re: /^(.+?)\s+check(?:s|ed)?\b/i },
+    { type: 'call', re: /^(.+?)\s+call(?:s|ed)?\b(?:\s*\$?([\d,]+))?/i },
+    { type: 'raise', re: /^(.+?)\s+raise[sd]?\b(?:\s+to)?(?:\s*\$?([\d,]+))?/i },
+    { type: 'bet', re: /^(.+?)\s+bet(?:s|ted)?\b(?:\s*\$?([\d,]+))?/i },
+    { type: 'flop', re: /^flop\b:?\s*(.+)/i },
+    { type: 'turn', re: /^turn\b:?\s*(.+)/i },
+    { type: 'river', re: /^river\b:?\s*(.+)/i },
+    { type: 'shows', re: /^(.+?)\s+show(?:s|ed)?\s+(.+)/i },
+    { type: 'wins', re: /^(.+?)\s+w(?:ins?|on)\b(?:\s+the\s+pot)?(?:\s*\$?([\d,]+))?/i },
   ];
+
+  // Log rows are prefixed with status glyphs; left in place they'd be captured
+  // as part of the player's name and never match a seat.
+  const LINE_DECORATION_RE = /^[^\w$]+/;
+  function cleanLogLine(t) {
+    return String(t || '').replace(/[✓✔✕✖✗✘]/g, '').replace(LINE_DECORATION_RE, '').trim();
+  }
+  function cleanName(n) {
+    return String(n || '').replace(/^[^\w]+/, '').replace(/[^\w]+$/, '').trim();
+  }
 
   let heroXid = null;
   let currentHand = null;
@@ -476,6 +489,7 @@
       bbXid: null,
       actionOrder: [],         // first-to-act order preflop, used to derive positions
       board: [],               // community cards parsed out of the log
+      heroCards: null,         // captured while the hand is live, for the history record
       preflopRaiseEvents: 0,   // total raise events preflop (not unique raisers) — 2nd = a 3-bet
       lastAggressor: null,
       aggressorByStreet: {},
@@ -496,10 +510,24 @@
     return m ? m[1] : null;
   }
 
+  // Prefer a profile link, but fall back to matching the seat's text against
+  // names already seen in the log — longest first, so "Joe" can't shadow "Joey".
+  function resolveSeatKey(seatEl) {
+    const xid = resolveXidFromSeat(seatEl);
+    if (xid) return xid;
+    const text = seatEl.textContent || '';
+    const known = Object.keys(STORE.players)
+      .map((k) => ({ key: k, name: (STORE.players[k] || {}).name || '' }))
+      .filter((e) => e.name.length >= 2)
+      .sort((a, b) => b.name.length - a.name.length);
+    for (const e of known) { if (text.includes(e.name)) return e.key; }
+    return null;
+  }
+
   function seatedXids() {
     const xids = new Set();
     document.querySelectorAll(SELECTORS.seatContainer).forEach((seat) => {
-      const xid = resolveXidFromSeat(seat);
+      const xid = resolveSeatKey(seat);
       if (xid) xids.add(xid);
     });
     return xids;
@@ -564,7 +592,7 @@
   }
 
   function handleLogLine(line) {
-    const trimmed = line.trim();
+    const trimmed = cleanLogLine(line);
     if (!trimmed) return;
 
     for (const pattern of LOG_PATTERNS) {
@@ -594,8 +622,8 @@
     }
 
     if (type === 'postSB' || type === 'postBB') {
-      const xid = nameToXidGuess(m[1].trim());
-      const amt = parseAmount(m[2]);
+      const xid = nameToXidGuess(cleanName(m[1]));
+      const amt = m[2] ? parseAmount(m[2]) : 0;
       addContribution(hand, xid, amt);
       logAction(hand, xid, type === 'postSB' ? 'sb' : 'bb', amt);
       if (type === 'postSB') hand.sbXid = xid; else hand.bbXid = xid;
@@ -604,7 +632,7 @@
     }
 
     if (type === 'fold') {
-      const xid = nameToXidGuess(m[1].trim());
+      const xid = nameToXidGuess(cleanName(m[1]));
       recordStreetAction(xid, 'fold', hand);
       logAction(hand, xid, 'fold', 0);
       if (hand.street === 'preflop' && hand.threeBetActive && xid !== hand.threeBettorXid) {
@@ -619,15 +647,15 @@
     }
 
     if (type === 'check') {
-      const xid = nameToXidGuess(m[1].trim());
+      const xid = nameToXidGuess(cleanName(m[1]));
       recordStreetAction(xid, 'check', hand);
       logAction(hand, xid, 'check', 0);
       return;
     }
 
     if (type === 'call') {
-      const xid = nameToXidGuess(m[1].trim());
-      const amt = parseAmount(m[2]);
+      const xid = nameToXidGuess(cleanName(m[1]));
+      const amt = m[2] ? parseAmount(m[2]) : 0;
       addContribution(hand, xid, amt);
       recordStreetAction(xid, 'call', hand);
       logAction(hand, xid, 'call', amt);
@@ -636,8 +664,8 @@
     }
 
     if (type === 'bet') {
-      const xid = nameToXidGuess(m[1].trim());
-      const amt = parseAmount(m[2]);
+      const xid = nameToXidGuess(cleanName(m[1]));
+      const amt = m[2] ? parseAmount(m[2]) : 0;
       noteBetSizing(xid, amt, hand.pot); // pot BEFORE this bet
       addContribution(hand, xid, amt);
       recordStreetAction(xid, 'bet', hand);
@@ -649,8 +677,8 @@
     }
 
     if (type === 'raise') {
-      const xid = nameToXidGuess(m[1].trim());
-      const amt = parseAmount(m[2]);
+      const xid = nameToXidGuess(cleanName(m[1]));
+      const amt = m[2] ? parseAmount(m[2]) : 0;
       noteBetSizing(xid, amt, hand.pot); // pot BEFORE this raise
       addContribution(hand, xid, amt);
       recordStreetAction(xid, 'raise', hand);
@@ -664,7 +692,7 @@
     }
 
     if (type === 'allin') {
-      const xid = nameToXidGuess(m[1].trim());
+      const xid = nameToXidGuess(cleanName(m[1]));
       const amt = m[2] ? parseAmount(m[2]) : 0;
       if (amt) { noteBetSizing(xid, amt, hand.pot); addContribution(hand, xid, amt); }
       recordStreetAction(xid, 'raise', hand);
@@ -693,7 +721,7 @@
     }
 
     if (type === 'shows') {
-      const xid = nameToXidGuess(m[1].trim());
+      const xid = nameToXidGuess(cleanName(m[1]));
       const p = getPlayer(xid);
       p.wtsd += 1;
       hand.shown[xid] = squish(m[2], 40);
@@ -706,8 +734,8 @@
       // Deferred rather than settled immediately: split pots produce multiple
       // consecutive "X wins $Y" lines, and settling on the first would reset
       // hand state before the second winner's line arrives.
-      const xid = nameToXidGuess(m[1].trim());
-      const amt = parseAmount(m[2]);
+      const xid = nameToXidGuess(cleanName(m[1]));
+      const amt = m[2] ? parseAmount(m[2]) : 0;
       hand.winners.push({ xid, amount: amt });
       return;
     }
@@ -721,6 +749,11 @@
   // field names would multiply storage for no benefit.
   function logAction(hand, xid, action, amount) {
     hand.actions.push({ x: xid, a: action, amt: amount || 0, s: hand.street });
+    // Seat scraping can't identify players on every table layout, and when it
+    // fails dealtInXids stays empty — which would leave `hands` at zero and make
+    // EVERY rate stat undefined. Treat anyone observed acting as dealt in.
+    hand.dealtInXids.add(xid);
+    if (action !== 'fold') hand.playersIn.add(xid);
     // Preflop action runs UTG -> ... -> BTN -> SB -> BB, so the order in which
     // players first act (blinds excluded) reconstructs the seating rotation
     // without needing to identify the dealer button in the DOM.
@@ -813,8 +846,15 @@
     touchSession(0, heroXid && hand.dealtInXids.has(heroXid));
 
     if (hand.winners.length > 0) {
+      // If the log didn't print an amount, split the pot we tracked. Leaving it
+      // at 0 would score a WIN as losing everything the winner had contributed.
+      const unknown = hand.winners.filter((w) => !w.amount).length;
+      const fallbackShare = unknown ? Math.round(hand.pot / hand.winners.length) : 0;
       const wonByXid = {};
-      hand.winners.forEach((w) => { wonByXid[w.xid] = (wonByXid[w.xid] || 0) + w.amount; });
+      hand.winners.forEach((w) => {
+        const amt = w.amount || fallbackShare;
+        wonByXid[w.xid] = (wonByXid[w.xid] || 0) + amt;
+      });
 
       const contributors = Object.keys(hand.contributions);
       const totalContributed = contributors.reduce((sum, xid) => sum + hand.contributions[xid], 0) || 1;
@@ -856,7 +896,7 @@
       actions: hand.actions,
       winners: hand.winners,
       shown: hand.shown,
-      heroCards: hand.heroCardsAtShowdown || null,
+      heroCards: hand.heroCards || null,
     });
     const limit = STORE.settings.historyLimit || 200;
     if (STORE.hands.length > limit) STORE.hands.length = limit;
@@ -947,9 +987,15 @@
         mut.addedNodes.forEach((node) => {
           if (isOwnNode(node)) return;
           const text = (node.textContent || '').trim();
-          if (!text || text.length > 300) return;
-          if (recentlyHandled(text)) return;
-          handleLogLine(text);
+          if (!text || text.length > 1000) return;
+          // A single inserted node can carry several rendered lines; parse each
+          // separately or a multi-line blob matches nothing at all.
+          text.split('\n').forEach((raw) => {
+            const line = raw.trim();
+            if (!line || line.length > 300) return;
+            if (recentlyHandled(line)) return;
+            handleLogLine(line);
+          });
         });
       }
     });
@@ -957,10 +1003,24 @@
     return true;
   }
 
-  function isHeroTurn() {
-    const buttons = document.querySelectorAll(SELECTORS.actionButtons);
-    return buttons.length > 0;
+  const ACTION_WORD_RE = /^(fold|check|call|bet|raise|all[\s-]?in)\b/i;
+
+  // The configured selector matched nothing on the real table, which left the
+  // coach permanently hidden. Fall back to finding clickable elements whose
+  // label is an action word.
+  function countActionControls() {
+    const direct = document.querySelectorAll(SELECTORS.actionButtons);
+    if (direct.length) return direct.length;
+    let n = 0;
+    document.querySelectorAll('button, [role="button"]').forEach((el) => {
+      if (el.closest('[class^="tph-"], [class*=" tph-"]')) return;
+      const t = (el.textContent || '').trim();
+      if (t && t.length < 24 && ACTION_WORD_RE.test(t)) n++;
+    });
+    return n;
   }
+
+  function isHeroTurn() { return countActionControls() > 0; }
 
   function bootstrapTableWatchers() {
     heroXid = findHeroXid();
@@ -1083,11 +1143,14 @@
     return hands;
   }
 
+  const rangeCache = {};
   function parseRange(rangeStr) {
+    if (rangeCache[rangeStr]) return rangeCache[rangeStr];
     const all = new Set();
     rangeStr.split(',').forEach((tok) => {
       expandRangeToken(tok.trim()).forEach((h) => all.add(h));
     });
+    rangeCache[rangeStr] = all;
     return all;
   }
 
@@ -1382,9 +1445,17 @@
   // ===========================================================================
 
   function buildCoachAdvice() {
-    if (!isHeroTurn() || !currentHand) return null;
+    if (!currentHand) return null;
     const hand = currentHand;
     const heroCards = readHeroCards();
+    // Remember them while they're on screen — they're gone by the time the hand
+    // is written to history.
+    if (heroCards.length === 2) hand.heroCards = heroCards;
+
+    // Prefer real turn detection, but this table exposes no recognisable action
+    // buttons; rather than never showing advice, fall back to "your hole cards
+    // are visible", which means you're in a live hand.
+    if (!isHeroTurn() && heroCards.length !== 2) return null;
     const board = readBoardCards();
     const villainXid = hand.lastAggressor;
     const betFacing = villainXid ? (hand.streetContributions[villainXid] || 0) : 0;
@@ -1525,7 +1596,7 @@
     document.querySelectorAll('.tph-badge').forEach((el) => el.remove());
     const seats = document.querySelectorAll(SELECTORS.seatContainer);
     seats.forEach((seat) => {
-      const xid = resolveXidFromSeat(seat);
+      const xid = resolveSeatKey(seat);
       if (!xid || xid === heroXid) return;
       const player = STORE.players[xid];
       const rect = seat.getBoundingClientRect();
