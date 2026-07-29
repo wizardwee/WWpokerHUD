@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.3.0
+// @version      0.4.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -127,6 +127,7 @@
     gistId: '',
     lastSync: 0,
     calibrationMode: false,
+    gearPos: null, // {left, top} once you've dragged the HUD button somewhere
   };
 
   function emptyPlayer(xid, name) {
@@ -1053,10 +1054,13 @@
     .tph-close { position: absolute; top: 8px; right: 10px; cursor: pointer; }
     /* Raised well above the bottom edge so it doesn't sit under Torn PDA's own
        native controls, enlarged and labelled so it's unmistakably OUR button. */
+    /* touch-action:none so dragging the button doesn't scroll the page under it */
     .tph-gear { position: fixed; z-index: 100000; bottom: 96px; right: 12px; background: #b8342e; color: #fff;
       border: 2px solid #fff; border-radius: 22px; height: 44px; min-width: 44px; padding: 0 12px;
       display: flex; align-items: center; gap: 5px; font: bold 13px/1 -apple-system, sans-serif;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.5); cursor: pointer; }
+      box-shadow: 0 2px 8px rgba(0,0,0,0.5); cursor: grab;
+      touch-action: none; user-select: none; -webkit-user-select: none; }
+    .tph-gear.tph-dragging { cursor: grabbing; opacity: 0.85; }
     .tph-coach { position: fixed; z-index: 99998; bottom: 150px; right: 12px; left: 12px; background: rgba(20,20,24,0.95);
       color: #cde; border: 1px solid #556; border-radius: 8px; padding: 8px; font: 12px/1.4 -apple-system, sans-serif; }
     .tph-calib { position: fixed; z-index: 99999; top: 4px; left: 4px; right: 4px; max-height: 62%; overflow-y: auto;
@@ -1427,12 +1431,91 @@
     });
   }
 
+  // Keep the button fully on screen — also re-applied on rotate/resize so it
+  // can't end up stranded off the edge in the other orientation.
+  function setGearPos(el, left, top) {
+    const w = el.offsetWidth || 60;
+    const h = el.offsetHeight || 44;
+    const L = Math.min(Math.max(0, left), Math.max(0, window.innerWidth - w));
+    const T = Math.min(Math.max(0, top), Math.max(0, window.innerHeight - h));
+    el.style.left = L + 'px';
+    el.style.top = T + 'px';
+    el.style.right = 'auto';
+    el.style.bottom = 'auto';
+  }
+
+  function applyGearPosition(el) {
+    const p = STORE.settings.gearPos;
+    if (p && typeof p.left === 'number' && typeof p.top === 'number') setGearPos(el, p.left, p.top);
+  }
+
+  // Drag to move, tap to open settings. A small movement threshold separates the
+  // two, so a slightly-imprecise tap still opens the panel instead of nudging
+  // the button and doing nothing.
+  const DRAG_THRESHOLD_PX = 6;
+
+  function makeDraggable(el, onTap) {
+    let dragging = false;
+    let moved = false;
+    let startX = 0, startY = 0, originLeft = 0, originTop = 0, pid = null;
+
+    el.addEventListener('pointerdown', (e) => {
+      dragging = true;
+      moved = false;
+      pid = e.pointerId;
+      const rect = el.getBoundingClientRect();
+      originLeft = rect.left;
+      originTop = rect.top;
+      startX = e.clientX;
+      startY = e.clientY;
+      if (el.setPointerCapture) { try { el.setPointerCapture(pid); } catch (err) { /* ignore */ } }
+      e.preventDefault();
+    });
+
+    el.addEventListener('pointermove', (e) => {
+      if (!dragging || e.pointerId !== pid) return;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      if (!moved && Math.sqrt(dx * dx + dy * dy) < DRAG_THRESHOLD_PX) return;
+      if (!moved) el.classList.add('tph-dragging');
+      moved = true;
+      setGearPos(el, originLeft + dx, originTop + dy);
+      e.preventDefault();
+    });
+
+    const endDrag = (e) => {
+      if (!dragging || (e.pointerId != null && e.pointerId !== pid)) return;
+      dragging = false;
+      el.classList.remove('tph-dragging');
+      if (el.releasePointerCapture && pid != null) {
+        try { el.releasePointerCapture(pid); } catch (err) { /* ignore */ }
+      }
+      if (moved) {
+        const rect = el.getBoundingClientRect();
+        STORE.settings.gearPos = { left: rect.left, top: rect.top };
+        saveStore();
+      } else {
+        onTap();
+      }
+    };
+
+    el.addEventListener('pointerup', endDrag);
+    el.addEventListener('pointercancel', endDrag);
+  }
+
   function renderGear() {
     const gear = document.createElement('div');
     gear.className = 'tph-gear';
     gear.innerHTML = '⚙ <span>HUD</span>';
-    gear.addEventListener('click', () => { settingsOpen = !settingsOpen; renderSettingsPanel(); });
+    gear.title = 'Tap to open settings — drag to move';
     document.body.appendChild(gear);
+    applyGearPosition(gear);
+    makeDraggable(gear, () => { settingsOpen = !settingsOpen; renderSettingsPanel(); });
+
+    window.addEventListener('resize', () => {
+      const rect = gear.getBoundingClientRect();
+      setGearPos(gear, rect.left, rect.top);
+    });
   }
 
   // Shown once on load. Serves two jobs: (1) proves the script actually injected
@@ -1446,7 +1529,7 @@
     banner.innerHTML =
       '<span class="tph-banner-x">✕</span>' +
       '🃏 <b>Torn Poker HUD loaded.</b> Tap here to open Settings &amp; turn on Calibration mode. ' +
-      '(Or use the red ⚙ HUD button, lower-right.)';
+      '(Or tap the red ⚙ HUD button — <b>drag it</b> to move it out of your way.)';
     banner.addEventListener('click', (e) => {
       if (e.target.classList.contains('tph-banner-x')) { banner.remove(); return; }
       settingsOpen = true;
