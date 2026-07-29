@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.5.0
+// @version      0.5.1
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -203,13 +203,31 @@
     return STORE.players[xid];
   }
 
+  // Credentials must never leave this device. exportJson() feeds BOTH the
+  // user-facing Copy button and the Gist upload, so anything left in here would
+  // be written into the gist and into any exported JSON that gets pasted
+  // somewhere public. Strip secrets at the single choke point.
+  const LOCAL_ONLY_SETTINGS = ['githubToken'];
+
+  function sanitizedStore() {
+    const settings = { ...STORE.settings };
+    LOCAL_ONLY_SETTINGS.forEach((k) => { delete settings[k]; });
+    return { ...STORE, settings };
+  }
+
   function exportJson() {
-    return JSON.stringify(STORE, null, 2);
+    return JSON.stringify(sanitizedStore(), null, 2);
   }
 
   function importJson(text) {
     const parsed = JSON.parse(text);
-    parsed.settings = { ...DEFAULT_SETTINGS, ...(parsed.settings || {}) };
+    // Keep this device's own credentials — an import is data, not a re-auth.
+    const preserved = {};
+    LOCAL_ONLY_SETTINGS.forEach((k) => { preserved[k] = STORE.settings[k]; });
+    parsed.settings = { ...DEFAULT_SETTINGS, ...(parsed.settings || {}), ...preserved };
+    parsed.players = parsed.players || {};
+    parsed.hands = parsed.hands || [];
+    parsed.hero = parsed.hero || { hands: 0, netChips: 0 };
     STORE = parsed;
     saveStore();
   }
