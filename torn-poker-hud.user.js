@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.4.0
+// @version      0.5.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -128,7 +128,18 @@
     lastSync: 0,
     calibrationMode: false,
     gearPos: null, // {left, top} once you've dragged the HUD button somewhere
+    historyLimit: 200, // how many recent hands to keep for the History tab
   };
+
+  function emptyStore(settings) {
+    return {
+      version: 1,
+      players: {},
+      hands: [],   // newest-first ring buffer of recent hand records
+      hero: { hands: 0, netChips: 0 },
+      settings: settings || { ...DEFAULT_SETTINGS },
+    };
+  }
 
   function emptyPlayer(xid, name) {
     return {
@@ -159,18 +170,17 @@
   function loadStore() {
     let raw;
     try { raw = localStorage.getItem(STORAGE_KEY); } catch (e) { raw = null; }
-    if (!raw) {
-      return { version: 1, players: {}, hero: { hands: 0, netChips: 0 }, settings: { ...DEFAULT_SETTINGS } };
-    }
+    if (!raw) return emptyStore();
     try {
       const parsed = JSON.parse(raw);
       parsed.settings = { ...DEFAULT_SETTINGS, ...(parsed.settings || {}) };
       parsed.players = parsed.players || {};
+      parsed.hands = parsed.hands || [];
       parsed.hero = parsed.hero || { hands: 0, netChips: 0 };
       return parsed;
     } catch (e) {
       console.warn('[TornPokerHUD] Corrupt storage, resetting.', e);
-      return { version: 1, players: {}, hero: { hands: 0, netChips: 0 }, settings: { ...DEFAULT_SETTINGS } };
+      return emptyStore();
     }
   }
 
@@ -205,13 +215,19 @@
   }
 
   function resetAllData() {
-    STORE = { version: 1, players: {}, hero: { hands: 0, netChips: 0 }, settings: { ...STORE.settings } };
+    STORE = emptyStore({ ...STORE.settings });
     saveStore();
   }
 
   // Merge remote + local: per player, keep whichever record has more observed hands.
   function mergeStores(local, remote) {
-    const merged = { version: 1, players: { ...local.players }, hero: local.hero, settings: local.settings };
+    const merged = {
+      version: 1,
+      players: { ...local.players },
+      hands: mergeHands(local.hands || [], remote.hands || [], local.settings.historyLimit),
+      hero: local.hero,
+      settings: local.settings,
+    };
     for (const xid of Object.keys(remote.players || {})) {
       const remotePlayer = remote.players[xid];
       const localPlayer = merged.players[xid];
@@ -223,6 +239,16 @@
       merged.hero = remote.hero;
     }
     return merged;
+  }
+
+  // Hands are immutable once written, so a union deduped by timestamp is safe —
+  // this keeps history from both devices rather than letting one overwrite.
+  function mergeHands(a, b, limit) {
+    const seen = new Set();
+    return a.concat(b)
+      .filter((h) => { const k = h.t + ':' + (h.pot || 0); if (seen.has(k)) return false; seen.add(k); return true; })
+      .sort((x, y) => y.t - x.t)
+      .slice(0, limit || 200);
   }
 
   // ===========================================================================
@@ -412,6 +438,8 @@
       dealtInXids: dealtIn,    // immutable — used as the "hands observed" denominator
       playersIn: new Set(dealtIn), // mutable — shrinks as players fold, used for opportunity counts
       winners: [],             // {xid, amount}[] — supports split pots, applied at hand end
+      actions: [],             // {x,a,amt,s}[] — replayable action log for the History tab
+      shown: {},               // xid -> cards revealed at showdown
       preflopRaiseEvents: 0,   // total raise events preflop (not unique raisers) — 2nd = a 3-bet
       lastAggressor: null,
       aggressorByStreet: {},
@@ -539,6 +567,7 @@
       const xid = nameToXidGuess(m[1].trim());
       const amt = parseAmount(m[2]);
       addContribution(hand, xid, amt);
+      logAction(hand, xid, type === 'postSB' ? 'sb' : 'bb', amt);
       hand.playersIn.add(xid);
       return;
     }
@@ -546,6 +575,7 @@
     if (type === 'fold') {
       const xid = nameToXidGuess(m[1].trim());
       recordStreetAction(xid, 'fold', hand);
+      logAction(hand, xid, 'fold', 0);
       if (hand.street === 'preflop' && hand.threeBetActive && xid !== hand.threeBettorXid) {
         getPlayer(xid).foldTo3BetMade += 1;
         saveStore();
@@ -560,6 +590,7 @@
     if (type === 'check') {
       const xid = nameToXidGuess(m[1].trim());
       recordStreetAction(xid, 'check', hand);
+      logAction(hand, xid, 'check', 0);
       return;
     }
 
@@ -568,6 +599,7 @@
       const amt = parseAmount(m[2]);
       addContribution(hand, xid, amt);
       recordStreetAction(xid, 'call', hand);
+      logAction(hand, xid, 'call', amt);
       maybeCountVpip(xid, hand);
       return;
     }
@@ -577,6 +609,7 @@
       const amt = parseAmount(m[2]);
       addContribution(hand, xid, amt);
       recordStreetAction(xid, 'bet', hand);
+      logAction(hand, xid, 'bet', amt);
       maybeCountVpip(xid, hand);
       markAggressor(xid, hand);
       maybeCountCbet(xid, hand);
@@ -588,6 +621,7 @@
       const amt = parseAmount(m[2]);
       addContribution(hand, xid, amt);
       recordStreetAction(xid, 'raise', hand);
+      logAction(hand, xid, 'raise', amt);
       maybeCountVpip(xid, hand);
       if (hand.street === 'preflop') hand.preflopRaiseEvents += 1;
       maybeCountPfr(xid, hand);
@@ -613,6 +647,8 @@
       const xid = nameToXidGuess(m[1].trim());
       const p = getPlayer(xid);
       p.wtsd += 1;
+      hand.shown[xid] = squish(m[2], 40);
+      logAction(hand, xid, 'shows', 0);
       saveStore();
       return;
     }
@@ -630,6 +666,12 @@
 
   function parseAmount(str) {
     return parseInt(String(str).replace(/,/g, ''), 10) || 0;
+  }
+
+  // Short keys — this array is persisted for every retained hand, so verbose
+  // field names would multiply storage for no benefit.
+  function logAction(hand, xid, action, amount) {
+    hand.actions.push({ x: xid, a: action, amt: amount || 0, s: hand.street });
   }
 
   function addContribution(hand, xid, amt) {
@@ -732,8 +774,63 @@
       }
     }
 
+    recordHandHistory(hand);
     saveStore();
     finalizeHand();
+  }
+
+  // Keep one global newest-first list rather than a per-player copy: a hand
+  // involves several players, and the History tab just filters this list.
+  function recordHandHistory(hand) {
+    if (!hand.actions.length && !hand.winners.length) return; // nothing happened
+    STORE.hands.unshift({
+      t: Date.now(),
+      street: hand.street,
+      pot: hand.pot,
+      players: Array.from(hand.dealtInXids),
+      actions: hand.actions,
+      winners: hand.winners,
+      shown: hand.shown,
+      heroCards: hand.heroCardsAtShowdown || null,
+    });
+    const limit = STORE.settings.historyLimit || 200;
+    if (STORE.hands.length > limit) STORE.hands.length = limit;
+  }
+
+  function playerDisplayName(xid) {
+    const p = STORE.players[xid];
+    if (p && p.name) return p.name;
+    return String(xid).startsWith('name:') ? String(xid).slice(5) : '#' + xid;
+  }
+
+  // Render one stored hand as a compact, readable summary.
+  function formatHand(h, focusXid) {
+    const when = new Date(h.t).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    const lines = [`[${when}] pot $${(h.pot || 0).toLocaleString()} — reached ${h.street}`];
+    const byStreet = {};
+    (h.actions || []).forEach((a) => { (byStreet[a.s] = byStreet[a.s] || []).push(a); });
+    ['preflop', 'flop', 'turn', 'river'].forEach((street) => {
+      if (!byStreet[street]) return;
+      const acts = byStreet[street].map((a) => {
+        const nm = playerDisplayName(a.x);
+        const mark = (focusXid && a.x === focusXid) ? '*' : '';
+        const amt = a.amt ? ` $${a.amt.toLocaleString()}` : '';
+        return `${mark}${nm} ${a.a}${amt}`;
+      }).join(', ');
+      lines.push(`  ${street}: ${acts}`);
+    });
+    Object.keys(h.shown || {}).forEach((xid) => {
+      lines.push(`  showdown: ${playerDisplayName(xid)} shows ${h.shown[xid]}`);
+    });
+    (h.winners || []).forEach((w) => {
+      lines.push(`  → ${playerDisplayName(w.xid)} wins $${(w.amount || 0).toLocaleString()}`);
+    });
+    return lines.join('\n');
+  }
+
+  function handsInvolving(xid) {
+    return (STORE.hands || []).filter((h) => (h.players || []).includes(xid)
+      || (h.actions || []).some((a) => a.x === xid));
   }
 
   function finalizeHand() {
@@ -1051,6 +1148,13 @@
     .tph-panel .tph-tabs { display: flex; gap: 6px; margin-bottom: 8px; }
     .tph-panel .tph-tab { padding: 4px 8px; border: 1px solid #555; border-radius: 4px; cursor: pointer; }
     .tph-panel .tph-tab.active { background: #333; }
+    .tph-panel button { background: #234; color: #cfe; border: 1px solid #567; border-radius: 4px;
+      padding: 6px 10px; margin: 3px 4px 3px 0; font: 12px -apple-system, sans-serif; cursor: pointer; }
+    .tph-ptable { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12px; }
+    .tph-ptable th { text-align: left; opacity: 0.6; font-weight: normal; border-bottom: 1px solid #444; padding: 3px 4px; }
+    .tph-ptable td { padding: 6px 4px; border-bottom: 1px solid #2a2a2e; }
+    .tph-prow { cursor: pointer; }
+    .tph-prow:active { background: #2c2c33; }
     .tph-close { position: absolute; top: 8px; right: 10px; cursor: pointer; }
     /* Raised well above the bottom edge so it doesn't sit under Torn PDA's own
        native controls, enlarged and labelled so it's unmistakably OUR button. */
@@ -1152,6 +1256,7 @@
       <div class="tph-tabs">
         <div class="tph-tab ${openPlayerTab === 'stats' ? 'active' : ''}" data-tab="stats">Stats</div>
         <div class="tph-tab ${openPlayerTab === 'report' ? 'active' : ''}" data-tab="report">Report</div>
+        <div class="tph-tab ${openPlayerTab === 'history' ? 'active' : ''}" data-tab="history">History</div>
         <div class="tph-tab ${openPlayerTab === 'notes' ? 'active' : ''}" data-tab="notes">Notes</div>
       </div>
       <div class="tph-tab-body"></div>
@@ -1183,6 +1288,19 @@
       body.querySelector('.tph-copy-report').addEventListener('click', () => {
         navigator.clipboard && navigator.clipboard.writeText(text);
       });
+    } else if (openPlayerTab === 'history') {
+      const hands = handsInvolving(openPlayerXid);
+      if (!hands.length) {
+        body.innerHTML = '<i>No hands recorded with this player yet.</i>';
+      } else {
+        const text = hands.slice(0, 40).map((h) => formatHand(h, openPlayerXid)).join('\n\n');
+        body.innerHTML = `<div style="opacity:.7;margin-bottom:6px">${hands.length} hand(s) recorded — their actions marked *</div>`
+          + `<pre style="white-space:pre-wrap;font:11px/1.35 monospace">${escapeHtml(text)}</pre>`
+          + `<button class="tph-copy-hist">Copy history</button>`;
+        body.querySelector('.tph-copy-hist').addEventListener('click', () => {
+          navigator.clipboard && navigator.clipboard.writeText(text);
+        });
+      }
     } else if (openPlayerTab === 'notes') {
       // Set .value (not innerHTML) so a note containing "</textarea>" or other
       // markup is treated as literal text and can't break out of the field.
@@ -1199,6 +1317,66 @@
     if (openPlayerXid && openPlayerTab === 'report') renderPlayerPanel();
   }
 
+  // Browse every tracked player. Seat badges depend on reading each seat's
+  // profile link, which some tables don't render — this list is the reliable
+  // way to reach a player's stats, report and history regardless.
+  let playersListOpen = false;
+  let playersFilter = '';
+
+  function renderPlayersList() {
+    document.querySelectorAll('.tph-players').forEach((el) => el.remove());
+    if (!playersListOpen) return;
+
+    const all = Object.keys(STORE.players)
+      .map((xid) => ({ xid, p: STORE.players[xid] }))
+      .filter(({ p }) => !playersFilter || (p.name || '').toLowerCase().includes(playersFilter.toLowerCase()))
+      .sort((a, b) => (b.p.hands || 0) - (a.p.hands || 0));
+
+    const panel = document.createElement('div');
+    panel.className = 'tph-panel tph-players';
+    const rows = all.length
+      ? all.map(({ xid, p }) => {
+        const r = computeRates(p);
+        const pl = Math.round(p.plChipsEst || 0);
+        return `<tr data-xid="${escapeHtml(xid)}" class="tph-prow">
+            <td><b>${escapeHtml(p.name)}</b></td>
+            <td>${classify(p)}</td>
+            <td>${p.hands}</td>
+            <td>${fmtPct(r.vpip)}/${fmtPct(r.pfr)}</td>
+            <td style="color:${pl >= 0 ? '#7ed957' : '#ff6b6b'}">${pl >= 0 ? '+' : ''}${pl.toLocaleString()}</td>
+          </tr>`;
+      }).join('')
+      : `<tr><td colspan="5"><i>No players tracked yet.</i></td></tr>`;
+
+    panel.innerHTML = `
+      <span class="tph-close">✕</span>
+      <h3>Tracked players (${all.length})</h3>
+      <input class="tph-pfilter" placeholder="Filter by name…" value="${escapeHtml(playersFilter)}" style="width:60%">
+      <table class="tph-ptable">
+        <tr><th>Name</th><th>Type</th><th>Hands</th><th>VPIP/PFR</th><th>P/L</th></tr>
+        ${rows}
+      </table>
+      <div style="opacity:.7;margin-top:8px">Total hands recorded: ${(STORE.hands || []).length} &nbsp;|&nbsp; Your net: ${STORE.hero.netChips >= 0 ? '+' : ''}${Math.round(STORE.hero.netChips).toLocaleString()}</div>
+    `;
+    document.body.appendChild(panel);
+
+    panel.querySelector('.tph-close').addEventListener('click', () => { playersListOpen = false; renderPlayersList(); });
+    const filterEl = panel.querySelector('.tph-pfilter');
+    filterEl.addEventListener('input', (e) => {
+      playersFilter = e.target.value;
+      renderPlayersList();
+      const again = document.querySelector('.tph-pfilter');
+      if (again) { again.focus(); again.setSelectionRange(again.value.length, again.value.length); }
+    });
+    panel.querySelectorAll('.tph-prow').forEach((row) => {
+      row.addEventListener('click', () => {
+        playersListOpen = false;
+        renderPlayersList();
+        openPlayerPanel(row.dataset.xid);
+      });
+    });
+  }
+
   let settingsOpen = false;
 
   function renderSettingsPanel() {
@@ -1209,6 +1387,7 @@
     panel.innerHTML = `
       <span class="tph-close">✕</span>
       <h3>Settings</h3>
+      <button class="tph-open-players" style="width:100%;padding:9px;margin-bottom:10px">👥 View tracked players &amp; hand history</button>
       <label>Min hands before rating: <input type="number" class="tph-min-hands" value="${STORE.settings.minHands}" style="width:60px"></label><br><br>
       <label><input type="checkbox" class="tph-calib-toggle" ${STORE.settings.calibrationMode ? 'checked' : ''}> Calibration mode</label><br><br>
       <h4>GitHub Gist sync</h4>
@@ -1229,6 +1408,12 @@
     panel.querySelector('.tph-export').value = exportJson();
 
     panel.querySelector('.tph-close').addEventListener('click', () => { settingsOpen = false; renderSettingsPanel(); });
+    panel.querySelector('.tph-open-players').addEventListener('click', () => {
+      settingsOpen = false;
+      renderSettingsPanel();
+      playersListOpen = true;
+      renderPlayersList();
+    });
     panel.querySelector('.tph-min-hands').addEventListener('change', (e) => {
       STORE.settings.minHands = parseInt(e.target.value, 10) || 20;
       saveStore();
