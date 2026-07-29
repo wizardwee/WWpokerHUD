@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.2.0
+// @version      0.3.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -741,21 +741,56 @@
   }
 
   let logObserver = null;
+  let logObserverTarget = null;
+  let logUsingFallback = false;
+
+  // Any node we injected ourselves. The body-wide fallback observer below would
+  // otherwise see our own badges/panels being added and try to parse them as
+  // game log lines — a feedback loop.
+  function isOwnNode(node) {
+    if (!node || node.nodeType !== 1) return false;
+    return !!(node.closest && node.closest('[class^="tph-"], [class*=" tph-"]'));
+  }
+
+  // The same log line can arrive via several mutation records (once for the row,
+  // once for an inner span), and the body-wide fallback makes that much more
+  // likely. Suppress an identical line seen again within a short window —
+  // but not longer, since "X folds" legitimately recurs across hands.
+  const recentLines = new Map();
+  const DEDUP_MS = 1500;
+  function recentlyHandled(text) {
+    const now = Date.now();
+    for (const [k, t] of recentLines) if (now - t > DEDUP_MS) recentLines.delete(k);
+    if (recentLines.has(text)) return true;
+    recentLines.set(text, now);
+    return false;
+  }
 
   function attachLogObserver() {
     const container = document.querySelector(SELECTORS.logContainer);
-    if (!container) return false;
+    // Fall back to watching the whole document when the log container selector
+    // doesn't match. Less efficient, but it means action tracking still works
+    // on a page whose class names we haven't calibrated yet.
+    const target = container || document.body;
+    if (!target) return false;
+
+    if (logObserver && logObserverTarget === target && logObserverTarget.isConnected) return true;
     if (logObserver) logObserver.disconnect();
 
+    logUsingFallback = !container;
+    logObserverTarget = target;
     logObserver = new MutationObserver((mutations) => {
       for (const mut of mutations) {
         mut.addedNodes.forEach((node) => {
-          const text = node.textContent || '';
-          if (text) handleLogLine(text);
+          if (isOwnNode(node)) return;
+          const text = (node.textContent || '').trim();
+          if (!text || text.length > 300) return;
+          if (recentlyHandled(text)) return;
+          handleLogLine(text);
         });
       }
     });
-    logObserver.observe(container, { childList: true, subtree: true });
+    logObserver.observe(target, { childList: true, subtree: true });
     return true;
   }
 
@@ -1024,9 +1059,15 @@
       box-shadow: 0 2px 8px rgba(0,0,0,0.5); cursor: pointer; }
     .tph-coach { position: fixed; z-index: 99998; bottom: 150px; right: 12px; left: 12px; background: rgba(20,20,24,0.95);
       color: #cde; border: 1px solid #556; border-radius: 8px; padding: 8px; font: 12px/1.4 -apple-system, sans-serif; }
-    .tph-calib { position: fixed; z-index: 99999; top: 4px; left: 4px; right: 4px; max-height: 40%; overflow-y: auto;
-      background: rgba(10,10,10,0.95); color: #9f9; border: 1px solid #494; border-radius: 6px; padding: 8px;
+    .tph-calib { position: fixed; z-index: 99999; top: 4px; left: 4px; right: 4px; max-height: 62%; overflow-y: auto;
+      background: rgba(10,10,10,0.97); color: #9f9; border: 1px solid #494; border-radius: 6px; padding: 8px;
       font: 10px/1.3 monospace; }
+    .tph-calib .tph-calib-off { float: right; color: #f88; border: 1px solid #a44; border-radius: 4px;
+      padding: 1px 5px; margin-left: 6px; cursor: pointer; }
+    .tph-calib button { background: #234; color: #cfe; border: 1px solid #567; border-radius: 4px;
+      padding: 5px 9px; margin: 4px 4px 4px 0; font: 11px -apple-system, sans-serif; cursor: pointer; }
+    .tph-calib-out { width: 100%; height: 150px; background: #000; color: #9f9; border: 1px solid #494;
+      font: 9px/1.25 monospace; white-space: pre; }
     .tph-banner { position: fixed; z-index: 100001; top: 8px; left: 8px; right: 8px; background: #1c6b3a;
       color: #fff; border: 2px solid #4ade80; border-radius: 8px; padding: 10px 12px;
       font: 13px/1.35 -apple-system, sans-serif; box-shadow: 0 2px 10px rgba(0,0,0,0.5); cursor: pointer; }
@@ -1224,22 +1265,166 @@
     return 'Not connected.';
   }
 
+  // --- Deep scan: dump the page's real structure ------------------------------
+  // Torn's class names are hashed, so rather than keep guessing them blind this
+  // reports what's actually on the page — as copyable text, since a phone has no
+  // usable devtools.
+
+  function squish(s, max) {
+    const t = String(s || '').replace(/\s+/g, ' ').trim();
+    return t.length > max ? t.slice(0, max) + '…' : t;
+  }
+
+  function elSig(el) {
+    if (!el || el.nodeType !== 1) return '(none)';
+    const cls = (typeof el.className === 'string' ? el.className : '').trim().replace(/\s+/g, '.');
+    return el.tagName + (el.id ? '#' + el.id : '') + (cls ? '.' + cls : '');
+  }
+
+  function ancestry(el, levels) {
+    const out = [];
+    let cur = el;
+    for (let i = 0; i < levels && cur; i++) { out.push(elSig(cur)); cur = cur.parentElement; }
+    return out.join('\n     ^ ');
+  }
+
+  function selectorAlternatives(sel) {
+    return sel.split(',').map((s) => s.trim()).filter(Boolean);
+  }
+
+  function countSel(sel) {
+    try { return document.querySelectorAll(sel).length; } catch (e) { return -1; }
+  }
+
+  // CSS-module class names look like "playerWrapper___a1B2c". The hash differs
+  // per build but the base name is stable — and the base is all a
+  // [class*="base___"] selector needs.
+  function classVocab(limit) {
+    const counts = {};
+    document.querySelectorAll('body *').forEach((el) => {
+      const cn = typeof el.className === 'string' ? el.className : '';
+      cn.split(/\s+/).forEach((tok) => {
+        const m = /^(.*?___)/.exec(tok);
+        if (m) counts[m[1]] = (counts[m[1]] || 0) + 1;
+      });
+    });
+    return Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, limit)
+      .map(([k, v]) => `${k}(${v})`);
+  }
+
+  // Deepest elements containing a string, so we get the actual text node's
+  // element rather than some huge outer wrapper.
+  function findByText(needle, limit) {
+    const out = [];
+    const all = document.querySelectorAll('body *');
+    for (const el of all) {
+      if (out.length >= limit) break;
+      if (el.closest('[class^="tph-"], [class*=" tph-"]')) continue;
+      if (!(el.textContent || '').includes(needle)) continue;
+      let childHas = false;
+      for (const c of el.children) {
+        if ((c.textContent || '').includes(needle)) { childHas = true; break; }
+      }
+      if (!childHas) out.push(el);
+    }
+    return out;
+  }
+
+  function runDeepScan() {
+    const L = [];
+    L.push('=== TORN POKER HUD DEEP SCAN v0.3.0 ===');
+    L.push('url: ' + location.pathname + location.search);
+    L.push('logObserver: ' + (logObserver ? (logUsingFallback ? 'ACTIVE (body fallback)' : 'ACTIVE (container)') : 'NOT ATTACHED'));
+    L.push('');
+
+    L.push('--- SELECTOR ALTERNATIVES (each tested separately) ---');
+    Object.entries(SELECTORS).forEach(([key, sel]) => {
+      selectorAlternatives(sel).forEach((alt) => L.push(`${countSel(alt)}\t${key}\t${alt}`));
+    });
+    L.push('');
+
+    L.push('--- CSS MODULE CLASS BASES (most common) ---');
+    L.push(classVocab(45).join(' '));
+    L.push('');
+
+    L.push('--- SEATS ---');
+    const seats = document.querySelectorAll(SELECTORS.seatContainer);
+    L.push('matched: ' + seats.length);
+    Array.from(seats).slice(0, 4).forEach((s, i) => {
+      L.push(`seat[${i}] ${elSig(s)}`);
+      const as = s.querySelectorAll('a');
+      L.push(`  anchors(${as.length}): ` + (as.length
+        ? Array.from(as).slice(0, 3).map((a) => a.getAttribute('href')).join(' | ')
+        : 'NONE'));
+      L.push('  text: ' + squish(s.textContent, 90));
+    });
+    L.push('');
+
+    L.push('--- TEXT PROBES (find the log + pot) ---');
+    ['POT', 'called', 'folded', 'checked', 'raised', 'blind', 'Sitting out'].forEach((needle) => {
+      const hits = findByText(needle, 2);
+      L.push(`probe "${needle}": ${hits.length} hit(s)`);
+      hits.forEach((h) => {
+        L.push('  ' + ancestry(h, 4));
+        L.push('   text: ' + squish(h.textContent, 70));
+      });
+    });
+    L.push('');
+
+    L.push('--- HERO CARDS ---');
+    const hc = document.querySelectorAll(SELECTORS.heroCards);
+    L.push('matched: ' + hc.length);
+    if (hc[0]) {
+      L.push('aria-label: ' + hc[0].getAttribute('aria-label'));
+      L.push(ancestry(hc[0], 5));
+    }
+    L.push('');
+
+    L.push('--- UNMATCHED LOG LINES (most recent first) ---');
+    L.push(seenUnmatchedLines.length ? seenUnmatchedLines.slice(0, 20).join('\n') : '(none captured yet)');
+
+    return L.join('\n');
+  }
+
   function renderCalibrationPanel() {
     if (!STORE.settings.calibrationMode) return;
     let el = document.querySelector('.tph-calib');
+    const existingOut = el && el.querySelector('.tph-calib-out');
+    const preserved = existingOut ? existingOut.value : '';
     if (!el) {
       el = document.createElement('div');
       el.className = 'tph-calib';
       document.body.appendChild(el);
     }
-    const counts = Object.entries(SELECTORS).map(([key, sel]) => {
-      let n = 0;
-      try { n = document.querySelectorAll(sel).length; } catch (e) { n = -1; }
-      return `${key}: ${n}`;
-    }).join(' | ');
-    el.innerHTML = `<b>Selector matches</b> — ${counts}<hr>` +
-      `<b>Unmatched log lines (most recent first)</b><br>` +
-      seenUnmatchedLines.slice(0, 15).map((l) => l.replace(/</g, '&lt;')).join('<br>');
+    const counts = Object.entries(SELECTORS).map(([key, sel]) => `${key}: ${countSel(sel)}`).join(' | ');
+    el.innerHTML =
+      `<span class="tph-calib-off">✕ off</span>` +
+      `<b>Selector matches</b> — ${escapeHtml(counts)}<br>` +
+      `<b>Log observer:</b> ${logObserver ? (logUsingFallback ? 'body fallback' : 'container') : 'NOT ATTACHED'}` +
+      ` &nbsp; <b>Lines seen:</b> ${seenUnmatchedLines.length}<hr>` +
+      `<button class="tph-deep">Run deep scan</button> ` +
+      `<button class="tph-deep-copy">Copy report</button><br>` +
+      `<textarea class="tph-calib-out" readonly placeholder="Tap 'Run deep scan', then 'Copy report' and paste it to Claude."></textarea>`;
+
+    const out = el.querySelector('.tph-calib-out');
+    if (preserved) out.value = preserved;
+
+    el.querySelector('.tph-calib-off').addEventListener('click', () => {
+      STORE.settings.calibrationMode = false;
+      saveStore();
+      el.remove();
+    });
+    el.querySelector('.tph-deep').addEventListener('click', () => { out.value = runDeepScan(); });
+    el.querySelector('.tph-deep-copy').addEventListener('click', () => {
+      if (!out.value) out.value = runDeepScan();
+      out.removeAttribute('readonly');
+      out.select();
+      out.setSelectionRange(0, out.value.length); // iOS needs the explicit range
+      try { document.execCommand('copy'); } catch (e) { /* fall through */ }
+      if (navigator.clipboard) navigator.clipboard.writeText(out.value).catch(() => {});
+      out.setAttribute('readonly', '');
+      el.querySelector('.tph-deep-copy').textContent = 'Copied ✓';
+    });
   }
 
   function renderGear() {
