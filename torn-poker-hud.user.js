@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.5.1
+// @version      0.6.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -129,6 +129,8 @@
     calibrationMode: false,
     gearPos: null, // {left, top} once you've dragged the HUD button somewhere
     historyLimit: 200, // how many recent hands to keep for the History tab
+    heroName: '',      // YOUR Torn username. Without it P/L and position can't be attributed.
+    equityIters: 1200, // Monte Carlo samples per equity estimate
   };
 
   function emptyStore(settings) {
@@ -137,6 +139,7 @@
       players: {},
       hands: [],   // newest-first ring buffer of recent hand records
       hero: { hands: 0, netChips: 0 },
+      session: { startedAt: 0, hands: 0, net: 0, lastHandAt: 0 },
       settings: settings || { ...DEFAULT_SETTINGS },
     };
   }
@@ -162,6 +165,8 @@
       },
       wtsd: 0,
       plChipsEst: 0,
+      betSizePctSum: 0, // sum of bet-as-%-of-pot, for average sizing tells
+      betSizeCount: 0,
       notes: '',
       lastSeen: 0,
     };
@@ -177,6 +182,7 @@
       parsed.players = parsed.players || {};
       parsed.hands = parsed.hands || [];
       parsed.hero = parsed.hero || { hands: 0, netChips: 0 };
+      parsed.session = parsed.session || { startedAt: 0, hands: 0, net: 0, lastHandAt: 0 };
       return parsed;
     } catch (e) {
       console.warn('[TornPokerHUD] Corrupt storage, resetting.', e);
@@ -196,8 +202,17 @@
     }, 250);
   }
 
+  // Records written by an older version lack fields added since; backfill from
+  // the template so new stats don't surface as NaN on long-tracked players.
+  function ensurePlayerShape(p, xid) {
+    const t = emptyPlayer(xid, p.name);
+    Object.keys(t).forEach((k) => { if (p[k] === undefined) p[k] = t[k]; });
+    return p;
+  }
+
   function getPlayer(xid, name) {
     if (!STORE.players[xid]) STORE.players[xid] = emptyPlayer(xid, name);
+    else ensurePlayerShape(STORE.players[xid], xid);
     if (name) STORE.players[xid].name = name;
     STORE.players[xid].lastSeen = Date.now();
     return STORE.players[xid];
@@ -430,11 +445,10 @@
     { type: 'call', re: /^(.+?) calls? \$?([\d,]+)/i },
     { type: 'bet', re: /^(.+?) bets? \$?([\d,]+)/i },
     { type: 'raise', re: /^(.+?) raises? to \$?([\d,]+)/i },
-    // NOTE: all-in intentionally NOT matched here yet. Torn's real wording and
-    // (crucially) whether it includes a dollar amount are unknown — matching it
-    // to a no-op handler would silently drop the chips/aggression from an all-in.
-    // Leaving it unmatched surfaces the true wording in the calibration panel so
-    // a correct handler (with amount capture) can be written. See README.
+    // All-in: the amount is optional because it's still unconfirmed whether Torn
+    // prints one. With no amount the action still records as aggression, just
+    // without the chips — strictly better than dropping the event.
+    { type: 'allin', re: /^(.+?)\s+(?:is\s+|goes\s+|went\s+)?all[\s-]?in(?:\s*(?:for|with)?\s*\$?([\d,]+))?/i },
     { type: 'flop', re: /^flop:?\s*(.+)/i },
     { type: 'turn', re: /^turn:?\s*(.+)/i },
     { type: 'river', re: /^river:?\s*(.+)/i },
@@ -458,6 +472,10 @@
       winners: [],             // {xid, amount}[] — supports split pots, applied at hand end
       actions: [],             // {x,a,amt,s}[] — replayable action log for the History tab
       shown: {},               // xid -> cards revealed at showdown
+      sbXid: null,
+      bbXid: null,
+      actionOrder: [],         // first-to-act order preflop, used to derive positions
+      board: [],               // community cards parsed out of the log
       preflopRaiseEvents: 0,   // total raise events preflop (not unique raisers) — 2nd = a 3-bet
       lastAggressor: null,
       aggressorByStreet: {},
@@ -487,24 +505,18 @@
     return xids;
   }
 
+  // Identifying "you" from the DOM is unreliable (this table renders no hero
+  // marker), and with heroXid null NO profit/loss is attributed at all — so a
+  // username typed into Settings takes priority over any DOM guess.
   function findHeroXid() {
+    const configured = (STORE.settings.heroName || '').trim();
+    if (configured) return nameToXidGuess(configured);
     const heroSeat = document.querySelector(SELECTORS.heroSeat);
     if (heroSeat) {
       const xid = resolveXidFromSeat(heroSeat);
       if (xid) return xid;
     }
     return null;
-  }
-
-  function parseCardsFromContainer(container) {
-    if (!container) return [];
-    const cardEls = container.querySelectorAll(SELECTORS.heroCards || '');
-    const cards = [];
-    cardEls.forEach((el) => {
-      const m = CARD_CLASS_RE.exec(el.className || '');
-      if (m) cards.push({ suit: m[1][0].toLowerCase(), rank: m[2].toUpperCase() });
-    });
-    return cards;
   }
 
   function ensureHand() {
@@ -586,6 +598,7 @@
       const amt = parseAmount(m[2]);
       addContribution(hand, xid, amt);
       logAction(hand, xid, type === 'postSB' ? 'sb' : 'bb', amt);
+      if (type === 'postSB') hand.sbXid = xid; else hand.bbXid = xid;
       hand.playersIn.add(xid);
       return;
     }
@@ -625,6 +638,7 @@
     if (type === 'bet') {
       const xid = nameToXidGuess(m[1].trim());
       const amt = parseAmount(m[2]);
+      noteBetSizing(xid, amt, hand.pot); // pot BEFORE this bet
       addContribution(hand, xid, amt);
       recordStreetAction(xid, 'bet', hand);
       logAction(hand, xid, 'bet', amt);
@@ -637,9 +651,24 @@
     if (type === 'raise') {
       const xid = nameToXidGuess(m[1].trim());
       const amt = parseAmount(m[2]);
+      noteBetSizing(xid, amt, hand.pot); // pot BEFORE this raise
       addContribution(hand, xid, amt);
       recordStreetAction(xid, 'raise', hand);
       logAction(hand, xid, 'raise', amt);
+      maybeCountVpip(xid, hand);
+      if (hand.street === 'preflop') hand.preflopRaiseEvents += 1;
+      maybeCountPfr(xid, hand);
+      maybeCountThreeBet(xid, hand);
+      markAggressor(xid, hand);
+      return;
+    }
+
+    if (type === 'allin') {
+      const xid = nameToXidGuess(m[1].trim());
+      const amt = m[2] ? parseAmount(m[2]) : 0;
+      if (amt) { noteBetSizing(xid, amt, hand.pot); addContribution(hand, xid, amt); }
+      recordStreetAction(xid, 'raise', hand);
+      logAction(hand, xid, 'all-in', amt);
       maybeCountVpip(xid, hand);
       if (hand.street === 'preflop') hand.preflopRaiseEvents += 1;
       maybeCountPfr(xid, hand);
@@ -653,6 +682,8 @@
       hand.streetContributions = {};
       hand.cbetOpportunity = {};
       hand.cbetFacedThisStreet = null;
+      const boardCards = parseCardsFromText(m[1] || '');
+      if (boardCards.length) hand.board = (type === 'flop') ? boardCards : hand.board.concat(boardCards);
       if (hand.lastAggressor) {
         hand.cbetOpportunity[hand.lastAggressor] = true;
         getPlayer(hand.lastAggressor).cbetOpp += 1;
@@ -690,6 +721,20 @@
   // field names would multiply storage for no benefit.
   function logAction(hand, xid, action, amount) {
     hand.actions.push({ x: xid, a: action, amt: amount || 0, s: hand.street });
+    // Preflop action runs UTG -> ... -> BTN -> SB -> BB, so the order in which
+    // players first act (blinds excluded) reconstructs the seating rotation
+    // without needing to identify the dealer button in the DOM.
+    if (hand.street === 'preflop' && action !== 'sb' && action !== 'bb'
+        && !hand.actionOrder.includes(xid)) {
+      hand.actionOrder.push(xid);
+    }
+  }
+
+  function noteBetSizing(xid, amt, potBefore) {
+    if (!amt || potBefore <= 0) return;
+    const p = getPlayer(xid);
+    p.betSizePctSum += (amt / potBefore) * 100;
+    p.betSizeCount += 1;
   }
 
   function addContribution(hand, xid, amt) {
@@ -765,6 +810,7 @@
     // in yet still counts as a hand where they didn't VPIP.
     hand.dealtInXids.forEach((xid) => { getPlayer(xid).hands += 1; });
     if (heroXid && hand.dealtInXids.has(heroXid)) STORE.hero.hands += 1;
+    touchSession(0, heroXid && hand.dealtInXids.has(heroXid));
 
     if (hand.winners.length > 0) {
       const wonByXid = {};
@@ -778,6 +824,7 @@
         const heroContributed = hand.contributions[heroXid] || 0;
         const heroDelta = heroWon - heroContributed;
         STORE.hero.netChips += heroDelta;
+        touchSession(heroDelta, false);
 
         // Proportional P/L attribution, stored from HERO's perspective:
         // positive plChipsEst means you're up against that player. Split the
@@ -956,6 +1003,7 @@
       foldTo3Bet: pct(p.foldTo3BetMade, p.foldTo3BetOpp),
       cbet: pct(p.cbetMade, p.cbetOpp),
       wtsd: pct(p.wtsd, p.hands),
+      avgBetPct: p.betSizeCount ? (p.betSizePctSum / p.betSizeCount) : null,
     };
   }
 
@@ -1059,18 +1107,19 @@
     return pot / (pot + bet); // fraction of the time defender must continue
   }
 
-  function optimalBluffRatio(bet, pot) {
-    return bet / (pot + bet); // bluff-combo fraction that keeps a bettor's range balanced
-  }
-
   function gtoBaselineSuggestion(ctx) {
     const { street, position, heroCards, betFacing, pot } = ctx;
     if (street === 'preflop' && heroCards) {
+      // Without a known position an RFI chart is meaningless — say so rather
+      // than quietly assuming a seat and giving confidently wrong advice.
+      if (!position) {
+        return 'GTO baseline: position unknown this hand (set your username in Settings) — no preflop chart applied.';
+      }
       const rfiRange = RFI_RANGES[position] || RFI_RANGES.CO;
       if (!betFacing) {
         return isHandInRange(heroCards[0], heroCards[1], rfiRange)
-          ? 'GTO baseline: open-raise (in your RFI range).'
-          : 'GTO baseline: fold (outside standard opening range).';
+          ? `GTO baseline (${position}): open-raise — in your RFI range.`
+          : `GTO baseline (${position}): fold — outside a standard ${position} opening range.`;
       }
       return isHandInRange(heroCards[0], heroCards[1], THREE_BET_RANGES.IP)
         ? 'GTO baseline: 3-bet (in a standard 3-bet range).'
@@ -1102,24 +1151,272 @@
   }
 
   // ===========================================================================
+  // 12. CARD READING, EQUITY, POSITION, SESSION
+  // ===========================================================================
+
+  const SUIT_CHARS = ['s', 'h', 'd', 'c'];
+  const RANK_WORDS = {
+    ace: 'A', king: 'K', queen: 'Q', jack: 'J', ten: 'T', nine: '9', eight: '8',
+    seven: '7', six: '6', five: '5', four: '4', three: '3', two: '2',
+  };
+
+  function normRank(raw) {
+    const r = String(raw).toUpperCase();
+    return r === '10' ? 'T' : r;
+  }
+
+  // Cards can come from a class name, an aria-label, or plain log text — try all.
+  function parseCardEl(el) {
+    const cn = typeof el.className === 'string' ? el.className : '';
+    const m = CARD_CLASS_RE.exec(cn);
+    if (m) return { suit: m[1][0].toLowerCase(), rank: normRank(m[2]) };
+    const al = (el.getAttribute('aria-label') || '').toLowerCase();
+    const am = /(ace|king|queen|jack|ten|nine|eight|seven|six|five|four|three|two)\s+of\s+(spades|hearts|diamonds|clubs)/.exec(al);
+    if (am) return { suit: am[2][0], rank: RANK_WORDS[am[1]] };
+    return null;
+  }
+
+  const SUIT_SYMBOLS = { '♠': 's', '♥': 'h', '♦': 'd', '♣': 'c' };
+
+  function parseCardsFromText(text) {
+    const out = [];
+    const re = /(10|[2-9TJQKA])\s*([shdc♠♥♦♣])/gi;
+    let m;
+    while ((m = re.exec(String(text || '')))) {
+      const suitRaw = m[2];
+      const suit = SUIT_SYMBOLS[suitRaw] || suitRaw.toLowerCase();
+      if (!SUIT_CHARS.includes(suit)) continue;
+      out.push({ rank: normRank(m[1]), suit });
+    }
+    return out.slice(0, 5);
+  }
+
+  function readHeroCards() {
+    const seat = document.querySelector(SELECTORS.heroSeat);
+    let els = seat ? seat.querySelectorAll(SELECTORS.heroCards) : [];
+    if (!els.length) els = document.querySelectorAll(SELECTORS.heroCards);
+    const cards = [];
+    els.forEach((el) => { const c = parseCardEl(el); if (c) cards.push(c); });
+    return cards.slice(0, 2);
+  }
+
+  function readBoardCards() {
+    const els = document.querySelectorAll(SELECTORS.communityCards);
+    const cards = [];
+    els.forEach((el) => { const c = parseCardEl(el); if (c) cards.push(c); });
+    if (cards.length) return cards.slice(0, 5);
+    return (currentHand && currentHand.board) || []; // fall back to the log-parsed board
+  }
+
+  function cardToNum(c) {
+    return { r: rankIdx(c.rank) + 2, s: SUIT_CHARS.indexOf(c.suit) };
+  }
+
+  // 7-card evaluator. Returns a comparable array: [category, tiebreakers...].
+  // Category 8=straight flush … 0=high card. Verified against known hand
+  // rankings and published preflop equities before porting here.
+  function evaluate7(cards) {
+    const ranks = cards.map((c) => c.r);
+    const suits = cards.map((c) => c.s);
+    const rc = {};
+    const sc = {};
+    ranks.forEach((r) => { rc[r] = (rc[r] || 0) + 1; });
+    suits.forEach((s) => { sc[s] = (sc[s] || 0) + 1; });
+
+    let flushSuit = -1;
+    Object.keys(sc).forEach((s) => { if (sc[s] >= 5) flushSuit = +s; });
+
+    const straightHigh = (list) => {
+      const set = new Set(list);
+      if (set.has(14)) set.add(1); // wheel: A counts low
+      for (let hi = 14; hi >= 5; hi--) {
+        let ok = true;
+        for (let i = 0; i < 5; i++) { if (!set.has(hi - i)) { ok = false; break; } }
+        if (ok) return hi;
+      }
+      return 0;
+    };
+
+    // A flush and a full house can't coexist in 7 cards, so returning here is safe.
+    if (flushSuit >= 0) {
+      const fr = cards.filter((c) => c.s === flushSuit).map((c) => c.r);
+      const sfh = straightHigh(fr);
+      if (sfh) return [8, sfh];
+      return [5].concat(fr.sort((a, b) => b - a).slice(0, 5));
+    }
+
+    const sh = straightHigh(ranks);
+    const groups = Object.keys(rc).map((r) => [+r, rc[r]]).sort((a, b) => b[1] - a[1] || b[0] - a[0]);
+    const c0 = groups[0][1];
+    const c1 = groups[1] ? groups[1][1] : 0;
+
+    if (c0 === 4) {
+      const q = groups[0][0];
+      return [7, q, Math.max.apply(null, ranks.filter((r) => r !== q))];
+    }
+    if (c0 === 3 && c1 >= 2) return [6, groups[0][0], groups[1][0]];
+    if (sh) return [4, sh];
+    if (c0 === 3) {
+      const t = groups[0][0];
+      return [3, t].concat(ranks.filter((r) => r !== t).sort((a, b) => b - a).slice(0, 2));
+    }
+    if (c0 === 2 && c1 === 2) {
+      const p1 = groups[0][0];
+      const p2 = groups[1][0];
+      const k = Math.max.apply(null, ranks.filter((r) => r !== p1 && r !== p2));
+      return [2, Math.max(p1, p2), Math.min(p1, p2), k];
+    }
+    if (c0 === 2) {
+      const p = groups[0][0];
+      return [1, p].concat(ranks.filter((r) => r !== p).sort((a, b) => b - a).slice(0, 3));
+    }
+    return [0].concat(ranks.slice().sort((a, b) => b - a).slice(0, 5));
+  }
+
+  function cmpHand(a, b) {
+    const n = Math.max(a.length, b.length);
+    for (let i = 0; i < n; i++) {
+      const x = a[i] || 0;
+      const y = b[i] || 0;
+      if (x !== y) return x - y;
+    }
+    return 0;
+  }
+
+  // Monte Carlo equity against N random hands. "Random" is deliberate and
+  // stated in the UI: real opponents have ranges, so this reads pessimistically
+  // against tight players and optimistically against loose ones.
+  function estimateEquity(heroCards, boardCards, nOpp) {
+    if (!heroCards || heroCards.length !== 2) return null;
+    const hero = heroCards.map(cardToNum);
+    const board = (boardCards || []).map(cardToNum).filter((c) => c.s >= 0 && c.r >= 2);
+    if (hero.some((c) => c.s < 0 || c.r < 2)) return null;
+    if (board.length > 5) return null;
+
+    const dead = new Set(hero.concat(board).map((c) => c.r * 4 + c.s));
+    const deck = [];
+    for (let r = 2; r <= 14; r++) {
+      for (let s = 0; s < 4; s++) { if (!dead.has(r * 4 + s)) deck.push({ r, s }); }
+    }
+
+    const need = 5 - board.length;
+    const take = need + 2 * nOpp;
+    if (take > deck.length) return null;
+
+    const iters = STORE.settings.equityIters || 1200;
+    let win = 0;
+    let tie = 0;
+    for (let it = 0; it < iters; it++) {
+      // Partial Fisher–Yates: only shuffle the cards this trial consumes.
+      for (let i = 0; i < take; i++) {
+        const j = i + Math.floor(Math.random() * (deck.length - i));
+        const tmp = deck[i]; deck[i] = deck[j]; deck[j] = tmp;
+      }
+      const full = board.concat(deck.slice(0, need));
+      const hv = evaluate7(hero.concat(full));
+      let best = null;
+      for (let o = 0; o < nOpp; o++) {
+        const ov = evaluate7([deck[need + 2 * o], deck[need + 2 * o + 1]].concat(full));
+        if (best === null || cmpHand(ov, best) > 0) best = ov;
+      }
+      const c = cmpHand(hv, best);
+      if (c > 0) win++; else if (c === 0) tie++;
+    }
+    return (100 * (win + tie * 0.5)) / iters;
+  }
+
+  // The coach panel re-renders every 1.5s; recomputing thousands of showdowns
+  // each time would cook the phone. Only recompute when the situation changes.
+  let equityCache = { key: null, value: null };
+  function estimateEquityCached(heroCards, boardCards, nOpp) {
+    const key = heroCards.map((c) => c.rank + c.suit).join('')
+      + '|' + (boardCards || []).map((c) => c.rank + c.suit).join('')
+      + '|' + nOpp;
+    if (equityCache.key === key) return equityCache.value;
+    const v = estimateEquity(heroCards, boardCards, nOpp);
+    equityCache = { key, value: v };
+    return v;
+  }
+
+  // Reconstruct seating order from the log: SB, BB, then the order players
+  // first acted preflop (UTG onward), which ends at the button.
+  function buildRotation(hand) {
+    if (!hand.sbXid) return null;
+    const rot = [hand.sbXid];
+    if (hand.bbXid && hand.bbXid !== hand.sbXid) rot.push(hand.bbXid);
+    hand.actionOrder.forEach((x) => { if (!rot.includes(x)) rot.push(x); });
+    return rot.length >= 2 ? rot : null;
+  }
+
+  function heroPositionLabel(hand) {
+    if (!heroXid) return null;
+    const rot = buildRotation(hand);
+    if (!rot) return null;
+    const i = rot.indexOf(heroXid);
+    if (i < 0) return null;
+    const n = rot.length;
+    if (n === 2) return i === 0 ? 'SB' : 'BB';
+    if (i === 0) return 'SB';
+    if (i === 1) return 'BB';
+    if (i === n - 1) return 'BTN';
+    if (i === n - 2) return 'CO';
+    if (i === n - 3) return 'MP';
+    return 'EP';
+  }
+
+  // A "session" is just play separated by a gap; no explicit start/stop to forget.
+  const SESSION_GAP_MS = 4 * 60 * 60 * 1000;
+  function touchSession(deltaChips, countHand) {
+    const s = STORE.session;
+    const now = Date.now();
+    if (!s.startedAt || (s.lastHandAt && now - s.lastHandAt > SESSION_GAP_MS)) {
+      s.startedAt = now; s.hands = 0; s.net = 0;
+    }
+    s.lastHandAt = now;
+    if (countHand) s.hands += 1;
+    s.net += deltaChips || 0;
+  }
+
+  // ===========================================================================
   // 8. COACH PROMPTS (advisory only — never auto-acts)
   // ===========================================================================
 
   function buildCoachAdvice() {
     if (!isHeroTurn() || !currentHand) return null;
-    const heroCards = parseCardsFromContainer(document.querySelector(SELECTORS.heroSeat));
-    const villainXid = currentHand.lastAggressor;
-    const ctx = {
-      street: currentHand.street,
-      position: 'CO', // position detection needs dealer-button calibration; defaults conservatively
+    const hand = currentHand;
+    const heroCards = readHeroCards();
+    const board = readBoardCards();
+    const villainXid = hand.lastAggressor;
+    const betFacing = villainXid ? (hand.streetContributions[villainXid] || 0) : 0;
+    const position = heroPositionLabel(hand);
+    const out = [];
+
+    out.push(gtoBaselineSuggestion({
+      street: hand.street,
+      position,
       heroCards: heroCards.length === 2 ? heroCards : null,
-      betFacing: villainXid ? (currentHand.streetContributions[villainXid] || 0) : 0,
-      pot: currentHand.pot,
-    };
-    const baseline = gtoBaselineSuggestion(ctx);
+      betFacing,
+      pot: hand.pot,
+    }));
+
+    if (heroCards.length === 2) {
+      const opps = Math.max(1, hand.playersIn.size - 1);
+      const eq = estimateEquityCached(heroCards, board, opps);
+      if (eq != null) {
+        out.push(`Equity ~${eq.toFixed(0)}% vs ${opps} opponent${opps > 1 ? 's' : ''} (random hands).`);
+        if (betFacing > 0) {
+          const need = (100 * betFacing) / (hand.pot + betFacing);
+          out.push(`Pot odds: need ${need.toFixed(0)}% to call — ${eq >= need ? 'calling is +EV on raw equity' : 'folding is likely correct'}.`);
+        }
+      }
+    } else if (betFacing > 0) {
+      const need = (100 * betFacing) / (hand.pot + betFacing);
+      out.push(`Pot odds: need ~${need.toFixed(0)}% equity to continue.`);
+    }
+
     const deviation = exploitDeviation(villainXid);
-    const potOdds = ctx.betFacing ? `Pot odds: need ~${fmtPct(optimalBluffRatio(ctx.betFacing, ctx.pot) * 100)} equity to continue.` : null;
-    return [baseline, deviation, potOdds].filter(Boolean);
+    if (deviation) out.push(deviation);
+    return out.filter(Boolean);
   }
 
   // ===========================================================================
@@ -1143,6 +1440,13 @@
     if (r.cbet != null) lines.push(`Continuation-bets ${fmtPct(r.cbet)} of flop opportunities.`);
     if (r.foldTo3Bet != null) lines.push(`Folds to 3-bets ${fmtPct(r.foldTo3Bet)} of the time (${p.foldTo3BetOpp} samples) — ${r.foldTo3Bet > 65 ? 'treat continuation bets/3-bets here as close to free' : 'defends 3-bets reasonably often'}.`);
     if (r.afq != null) lines.push(`Aggression frequency postflop: ${fmtPct(r.afq)}.`);
+    if (r.avgBetPct != null) {
+      const sz = r.avgBetPct;
+      lines.push(`Average bet/raise is ${sz.toFixed(0)}% of pot (${p.betSizeCount} sized bets) — `
+        + (sz > 85 ? 'oversizes heavily; often polarised to strong hands or bluffs.'
+          : sz < 45 ? 'consistently small; easy to float and take away later streets.'
+            : 'fairly standard sizing.'));
+    }
     if (r.wtsd != null) lines.push(`Goes to showdown ${fmtPct(r.wtsd)} of hands played.`);
     lines.push(`Your estimated chips won/lost against them: ${p.plChipsEst >= 0 ? '+' : ''}${Math.round(p.plChipsEst)} (est., proportional multiway attribution — positive means you're up).`);
     if (p.notes) lines.push(`Notes: ${p.notes}`);
@@ -1297,6 +1601,7 @@
           <tr><td>Fold to 3-Bet</td><td>${fmtPct(r.foldTo3Bet)}</td></tr>
           <tr><td>C-Bet</td><td>${fmtPct(r.cbet)}</td></tr>
           <tr><td>WTSD</td><td>${fmtPct(r.wtsd)}</td></tr>
+          <tr><td>Avg bet size</td><td>${r.avgBetPct != null ? r.avgBetPct.toFixed(0) + '% pot' : '—'}</td></tr>
           <tr><td>Your P/L vs them</td><td>${p.plChipsEst >= 0 ? '+' : ''}${Math.round(p.plChipsEst)}</td></tr>
         </table>
       `;
@@ -1374,7 +1679,12 @@
         <tr><th>Name</th><th>Type</th><th>Hands</th><th>VPIP/PFR</th><th>P/L</th></tr>
         ${rows}
       </table>
-      <div style="opacity:.7;margin-top:8px">Total hands recorded: ${(STORE.hands || []).length} &nbsp;|&nbsp; Your net: ${STORE.hero.netChips >= 0 ? '+' : ''}${Math.round(STORE.hero.netChips).toLocaleString()}</div>
+      <div style="opacity:.75;margin-top:10px;border-top:1px solid #444;padding-top:8px">
+        <b>Session:</b> ${STORE.session.hands} hands, ${STORE.session.net >= 0 ? '+' : ''}${Math.round(STORE.session.net).toLocaleString()}
+        ${STORE.session.startedAt ? ' (since ' + new Date(STORE.session.startedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + ')' : ''}<br>
+        <b>Lifetime:</b> ${STORE.hero.hands} hands, ${STORE.hero.netChips >= 0 ? '+' : ''}${Math.round(STORE.hero.netChips).toLocaleString()}
+        &nbsp;|&nbsp; ${(STORE.hands || []).length} hands in history
+      </div>
     `;
     document.body.appendChild(panel);
 
@@ -1406,6 +1716,8 @@
       <span class="tph-close">✕</span>
       <h3>Settings</h3>
       <button class="tph-open-players" style="width:100%;padding:9px;margin-bottom:10px">👥 View tracked players &amp; hand history</button>
+      <label><b>Your Torn username:</b> <input type="text" class="tph-hero-name" value="${escapeHtml(STORE.settings.heroName)}" placeholder="required for P/L" style="width:55%"></label><br>
+      <div style="opacity:.7;margin:2px 0 10px">Needed to attribute profit/loss and work out your position.</div>
       <label>Min hands before rating: <input type="number" class="tph-min-hands" value="${STORE.settings.minHands}" style="width:60px"></label><br><br>
       <label><input type="checkbox" class="tph-calib-toggle" ${STORE.settings.calibrationMode ? 'checked' : ''}> Calibration mode</label><br><br>
       <h4>GitHub Gist sync</h4>
@@ -1431,6 +1743,11 @@
       renderSettingsPanel();
       playersListOpen = true;
       renderPlayersList();
+    });
+    panel.querySelector('.tph-hero-name').addEventListener('change', (e) => {
+      STORE.settings.heroName = e.target.value.trim();
+      heroXid = null; // force re-resolution against the new name
+      saveStore();
     });
     panel.querySelector('.tph-min-hands').addEventListener('change', (e) => {
       STORE.settings.minHands = parseInt(e.target.value, 10) || 20;
