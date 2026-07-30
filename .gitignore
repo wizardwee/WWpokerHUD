@@ -1,1 +1,6 @@
 .DS_Store
+
+# Local Claude Code permission allowlist. Kept out of the repo because this is a
+# public repo and the entries reference local paths and personal tooling.
+.claude/settings.json
+
