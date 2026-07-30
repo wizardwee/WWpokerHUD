@@ -1,12 +1,51 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.9.0
+// @version      0.10.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
 // @grant        none
 // ==/UserScript==
+
+/*
+ * CHANGELOG (newest first). Bump @version above in the SAME commit as any
+ * behaviour change — nothing automates it, and userscript managers compare
+ * @version to decide whether an update exists. A stale value means a reinstall
+ * won't see new code as newer.
+ *
+ * 0.10.0 - Hand boundaries now match Torn's real "Game <hex> started" wording;
+ *          before this no hand ever ended, so actionOrder accumulated across
+ *          hands and every derived position was nonsense. Streets match
+ *          "The flop:  5c, 7d, Ad" (definite article, double space), so the
+ *          board is read from the log and the street advances. Showdowns say
+ *          "reveals". Preflop position is inferred from turn order when hero
+ *          hasn't acted yet, rendered as "CO?" to mark it as inferred; table
+ *          size comes from the seats so a sit-out no longer shifts every label.
+ *          Position-unknown now names the precondition that actually failed
+ *          instead of always blaming the username.
+ * 0.9.0  - Selectors calibrated against a live deep scan: log rows are read via
+ *          the enclosing <li> (the actor lives in a sibling span, and reading
+ *          the mutated inner span alone dropped the name, which is why no stat
+ *          ever recorded). Seats identified by id="player-<XID>" rather than
+ *          absent profile links. Class matching switched to a single trailing
+ *          underscore, since Torn emits both name___hash and name_hash.
+ *          Coach panel gained a header to drag it and a Hide toggle; equity is
+ *          always quoted against a full ring plus live and heads-up counts.
+ * 0.8.0  - Fix dead stats pipeline, past-tense log parsing, sync crash.
+ * 0.6.0  - Equity engine, position detection, hero identity, session tracking,
+ *          bet-sizing tells. (0.7.0 was never released.)
+ * 0.5.1  - Never export or sync the GitHub token.
+ * 0.5.0  - Hand history recording + tracked-players browser.
+ * 0.4.0  - Draggable HUD button, position persisted.
+ * 0.3.0  - Deep-scan DOM inspector + body-fallback log observer.
+ * 0.2.0  - Initial: opponent tendency HUD, coach prompts, per-player P/L,
+ *          Gist sync.
+ *
+ * KNOWN UNRESOLVED: actionButtons and dealerButton match nothing on the live
+ * table. dealerButton is a red herring for position — it is declared in
+ * SELECTORS and referenced nowhere else; position comes from the log.
+ */
 
 /*
  * SECTION MAP (matches the design plan 1:1):
@@ -23,10 +62,13 @@
  *  11. Tendency report
  *
  * CALIBRATION NOTE: Torn's poker page uses hashed/webpack-style CSS module
- * class names. The selectors in SECTION 4 are a best-effort inference from
- * public write-ups of similar scripts, not verified against the live page.
- * Turn on Calibration Mode (gear icon -> Calibration) to see what is/isn't
- * being matched, and adjust the SELECTORS / LOG_PATTERNS objects below.
+ * class names. As of 0.10.0 the selectors in SECTION 4 are calibrated against
+ * real deep scans, NOT guesswork — log list, log rows, seats, seat names, fold
+ * state, pot and hero cards all resolve. The exceptions are actionButtons and
+ * dealerButton, which still match nothing.
+ * Class names change when Torn redeploys, so if things go quiet: turn on
+ * Calibration Mode (gear icon -> Calibration), run a deep scan mid-hand at a
+ * live table, and adjust SELECTORS / LOG_PATTERNS from what it reports.
  */
 
 (function () {

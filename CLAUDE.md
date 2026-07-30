@@ -19,10 +19,12 @@ single hand-edited file. Userscript managers compare `@version` to decide
 whether an update exists, so leaving it stale means a reinstall elsewhere won't
 see new code as newer. Bump it in the same commit as the change.
 
-## Current status (v0.9.0)
+## Current status (v0.10.0)
 
-Feature-complete on paper, **not yet confirmed working against the live page.**
-The blocking task is a calibration pass — see below.
+Selectors and log wording are **calibrated against real scans**. Parsing is
+believed working — action rows no longer appear unmatched — but no stat or
+position output has been confirmed correct at a live table yet. Treat behaviour
+as plausible, not verified.
 
 Built: per-player stats (VPIP/PFR/AFq/3-bet/fold-to-3-bet/C-bet/WTSD), archetype
 tags, plain-language tendency reports, per-opponent P/L (proportional multiway
@@ -33,11 +35,12 @@ inference, session tracking, bet-sizing tells, and optional GitHub Gist sync.
 ## The critical constraint
 
 **Nobody working on this can log into Torn or inspect the live poker DOM.**
-Torn uses hashed CSS-module class names. Every selector in `SELECTORS` is
-inference, not observation. Do not assume they work.
+Torn uses hashed CSS-module class names, and they change on redeploy. Selectors
+can only be confirmed by asking the user to run a deep scan and paste it back —
+never assume a change works because it looks right.
 
-A **deep scan v0.3.0 from a live table** has now replaced guesswork for most of
-this. Observed structure (trust this over inference):
+Two **deep scans from a live table (latest v0.4.0)** have replaced guesswork for
+most of this. Observed structure (trust this over inference):
 
 | Thing | Real DOM |
 |---|---|
@@ -62,13 +65,28 @@ climbs to the enclosing `logRow` before parsing — reading the mutated inner sp
 alone yielded `"called $3,500,000"` with no name, which failed every
 name-anchored pattern. That, not the selectors, was why no stat ever recorded.
 
-Other real wording: hand boundary is `<hex id> started`; raises read
-`raised $1,000,000 to $2,000,000` where the **second** figure is the total.
+Other real wording, all confirmed in v0.4.0:
+
+- Hand boundary is `Game <hex id> started` — **with** the "Game " prefix. An
+  earlier pattern read it off a body-fallback fragment that had lost the prefix
+  and anchored on the hex, so no hand ever ended and `actionOrder` accumulated
+  across hands, corrupting every derived position.
+- Streets are `The flop:  5♣, 7♦, A♦` — definite article, double space, unicode
+  suits. Anchoring on the bare street name meant the board was never read.
+- Showdowns say `reveals`, not `shows`.
+- Raises read `raised $1,000,000 to $2,000,000` where the **second** figure is
+  the total.
+- `joined/left the table` and `The preflop Two cards dealt to each player` are
+  filtered as noise, so the unmatched list only shows genuinely unparsed wording.
 
 ## Next task
 
-Re-run calibration and confirm actions now attribute to seats. Still unresolved
-by the scan, and both remain inference: **`actionButtons`** and
+Confirm at a live table that stats populate and that inferred positions ("CO?")
+are actually right. The position inference assumes every seat between the BB and
+hero has acted; if Torn silently skips a seat (already all-in, or timed out
+without a log line) the labels drift by one in a consistent direction.
+
+Still unresolved, and both remain inference: **`actionButtons`** and
 **`dealerButton`**.
 
 `dealerButton` is a red herring for position — it is declared in `SELECTORS` and
@@ -92,10 +110,12 @@ is attributed.
 - **No build step.** One file, pasted/fetched whole. No imports, no bundler.
 - **Torn PDA runtime is limited**: no `GM_xmlhttpRequest`, no IndexedDB. Use the
   `pdaFetch` adapter (`PDA_httpGet`/`PDA_httpPost`, falling back to `fetch`).
-- **No JS runtime on the dev machine.** There's no `node`. Verify with the
-  regex/template-aware bracket checker, and prototype tricky algorithms in
-  Python first — the equity evaluator was validated that way against published
-  preflop equities before porting.
+- **Verify before pushing.** `node` IS available (this claim used to say
+  otherwise): run `node --check torn-poker-hud.user.js` on every edit, and
+  prototype tricky logic as a throwaway script — log patterns and the position
+  mapping were both validated that way against real scan lines before pushing.
+  The equity evaluator was validated in Python against published preflop
+  equities before porting.
 - **Secrets never leave the device.** `exportJson()` feeds both the Copy button
   and the Gist upload; anything added to settings that is a credential must go
   in `LOCAL_ONLY_SETTINGS`.
