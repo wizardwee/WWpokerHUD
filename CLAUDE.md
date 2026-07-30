@@ -68,9 +68,14 @@ Other real wording: hand boundary is `<hex id> started`; raises read
 ## Next task
 
 Re-run calibration and confirm actions now attribute to seats. Still unresolved
-by the scan — no data was captured for either, so both remain inference:
-**`actionButtons`** and **`dealerButton`**. Without `dealerButton`, position
-inference has no anchor, so positional stats stay unreliable.
+by the scan, and both remain inference: **`actionButtons`** and
+**`dealerButton`**.
+
+`dealerButton` is a red herring for position — it is declared in `SELECTORS` and
+referenced nowhere else. Position comes entirely from the log: `buildRotation`
+needs a parsed `postSB` line for `sbXid`, then orders the table by preflop
+action. **Position therefore depends on log parsing working, not on finding the
+dealer button.** Fixing that selector would not move position on its own.
 
 An unexploited find worth considering: `SPAN[class*="srOnly_"]` carries the full
 sentence in plain text — `"GhostNote420 checked The river: 4 of hearts"` — with

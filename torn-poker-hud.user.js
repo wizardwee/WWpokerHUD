@@ -441,6 +441,9 @@
     communityCards: '[class*="communityCards_"] [class*="front_"] > div[role="img"]:not([aria-label="card face down"])',
     potDisplay: '[class*="totalPotWrap_"], [class*="potsWrapper_"]',
     actionButtons: '[class*="actionButtons_"] button, [class*="controls_"] button',
+    // UNUSED. Position is derived entirely from the log (blind posts + preflop
+    // action order — see buildRotation), never from the dealer button. Kept only
+    // as a calibration probe; resolving it fixes nothing on its own.
     dealerButton: '[class*="dealerButton_"], [class*="buttonIcon_"]',
   };
 
@@ -1213,12 +1216,12 @@
   }
 
   function gtoBaselineSuggestion(ctx) {
-    const { street, position, heroCards, betFacing, pot } = ctx;
+    const { street, position, heroCards, betFacing, pot, posDiag } = ctx;
     if (street === 'preflop' && heroCards) {
       // Without a known position an RFI chart is meaningless — say so rather
       // than quietly assuming a seat and giving confidently wrong advice.
       if (!position) {
-        return 'GTO baseline: position unknown this hand (set your username in Settings) — no preflop chart applied.';
+        return `GTO baseline: position unknown this hand (${posDiag || 'reason unclear'}) — no preflop chart applied.`;
       }
       const rfiRange = RFI_RANGES[position] || RFI_RANGES.CO;
       if (!betFacing) {
@@ -1464,6 +1467,22 @@
     return rot.length >= 2 ? rot : null;
   }
 
+  // Position has four independent preconditions and the coach used to blame a
+  // missing username for all of them, which sends you to fix a setting that is
+  // already correct. Report the one that actually failed.
+  function positionDiagnosis(hand) {
+    const configured = (STORE.settings.heroName || '').trim();
+    if (!heroXid) {
+      return configured
+        ? `no seat matches the username "${escapeHtml(configured)}" — check the spelling against your seat`
+        : 'set your username in Settings';
+    }
+    if (!hand.sbXid) return 'no blind posts read from the log yet this hand';
+    if (!buildRotation(hand)) return 'not enough action read to order the table';
+    if (buildRotation(hand).indexOf(heroXid) < 0) return 'you have not appeared in the parsed action yet';
+    return null;
+  }
+
   function heroPositionLabel(hand) {
     if (!heroXid) return null;
     const rot = buildRotation(hand);
@@ -1521,6 +1540,7 @@
       heroCards: heroCards.length === 2 ? heroCards : null,
       betFacing,
       pot: hand.pot,
+      posDiag: position ? null : positionDiagnosis(hand),
     }));
 
     if (heroCards.length === 2) {
