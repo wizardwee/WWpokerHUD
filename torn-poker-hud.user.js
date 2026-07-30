@@ -1229,18 +1229,22 @@
   }
 
   function gtoBaselineSuggestion(ctx) {
-    const { street, position, heroCards, betFacing, pot, posDiag } = ctx;
+    const { street, position, positionInferred, heroCards, betFacing, pot, posDiag } = ctx;
     if (street === 'preflop' && heroCards) {
       // Without a known position an RFI chart is meaningless — say so rather
       // than quietly assuming a seat and giving confidently wrong advice.
       if (!position) {
         return `GTO baseline: position unknown this hand (${posDiag || 'reason unclear'}) — no preflop chart applied.`;
       }
+      // An inferred seat is read off whose turn it is, not off observed action.
+      // Say so in the label: a misread seat changes the chart, and advice that
+      // looks equally confident either way is the failure mode worth avoiding.
+      const pos = positionInferred ? `${position}?` : position;
       const rfiRange = RFI_RANGES[position] || RFI_RANGES.CO;
       if (!betFacing) {
         return isHandInRange(heroCards[0], heroCards[1], rfiRange)
-          ? `GTO baseline (${position}): open-raise — in your RFI range.`
-          : `GTO baseline (${position}): fold — outside a standard ${position} opening range.`;
+          ? `GTO baseline (${pos}): open-raise — in your RFI range.`
+          : `GTO baseline (${pos}): fold — outside a standard ${position} opening range.`;
       }
       return isHandInRange(heroCards[0], heroCards[1], THREE_BET_RANGES.IP)
         ? 'GTO baseline: 3-bet (in a standard 3-bet range).'
@@ -1496,20 +1500,46 @@
     return null;
   }
 
+  // Returns { label, inferred } or null.
+  //
+  // The rotation only contains players who have already acted, so at a preflop
+  // decision — the one moment an RFI chart is worth anything — you are not in it
+  // unless you posted a blind. Rather than give up there, take the fact that it
+  // is your turn as the position itself: preflop action passes each seat once in
+  // order, so the next seat to act is the one immediately after the last player
+  // in the rotation. That is an inference, and it is flagged as one.
+  //
+  // Table size comes from the seats rather than the rotation. `rot.length` only
+  // counts players who acted, so a player sitting out would otherwise shift
+  // every label after them — naming the real cutoff as the button.
   function heroPositionLabel(hand) {
     if (!heroXid) return null;
     const rot = buildRotation(hand);
     if (!rot) return null;
-    const i = rot.indexOf(heroXid);
-    if (i < 0) return null;
-    const n = rot.length;
-    if (n === 2) return i === 0 ? 'SB' : 'BB';
-    if (i === 0) return 'SB';
-    if (i === 1) return 'BB';
-    if (i === n - 1) return 'BTN';
-    if (i === n - 2) return 'CO';
-    if (i === n - 3) return 'MP';
-    return 'EP';
+
+    let i = rot.indexOf(heroXid);
+    let inferred = false;
+    if (i < 0) {
+      // Only valid preflop. Postflop the order is SB-first and unrelated to who
+      // has yet to act, so the same trick would produce a confident wrong seat.
+      if (hand.street !== 'preflop') return null;
+      i = rot.length;
+      inferred = true;
+    }
+
+    const seated = hand.dealtInXids ? hand.dealtInXids.size : 0;
+    const n = Math.max(seated, i + 1, rot.length);
+    if (n < 2) return null;
+
+    let label;
+    if (n === 2) label = i === 0 ? 'SB' : 'BB';
+    else if (i === 0) label = 'SB';
+    else if (i === 1) label = 'BB';
+    else if (i === n - 1) label = 'BTN';
+    else if (i === n - 2) label = 'CO';
+    else if (i === n - 3) label = 'MP';
+    else label = 'EP';
+    return { label, inferred };
   }
 
   // A "session" is just play separated by a gap; no explicit start/stop to forget.
@@ -1544,12 +1574,14 @@
     const board = readBoardCards();
     const villainXid = hand.lastAggressor;
     const betFacing = villainXid ? (hand.streetContributions[villainXid] || 0) : 0;
-    const position = heroPositionLabel(hand);
+    const pos = heroPositionLabel(hand);
+    const position = pos ? pos.label : null;
     const out = [];
 
     out.push(gtoBaselineSuggestion({
       street: hand.street,
       position,
+      positionInferred: !!(pos && pos.inferred),
       heroCards: heroCards.length === 2 ? heroCards : null,
       betFacing,
       pot: hand.pot,
