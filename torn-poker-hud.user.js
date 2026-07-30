@@ -1705,6 +1705,12 @@
     });
   }
 
+  // How much of the coach panel must stay on screen while dragging. The panel is
+  // nearly viewport-width on a phone, so it has to be allowed to hang off the
+  // edges — otherwise there is nowhere for it to go. 100px keeps enough of the
+  // header grabbable to drag it back.
+  const COACH_KEEP_VISIBLE_PX = 100;
+
   function setCoachHidden(hidden) {
     STORE.settings.coachHidden = hidden;
     saveStore();
@@ -1754,8 +1760,8 @@
       hide.addEventListener('click', (e) => { e.stopPropagation(); setCoachHidden(true); });
       // Drag the whole panel by its header; no tap action, so a stray tap on the
       // bar does nothing rather than firing something unexpected.
-      makeDraggable(head, null, 'coachPos', el);
-      applyStoredPos(el, 'coachPos');
+      makeDraggable(head, { posKey: 'coachPos', moveEl: el, keepVisiblePx: COACH_KEEP_VISIBLE_PX });
+      applyStoredPos(el, 'coachPos', COACH_KEEP_VISIBLE_PX);
     }
 
     el.querySelector('.tph-coach-body').innerHTML = advice.map((line) => `<div>${line}</div>`).join('');
@@ -2180,11 +2186,22 @@
 
   // Keep a dragged element fully on screen — also re-applied on rotate/resize so
   // it can't end up stranded off the edge in the other orientation.
-  function setFixedPos(el, left, top) {
+  // `keepVisiblePx` switches from "keep the whole element on screen" to "keep at
+  // least this much of it on screen". Full containment is right for the small
+  // gear button, but it pins anything approaching the viewport width: a 366px
+  // panel on a 390px screen gets 24px of horizontal travel and reads as broken.
+  // Wide panels pass a keep-visible margin and may hang off the edges instead.
+  function setFixedPos(el, left, top, keepVisiblePx) {
     const w = el.offsetWidth || 60;
     const h = el.offsetHeight || 44;
-    const L = Math.min(Math.max(0, left), Math.max(0, window.innerWidth - w));
-    const T = Math.min(Math.max(0, top), Math.max(0, window.innerHeight - h));
+    const keep = keepVisiblePx ? Math.min(keepVisiblePx, w, h) : 0;
+    const minL = keep ? keep - w : 0;
+    const maxL = keep ? window.innerWidth - keep : Math.max(0, window.innerWidth - w);
+    // Never allow a negative top: dragging the header above the viewport would
+    // put the only drag handle out of reach with no way to get it back.
+    const maxT = keep ? window.innerHeight - keep : Math.max(0, window.innerHeight - h);
+    const L = Math.min(Math.max(minL, left), Math.max(minL, maxL));
+    const T = Math.min(Math.max(0, top), Math.max(0, maxT));
     el.style.left = L + 'px';
     el.style.top = T + 'px';
     el.style.right = 'auto';
@@ -2193,9 +2210,11 @@
 
   // `posKey` names the settings field the position persists to, so the gear and
   // the coach panel can each remember where they were put independently.
-  function applyStoredPos(el, posKey) {
+  function applyStoredPos(el, posKey, keepVisiblePx) {
     const p = STORE.settings[posKey];
-    if (p && typeof p.left === 'number' && typeof p.top === 'number') setFixedPos(el, p.left, p.top);
+    if (p && typeof p.left === 'number' && typeof p.top === 'number') {
+      setFixedPos(el, p.left, p.top, keepVisiblePx);
+    }
   }
 
   // Drag to move, tap to open settings. A small movement threshold separates the
@@ -2203,11 +2222,13 @@
   // the button and doing nothing.
   const DRAG_THRESHOLD_PX = 6;
 
+  // opts: { onTap, posKey, moveEl, keepVisiblePx }
   // `moveEl` lets a small handle drag a larger element — the coach panel is
   // dragged by its header bar so the advice text underneath stays selectable
   // and an accidental touch on the body doesn't shove the panel across the table.
   // Defaults to the handle itself, which is what the gear button wants.
-  function makeDraggable(el, onTap, posKey, moveEl) {
+  function makeDraggable(el, opts) {
+    const { onTap, posKey, moveEl, keepVisiblePx } = opts || {};
     const box = moveEl || el;
     let dragging = false;
     let moved = false;
@@ -2233,7 +2254,7 @@
       if (!moved && Math.sqrt(dx * dx + dy * dy) < DRAG_THRESHOLD_PX) return;
       if (!moved) box.classList.add('tph-dragging');
       moved = true;
-      setFixedPos(box, originLeft + dx, originTop + dy);
+      setFixedPos(box, originLeft + dx, originTop + dy, keepVisiblePx);
       e.preventDefault();
     });
 
@@ -2264,7 +2285,10 @@
     gear.title = 'Tap to open settings — drag to move';
     document.body.appendChild(gear);
     applyStoredPos(gear, 'gearPos');
-    makeDraggable(gear, () => { settingsOpen = !settingsOpen; renderSettingsPanel(); }, 'gearPos');
+    makeDraggable(gear, {
+      onTap: () => { settingsOpen = !settingsOpen; renderSettingsPanel(); },
+      posKey: 'gearPos',
+    });
 
     window.addEventListener('resize', () => {
       const rect = gear.getBoundingClientRect();
@@ -2272,7 +2296,7 @@
       const coach = document.querySelector('.tph-coach');
       if (coach && STORE.settings.coachPos) {
         const cr = coach.getBoundingClientRect();
-        setFixedPos(coach, cr.left, cr.top);
+        setFixedPos(coach, cr.left, cr.top, COACH_KEEP_VISIBLE_PX);
       }
     });
   }
