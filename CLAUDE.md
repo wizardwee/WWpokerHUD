@@ -11,10 +11,15 @@ Torn's in-game Texas Hold'em room. Not a real-money poker site.
 Installed on the phone **by URL**, not by pasting:
 `https://raw.githubusercontent.com/wizardwee/WWpokerHUD/main/torn-poker-hud.user.js`
 
-Update loop: edit → commit → push → re-fetch the script in Torn PDA
-(Manage scripts → update). GitHub's raw CDN caches for a few minutes.
+Update loop: edit → **bump `@version`** → commit → push → re-fetch the script in
+Torn PDA (Manage scripts → update). GitHub's raw CDN caches for a few minutes.
 
-## Current status (v0.8.0)
+Nothing automates the version bump — there is no build step and no hook, just a
+single hand-edited file. Userscript managers compare `@version` to decide
+whether an update exists, so leaving it stale means a reinstall elsewhere won't
+see new code as newer. Bump it in the same commit as the change.
+
+## Current status (v0.9.0)
 
 Feature-complete on paper, **not yet confirmed working against the live page.**
 The blocking task is a calibration pass — see below.

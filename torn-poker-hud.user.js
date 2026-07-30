@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.8.0
+// @version      0.9.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -2089,7 +2089,7 @@
 
   function runDeepScan() {
     const L = [];
-    L.push('=== TORN POKER HUD DEEP SCAN v0.3.0 ===');
+    L.push('=== TORN POKER HUD DEEP SCAN v0.4.0 ===');
     L.push('url: ' + location.pathname + location.search);
     L.push('logObserver: ' + (logObserver ? (logUsingFallback ? 'ACTIVE (body fallback)' : 'ACTIVE (container)') : 'NOT ATTACHED'));
     L.push('');
