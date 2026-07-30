@@ -459,10 +459,11 @@
   // still records the action. Verified against real observed wording.
   const LOG_PATTERNS = [
     { type: 'newHandMarker', re: /(dealing|starting)\s+(a\s+)?new\s+hand/i },
-    // Torn marks a new hand with the hand's hex id followed by "started"
-    // ("e012112ffbe4a998a6b2c814174e5c started") — the only boundary signal the
-    // live log actually emits.
-    { type: 'newHandMarker', re: /^[0-9a-f]{16,}\s+started\b/i },
+    // Torn marks a new hand as "Game <hex id> started". An earlier pass read the
+    // id off a body-fallback fragment that had already lost the "Game " prefix
+    // and anchored on the hex, so the real line never matched and hands were
+    // never segmented. Prefix optional, in case the fragment form reappears.
+    { type: 'newHandMarker', re: /^(?:game\s+)?[0-9a-f]{6,}\s+started\b/i },
     { type: 'postSB', re: /^(.+?)\s+post(?:s|ed)?\s+(?:the\s+)?small\s*blind(?:\s*\$?([\d,]+))?/i },
     { type: 'postBB', re: /^(.+?)\s+post(?:s|ed)?\s+(?:the\s+)?big\s*blind(?:\s*\$?([\d,]+))?/i },
     { type: 'allin', re: /^(.+?)\s+(?:is\s+|goes\s+|went\s+)?all[\s-]?in(?:\s*(?:for|with)?\s*\$?([\d,]+))?/i },
@@ -476,10 +477,14 @@
     { type: 'raise', re: /^(.+?)\s+raise[sd]?\s+\$?[\d,]+\s+to\s+\$?([\d,]+)/i },
     { type: 'raise', re: /^(.+?)\s+raise[sd]?\b(?:\s+to)?(?:\s*\$?([\d,]+))?/i },
     { type: 'bet', re: /^(.+?)\s+bet(?:s|ted)?\b(?:\s*\$?([\d,]+))?/i },
-    { type: 'flop', re: /^flop\b:?\s*(.+)/i },
-    { type: 'turn', re: /^turn\b:?\s*(.+)/i },
-    { type: 'river', re: /^river\b:?\s*(.+)/i },
-    { type: 'shows', re: /^(.+?)\s+show(?:s|ed)?\s+(.+)/i },
+    // Torn writes "The flop:  5♣, 7♦, A♦" — the definite article and the double
+    // space both defeated an anchor on the bare street name, so the board was
+    // never read from the log and the street never advanced.
+    { type: 'flop', re: /^(?:the\s+)?flop\b:?\s*(.+)/i },
+    { type: 'turn', re: /^(?:the\s+)?turn\b:?\s*(.+)/i },
+    { type: 'river', re: /^(?:the\s+)?river\b:?\s*(.+)/i },
+    // Showdowns read "_AY_  reveals [9♥, 7♠] (Two Pairs: Nines and Sevens)".
+    { type: 'shows', re: /^(.+?)\s+(?:show(?:s|ed)?|reveals?)\s+(.+)/i },
     { type: 'wins', re: /^(.+?)\s+w(?:ins?|on)\b(?:\s+the\s+pot)?(?:\s*\$?([\d,]+))?/i },
   ];
 
@@ -625,7 +630,15 @@
   // table — the site's rotating announcement ticker was landing in the unmatched
   // log and crowding out real lines during calibration. Drop the known chrome
   // before it reaches the patterns.
-  const LOG_NOISE_RE = /\b(armoury|faction growth|merits|newspaper|classified ad)\b/i;
+  // Real table lines that carry no action worth parsing. Filtering them keeps the
+  // calibration panel's unmatched list meaningful — it should show wording we
+  // failed to understand, not chatter we deliberately ignore.
+  const LOG_NOISE_RE = new RegExp([
+    '\\b(armoury|faction growth|merits|newspaper|classified ad)\\b', // Torn page chrome
+    '\\b(joined|left)\\s+the\\s+table\\b',
+    '^the\\s+preflop\\b',            // "The preflop Two cards dealt to each player"
+    '\\bcards\\s+dealt\\s+to\\s+each\\s+player\\b',
+  ].join('|'), 'i');
 
   function handleLogLine(line) {
     const trimmed = cleanLogLine(line);
