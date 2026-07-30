@@ -128,9 +128,13 @@
     lastSync: 0,
     calibrationMode: false,
     gearPos: null, // {left, top} once you've dragged the HUD button somewhere
+    coachPos: null,      // {left, top} once you've dragged the coach panel
+    coachHidden: false,  // collapsed to a pill so it stops covering the table
     historyLimit: 200, // how many recent hands to keep for the History tab
     heroName: '',      // YOUR Torn username. Without it P/L and position can't be attributed.
     equityIters: 1200, // Monte Carlo samples per equity estimate
+    tableMax: 9,       // seats at a full table — the baseline equity is always
+                       // quoted against a full ring (tableMax - 1 opponents)
   };
 
   function emptyStore(settings) {
@@ -420,16 +424,24 @@
   // ===========================================================================
 
   // Best-guess selectors — expect to retune these in Calibration Mode.
+  // Calibrated against a real table (deep scan v0.3.0). Torn hashes CSS-module
+  // names with BOTH `name___hash` and `name_hash` shapes, sometimes for the same
+  // base within one render, so every selector matches on a single trailing
+  // underscore — `[class*="front_"]` catches `front___zu4oW` and `front_ab12`
+  // alike, where the old `front___` prefix silently missed half of them.
   const SELECTORS = {
-    logContainer: '[class*="messageLog___"], [class*="chatLog___"], [class*="log___"]',
-    seatContainer: '[class*="playerWrapper___"], [class*="opponent___"], [id*="player-"]',
+    logContainer: '[class*="messagesList_"]',
+    logRow: 'li[class*="message_"]',
+    seatContainer: '[id^="player-"]',
     seatNameLink: 'a[href*="XID="]',
-    heroSeat: '[class*="hero___"], [class*="you___"]',
-    heroCards: '[class*="hand___"] [class*="front___"] > div[role="img"]:not([aria-label="card face down"])',
-    communityCards: '[class*="communityCards___"] [class*="front___"] > div[role="img"]:not([aria-label="card face down"])',
-    potDisplay: '[class*="pot___"]',
-    actionButtons: '[class*="actionButtons___"] button, [class*="controls___"] button',
-    dealerButton: '[class*="dealerButton___"], [class*="buttonIcon___"]',
+    seatName: '[class*="name_"]',
+    seatFolded: '[class*="folded_"]',
+    heroSeat: '[class*="hero_"], [class*="you_"]',
+    heroCards: '[class*="hand_"] [class*="front_"] > div[role="img"]:not([aria-label="card face down"])',
+    communityCards: '[class*="communityCards_"] [class*="front_"] > div[role="img"]:not([aria-label="card face down"])',
+    potDisplay: '[class*="totalPotWrap_"], [class*="potsWrapper_"]',
+    actionButtons: '[class*="actionButtons_"] button, [class*="controls_"] button',
+    dealerButton: '[class*="dealerButton_"], [class*="buttonIcon_"]',
   };
 
   const CARD_CLASS_RE = /(clubs|spades|hearts|diamonds)-([0-9TJQKA]+)/i;
@@ -444,12 +456,21 @@
   // still records the action. Verified against real observed wording.
   const LOG_PATTERNS = [
     { type: 'newHandMarker', re: /(dealing|starting)\s+(a\s+)?new\s+hand/i },
+    // Torn marks a new hand with the hand's hex id followed by "started"
+    // ("e012112ffbe4a998a6b2c814174e5c started") — the only boundary signal the
+    // live log actually emits.
+    { type: 'newHandMarker', re: /^[0-9a-f]{16,}\s+started\b/i },
     { type: 'postSB', re: /^(.+?)\s+post(?:s|ed)?\s+(?:the\s+)?small\s*blind(?:\s*\$?([\d,]+))?/i },
     { type: 'postBB', re: /^(.+?)\s+post(?:s|ed)?\s+(?:the\s+)?big\s*blind(?:\s*\$?([\d,]+))?/i },
     { type: 'allin', re: /^(.+?)\s+(?:is\s+|goes\s+|went\s+)?all[\s-]?in(?:\s*(?:for|with)?\s*\$?([\d,]+))?/i },
     { type: 'fold', re: /^(.+?)\s+fold(?:s|ed)?\b/i },
     { type: 'check', re: /^(.+?)\s+check(?:s|ed)?\b/i },
     { type: 'call', re: /^(.+?)\s+call(?:s|ed)?\b(?:\s*\$?([\d,]+))?/i },
+    // "raised $1,000,000 to $2,000,000" states the increment first and the total
+    // second; the total is the number that matters for pot and bet-sizing math,
+    // so match this shape ahead of the generic raise below, which would
+    // otherwise capture the increment and understate every raise.
+    { type: 'raise', re: /^(.+?)\s+raise[sd]?\s+\$?[\d,]+\s+to\s+\$?([\d,]+)/i },
     { type: 'raise', re: /^(.+?)\s+raise[sd]?\b(?:\s+to)?(?:\s*\$?([\d,]+))?/i },
     { type: 'bet', re: /^(.+?)\s+bet(?:s|ted)?\b(?:\s*\$?([\d,]+))?/i },
     { type: 'flop', re: /^flop\b:?\s*(.+)/i },
@@ -503,7 +524,13 @@
     };
   }
 
+  // Seats carry the XID directly on the element id (`<div id="player-3722665">`),
+  // which the deep scan confirmed is present on every seat while profile links
+  // are not — only 1 of 6 seats had an anchor. Read the id first and treat the
+  // link as the fallback, not the other way round.
   function resolveXidFromSeat(seatEl) {
+    const byId = /^player-(\d+)$/.exec(seatEl.id || '');
+    if (byId) return byId[1];
     const link = seatEl.querySelector(SELECTORS.seatNameLink);
     if (!link) return null;
     const m = /XID=(\d+)/.exec(link.href || '');
@@ -591,9 +618,16 @@
     saveStore();
   }
 
+  // The body-wide fallback observer sees all of Torn's page chrome, not just the
+  // table — the site's rotating announcement ticker was landing in the unmatched
+  // log and crowding out real lines during calibration. Drop the known chrome
+  // before it reaches the patterns.
+  const LOG_NOISE_RE = /\b(armoury|faction growth|merits|newspaper|classified ad)\b/i;
+
   function handleLogLine(line) {
     const trimmed = cleanLogLine(line);
     if (!trimmed) return;
+    if (LOG_NOISE_RE.test(trimmed)) return;
 
     for (const pattern of LOG_PATTERNS) {
       const m = pattern.re.exec(trimmed);
@@ -986,7 +1020,15 @@
       for (const mut of mutations) {
         mut.addedNodes.forEach((node) => {
           if (isOwnNode(node)) return;
-          const text = (node.textContent || '').trim();
+          // Torn builds a log row as `<li><span>Name</span><span>called $X</span></li>`
+          // and mutates the inner span, so reading the added node alone yielded
+          // "called $3,500,000" with no actor — which failed every name-anchored
+          // pattern and was the real reason no stats were ever recorded. Climb to
+          // the enclosing row so the name and the verb arrive as one line.
+          const el = node.nodeType === 1 ? node : node.parentElement;
+          const row = el && el.closest ? el.closest(SELECTORS.logRow) : null;
+          const source = row || node;
+          const text = (source.textContent || '').trim();
           if (!text || text.length > 1000) return;
           // A single inserted node can carry several rendered lines; parse each
           // separately or a multi-line blob matches nothing at all.
@@ -1390,14 +1432,25 @@
 
   // The coach panel re-renders every 1.5s; recomputing thousands of showdowns
   // each time would cook the phone. Only recompute when the situation changes.
-  let equityCache = { key: null, value: null };
+  //
+  // This is a small keyed cache rather than one slot because the panel now asks
+  // for several opponent counts for the same board (full ring, live, heads-up).
+  // With a single slot each lookup evicted the previous one and nothing ever hit
+  // cache — every render recomputed every figure from scratch.
+  const EQUITY_CACHE_MAX = 12;
+  const equityCache = new Map();
   function estimateEquityCached(heroCards, boardCards, nOpp) {
     const key = heroCards.map((c) => c.rank + c.suit).join('')
       + '|' + (boardCards || []).map((c) => c.rank + c.suit).join('')
       + '|' + nOpp;
-    if (equityCache.key === key) return equityCache.value;
+    if (equityCache.has(key)) return equityCache.get(key);
     const v = estimateEquity(heroCards, boardCards, nOpp);
-    equityCache = { key, value: v };
+    equityCache.set(key, v);
+    // Board changes make old entries unreachable; cap the map so a long session
+    // doesn't accumulate one entry per hand forever.
+    if (equityCache.size > EQUITY_CACHE_MAX) {
+      equityCache.delete(equityCache.keys().next().value);
+    }
     return v;
   }
 
@@ -1471,13 +1524,35 @@
     }));
 
     if (heroCards.length === 2) {
-      const opps = Math.max(1, hand.playersIn.size - 1);
-      const eq = estimateEquityCached(heroCards, board, opps);
-      if (eq != null) {
-        out.push(`Equity ~${eq.toFixed(0)}% vs ${opps} opponent${opps > 1 ? 's' : ''} (random hands).`);
-        if (betFacing > 0) {
+      const live = Math.max(1, hand.playersIn.size - 1);
+      const full = Math.max(1, (STORE.settings.tableMax || 9) - 1);
+
+      // Always quote the full-ring number so the figure means the same thing
+      // every hand — equity against the live count alone swings wildly as people
+      // fold, which makes it useless for judging whether a holding is actually
+      // strong. Add the live count and the heads-up ceiling around it, so you can
+      // see how much the hand gains as the field thins. Duplicates are dropped:
+      // at a 3-handed pot "vs 2" and "vs 2" twice reads as a bug.
+      const wanted = [];
+      [[full, `${full + 1}-max`], [live, 'live'], [1, 'heads-up']].forEach(([n, label]) => {
+        if (!wanted.some((w) => w.n === n)) wanted.push({ n, label });
+      });
+
+      const quotes = wanted
+        .map((w) => ({ ...w, eq: estimateEquityCached(heroCards, board, w.n) }))
+        .filter((w) => w.eq != null);
+
+      if (quotes.length) {
+        out.push('Equity (random hands): '
+          + quotes.map((w) => `<b>${w.eq.toFixed(0)}%</b> vs ${w.n} (${w.label})`).join(' · '));
+
+        // Pot odds compare against the players actually still contesting the
+        // pot — using the full-ring baseline here would tell you to fold
+        // profitable calls in a short-handed pot.
+        const liveEq = quotes.find((w) => w.n === live);
+        if (betFacing > 0 && liveEq) {
           const need = (100 * betFacing) / (hand.pot + betFacing);
-          out.push(`Pot odds: need ${need.toFixed(0)}% to call — ${eq >= need ? 'calling is +EV on raw equity' : 'folding is likely correct'}.`);
+          out.push(`Pot odds: need ${need.toFixed(0)}% to call — ${liveEq.eq >= need ? 'calling is +EV on raw equity' : 'folding is likely correct'}.`);
         }
       }
     } else if (betFacing > 0) {
@@ -1558,8 +1633,26 @@
       box-shadow: 0 2px 8px rgba(0,0,0,0.5); cursor: grab;
       touch-action: none; user-select: none; -webkit-user-select: none; }
     .tph-gear.tph-dragging { cursor: grabbing; opacity: 0.85; }
-    .tph-coach { position: fixed; z-index: 99998; bottom: 150px; right: 12px; left: 12px; background: rgba(20,20,24,0.95);
-      color: #cde; border: 1px solid #556; border-radius: 8px; padding: 8px; font: 12px/1.4 -apple-system, sans-serif; }
+    /* Width is capped rather than left/right-anchored so the panel keeps a
+       sensible size once dragging switches it to left/top positioning. */
+    .tph-coach { position: fixed; z-index: 99998; bottom: 150px; right: 12px;
+      width: min(420px, calc(100vw - 24px)); background: rgba(20,20,24,0.95);
+      color: #cde; border: 1px solid #556; border-radius: 8px; font: 12px/1.4 -apple-system, sans-serif;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.5); }
+    .tph-coach-head { display: flex; align-items: center; gap: 6px; padding: 6px 8px;
+      border-bottom: 1px solid #445; cursor: grab; touch-action: none;
+      user-select: none; -webkit-user-select: none; font-weight: 600; color: #9bd; }
+    .tph-coach-head .tph-grip { opacity: 0.5; letter-spacing: 1px; }
+    .tph-coach-head .tph-coach-hide { margin-left: auto; cursor: pointer; color: #f88;
+      border: 1px solid #a44; border-radius: 4px; padding: 1px 7px; font-weight: 400; }
+    .tph-coach.tph-dragging { opacity: 0.85; }
+    .tph-coach.tph-dragging .tph-coach-head { cursor: grabbing; }
+    .tph-coach-body { padding: 8px; }
+    .tph-coach-body b { color: #fff; }
+    .tph-coach-pill { position: fixed; z-index: 99998; bottom: 150px; right: 12px;
+      background: rgba(20,20,24,0.95); color: #9bd; border: 1px solid #556; border-radius: 999px;
+      padding: 7px 13px; font: 12px/1 -apple-system, sans-serif; cursor: pointer;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.5); user-select: none; -webkit-user-select: none; }
     .tph-calib { position: fixed; z-index: 99999; top: 4px; left: 4px; right: 4px; max-height: 62%; overflow-y: auto;
       background: rgba(10,10,10,0.97); color: #9f9; border: 1px solid #494; border-radius: 6px; padding: 8px;
       font: 10px/1.3 monospace; }
@@ -1612,19 +1705,60 @@
     });
   }
 
+  function setCoachHidden(hidden) {
+    STORE.settings.coachHidden = hidden;
+    saveStore();
+    renderCoachPanel();
+  }
+
   function renderCoachPanel() {
     let el = document.querySelector('.tph-coach');
+    let pill = document.querySelector('.tph-coach-pill');
     const advice = buildCoachAdvice();
+
+    // Nothing to advise on (not in a hand): tear both down rather than leaving a
+    // stale panel or an orphan pill sitting over the table.
     if (!advice || advice.length === 0) {
       if (el) el.remove();
+      if (pill) pill.remove();
       return;
     }
+
+    if (STORE.settings.coachHidden) {
+      if (el) el.remove();
+      if (!pill) {
+        pill = document.createElement('div');
+        pill.className = 'tph-coach-pill';
+        pill.textContent = '📊 GTO';
+        pill.title = 'Show the GTO coach';
+        pill.addEventListener('click', () => setCoachHidden(false));
+        document.body.appendChild(pill);
+      }
+      return;
+    }
+    if (pill) pill.remove();
+
+    // Build the chrome once. This runs every 1.5s, so rewriting the whole
+    // panel's innerHTML would drop the header's drag and hide listeners on
+    // every tick and make the panel impossible to move or dismiss.
     if (!el) {
       el = document.createElement('div');
       el.className = 'tph-coach';
+      el.innerHTML = '<div class="tph-coach-head"><span class="tph-grip">⠿</span>'
+        + '<span>GTO coach</span><span class="tph-coach-hide">Hide</span></div>'
+        + '<div class="tph-coach-body"></div>';
       document.body.appendChild(el);
+
+      const head = el.querySelector('.tph-coach-head');
+      const hide = el.querySelector('.tph-coach-hide');
+      hide.addEventListener('click', (e) => { e.stopPropagation(); setCoachHidden(true); });
+      // Drag the whole panel by its header; no tap action, so a stray tap on the
+      // bar does nothing rather than firing something unexpected.
+      makeDraggable(head, null, 'coachPos', el);
+      applyStoredPos(el, 'coachPos');
     }
-    el.innerHTML = advice.map((line) => `<div>${line}</div>`).join('');
+
+    el.querySelector('.tph-coach-body').innerHTML = advice.map((line) => `<div>${line}</div>`).join('');
   }
 
   let openPlayerXid = null;
@@ -1790,6 +1924,11 @@
       <label><b>Your Torn username:</b> <input type="text" class="tph-hero-name" value="${escapeHtml(STORE.settings.heroName)}" placeholder="required for P/L" style="width:55%"></label><br>
       <div style="opacity:.7;margin:2px 0 10px">Needed to attribute profit/loss and work out your position.</div>
       <label>Min hands before rating: <input type="number" class="tph-min-hands" value="${STORE.settings.minHands}" style="width:60px"></label><br><br>
+      <h4>GTO coach</h4>
+      <label><input type="checkbox" class="tph-coach-toggle" ${STORE.settings.coachHidden ? '' : 'checked'}> Show coach panel</label><br>
+      <label>Full table size: <input type="number" class="tph-table-max" min="2" max="10" value="${STORE.settings.tableMax}" style="width:60px"></label>
+      <div style="opacity:.7;margin:2px 0 6px">Equity is always quoted against a full ring of this size, plus the live and heads-up counts.</div>
+      <button class="tph-coach-reset">Reset coach position</button><br><br>
       <label><input type="checkbox" class="tph-calib-toggle" ${STORE.settings.calibrationMode ? 'checked' : ''}> Calibration mode</label><br><br>
       <h4>GitHub Gist sync</h4>
       <label>OAuth App Client ID: <input type="text" class="tph-client-id" value="${escapeHtml(STORE.settings.githubClientId)}" style="width:70%"></label><br>
@@ -1823,6 +1962,23 @@
     panel.querySelector('.tph-min-hands').addEventListener('change', (e) => {
       STORE.settings.minHands = parseInt(e.target.value, 10) || 20;
       saveStore();
+    });
+    panel.querySelector('.tph-coach-toggle').addEventListener('change', (e) => {
+      setCoachHidden(!e.target.checked);
+    });
+    panel.querySelector('.tph-table-max').addEventListener('change', (e) => {
+      const n = parseInt(e.target.value, 10);
+      STORE.settings.tableMax = Math.min(10, Math.max(2, isNaN(n) ? 9 : n));
+      e.target.value = STORE.settings.tableMax;
+      saveStore();
+    });
+    // An escape hatch for a panel dragged somewhere unreachable — e.g. parked in
+    // a corner that the other screen orientation doesn't have.
+    panel.querySelector('.tph-coach-reset').addEventListener('click', () => {
+      STORE.settings.coachPos = null;
+      saveStore();
+      const coach = document.querySelector('.tph-coach');
+      if (coach) coach.remove(); // rebuilt at the default anchor on the next tick
     });
     panel.querySelector('.tph-calib-toggle').addEventListener('change', (e) => {
       STORE.settings.calibrationMode = e.target.checked;
@@ -2022,9 +2178,9 @@
     });
   }
 
-  // Keep the button fully on screen — also re-applied on rotate/resize so it
-  // can't end up stranded off the edge in the other orientation.
-  function setGearPos(el, left, top) {
+  // Keep a dragged element fully on screen — also re-applied on rotate/resize so
+  // it can't end up stranded off the edge in the other orientation.
+  function setFixedPos(el, left, top) {
     const w = el.offsetWidth || 60;
     const h = el.offsetHeight || 44;
     const L = Math.min(Math.max(0, left), Math.max(0, window.innerWidth - w));
@@ -2035,9 +2191,11 @@
     el.style.bottom = 'auto';
   }
 
-  function applyGearPosition(el) {
-    const p = STORE.settings.gearPos;
-    if (p && typeof p.left === 'number' && typeof p.top === 'number') setGearPos(el, p.left, p.top);
+  // `posKey` names the settings field the position persists to, so the gear and
+  // the coach panel can each remember where they were put independently.
+  function applyStoredPos(el, posKey) {
+    const p = STORE.settings[posKey];
+    if (p && typeof p.left === 'number' && typeof p.top === 'number') setFixedPos(el, p.left, p.top);
   }
 
   // Drag to move, tap to open settings. A small movement threshold separates the
@@ -2045,7 +2203,12 @@
   // the button and doing nothing.
   const DRAG_THRESHOLD_PX = 6;
 
-  function makeDraggable(el, onTap) {
+  // `moveEl` lets a small handle drag a larger element — the coach panel is
+  // dragged by its header bar so the advice text underneath stays selectable
+  // and an accidental touch on the body doesn't shove the panel across the table.
+  // Defaults to the handle itself, which is what the gear button wants.
+  function makeDraggable(el, onTap, posKey, moveEl) {
+    const box = moveEl || el;
     let dragging = false;
     let moved = false;
     let startX = 0, startY = 0, originLeft = 0, originTop = 0, pid = null;
@@ -2054,7 +2217,7 @@
       dragging = true;
       moved = false;
       pid = e.pointerId;
-      const rect = el.getBoundingClientRect();
+      const rect = box.getBoundingClientRect();
       originLeft = rect.left;
       originTop = rect.top;
       startX = e.clientX;
@@ -2068,24 +2231,24 @@
       const dx = e.clientX - startX;
       const dy = e.clientY - startY;
       if (!moved && Math.sqrt(dx * dx + dy * dy) < DRAG_THRESHOLD_PX) return;
-      if (!moved) el.classList.add('tph-dragging');
+      if (!moved) box.classList.add('tph-dragging');
       moved = true;
-      setGearPos(el, originLeft + dx, originTop + dy);
+      setFixedPos(box, originLeft + dx, originTop + dy);
       e.preventDefault();
     });
 
     const endDrag = (e) => {
       if (!dragging || (e.pointerId != null && e.pointerId !== pid)) return;
       dragging = false;
-      el.classList.remove('tph-dragging');
+      box.classList.remove('tph-dragging');
       if (el.releasePointerCapture && pid != null) {
         try { el.releasePointerCapture(pid); } catch (err) { /* ignore */ }
       }
       if (moved) {
-        const rect = el.getBoundingClientRect();
-        STORE.settings.gearPos = { left: rect.left, top: rect.top };
+        const rect = box.getBoundingClientRect();
+        STORE.settings[posKey] = { left: rect.left, top: rect.top };
         saveStore();
-      } else {
+      } else if (onTap) {
         onTap();
       }
     };
@@ -2100,12 +2263,17 @@
     gear.innerHTML = '⚙ <span>HUD</span>';
     gear.title = 'Tap to open settings — drag to move';
     document.body.appendChild(gear);
-    applyGearPosition(gear);
-    makeDraggable(gear, () => { settingsOpen = !settingsOpen; renderSettingsPanel(); });
+    applyStoredPos(gear, 'gearPos');
+    makeDraggable(gear, () => { settingsOpen = !settingsOpen; renderSettingsPanel(); }, 'gearPos');
 
     window.addEventListener('resize', () => {
       const rect = gear.getBoundingClientRect();
-      setGearPos(gear, rect.left, rect.top);
+      setFixedPos(gear, rect.left, rect.top);
+      const coach = document.querySelector('.tph-coach');
+      if (coach && STORE.settings.coachPos) {
+        const cr = coach.getBoundingClientRect();
+        setFixedPos(coach, cr.left, cr.top);
+      }
     });
   }
 

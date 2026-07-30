@@ -31,26 +31,47 @@ inference, session tracking, bet-sizing tells, and optional GitHub Gist sync.
 Torn uses hashed CSS-module class names. Every selector in `SELECTORS` is
 inference, not observation. Do not assume they work.
 
-What one real calibration run has already told us (trust this over guesses):
+A **deep scan v0.3.0 from a live table** has now replaced guesswork for most of
+this. Observed structure (trust this over inference):
 
-| Selector | Result | Implication |
-|---|---|---|
-| `seatContainer` | 9 ✅ | seat detection works |
-| `heroCards` | 2 ✅ | hole cards readable |
-| `logContainer` | **0** ❌ | action log NOT found — body-fallback observer added |
-| `seatNameLink` | **1** ❌ | seats have **no profile links** → identity is by display name, not XID |
-| `communityCards`, `potDisplay`, `actionButtons`, `dealerButton` | 0 ❌ | all unresolved |
+| Thing | Real DOM |
+|---|---|
+| Log list | `UL[class*="messagesList_"]` |
+| Log row | `LI[class*="message_"]`, with `old_`/`current_` state modifiers |
+| Seat | `DIV[id="player-<XID>"]` + `opponent_` / `default_` / `folded_` classes |
+| Pot | `DIV[class*="totalPotWrap_"]` inside `potsWrapper_` |
+| Hero cards | `hand_` → `flipperWrap_` → `flipper_` → `front_` → `spades-5_` |
 
-Log wording is **past tense with status glyphs**: `"✔ ImEx called"`. Patterns
-must accept both tenses and treat amounts as optional — an earlier version
-required present tense and matched literally nothing.
+Two findings that overturn earlier notes:
+
+1. **Identity is by XID after all.** Seats have no profile links (1 of 6), but
+   the XID is on the element id — `id="player-3722665"`. `resolveXidFromSeat`
+   reads the id first and only falls back to the anchor.
+2. **Hashes come in both `name___hash` and `name_hash` shapes**, sometimes for
+   the same base. Match on a single trailing underscore (`[class*="front_"]`);
+   the old `___` prefixes missed roughly half the elements.
+
+Log wording is **past tense, no glyphs, and the row splits the actor from the
+verb**: `<li><span>Name</span><span>called $3,500,000</span></li>`. The observer
+climbs to the enclosing `logRow` before parsing — reading the mutated inner span
+alone yielded `"called $3,500,000"` with no name, which failed every
+name-anchored pattern. That, not the selectors, was why no stat ever recorded.
+
+Other real wording: hand boundary is `<hex id> started`; raises read
+`raised $1,000,000 to $2,000,000` where the **second** figure is the total.
 
 ## Next task
 
-Get a **deep scan** from a live table: in the HUD, ⚙ button → Calibration mode →
-"Run deep scan" → "Copy report". That dumps real class names, seat contents, and
-element ancestry as pasteable text. Use it to fix `SELECTORS` / `LOG_PATTERNS`.
-Until then, treat empty stats as expected, not as a new bug.
+Re-run calibration and confirm actions now attribute to seats. Still unresolved
+by the scan — no data was captured for either, so both remain inference:
+**`actionButtons`** and **`dealerButton`**. Without `dealerButton`, position
+inference has no anchor, so positional stats stay unreliable.
+
+An unexploited find worth considering: `SPAN[class*="srOnly_"]` carries the full
+sentence in plain text — `"GhostNote420 checked The river: 4 of hearts"` — with
+spelled-out card names. It is a cleaner parse target than the visual log, but
+feeding both sources into the parser risks double-counting actions, so it needs
+dedup by (actor, action, street) rather than by raw text.
 
 Also unset by default and required for profit/loss to work at all:
 **Settings → Your Torn username.** With it blank, `heroXid` is null and no P/L
