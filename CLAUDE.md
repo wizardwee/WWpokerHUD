@@ -19,7 +19,7 @@ single hand-edited file. Userscript managers compare `@version` to decide
 whether an update exists, so leaving it stale means a reinstall elsewhere won't
 see new code as newer. Bump it in the same commit as the change.
 
-## Current status (v0.15.0)
+## Current status (v0.16.0)
 
 Selectors and log wording are **calibrated against real scans**. Parsing is
 believed working — action rows no longer appear unmatched — but no stat or
@@ -245,6 +245,33 @@ header where an editor will see them.
 
 Leave alone: the numbered section scheme itself (renumbering churns the whole
 file for no behavioural gain), and the single-file structure.
+
+## Names must be bound explicitly (v0.16.0)
+
+`emptyPlayer(xid, name)` falls back to `'#' + xid` when no name is given, and
+that placeholder is stored in `.name` — where it is indistinguishable from a
+real name. For a long time **nothing ever passed a name**: `getPlayer(xid, name)`
+was never once called with the second argument, so every record was created
+holding `#3722665` and the hand history rendered ids instead of usernames.
+
+Two sources feed names now, and both must keep working:
+
+1. `noteResolvedName(xid, name)` at the point `nameToXidGuess` matches a log name
+   to a seat — the name was already in hand there and was being thrown away. It
+   merges any `name:` pseudo-record *first* (that function bails when the real
+   record already exists) and then writes the name.
+2. `harvestSeatNames()` reads the seat's own name element on the 3s watcher tick.
+   `SELECTORS.seatName` had been declared and read by nothing. This names players
+   who are sitting there but haven't acted, and repairs records stored under the
+   placeholder by earlier versions.
+
+`seatDisplayName` validates against `USERNAME_RE` before believing scraped text,
+because `[class*="name_"]` can just as easily land on a wrapper holding the chip
+stack — "$41,200,000" must not become someone's name.
+
+`playerDisplayName` treats `'#' + xid` as *absent*, not as a name, so a stored
+placeholder can never shadow a real one. Hand records store XIDs rather than
+names, so history renders correctly retroactively once a name is learned.
 
 ## Position comes from the seat ring (v0.15.0)
 

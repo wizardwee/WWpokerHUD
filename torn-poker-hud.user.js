@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.15.0
+// @version      0.16.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -14,6 +14,18 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 0.16.0 - Usernames are actually recorded. Hand history showed "#3722665"
+ *          instead of names because nothing ever bound a name to an XID:
+ *          getPlayer(xid, name) accepts a name and was never once called with
+ *          one, so emptyPlayer() stored its "#<xid>" placeholder as the player's
+ *          real name and playerDisplayName returned it forever. The name was
+ *          known at the point nameToXidGuess resolved the seat and was simply
+ *          discarded. Two sources now feed it: that resolution point, and
+ *          harvestSeatNames, which reads the seat's own name element —
+ *          SELECTORS.seatName was declared and read by nothing until now, so a
+ *          player who never acted was never named either. Records already
+ *          holding the placeholder repair themselves on sight, and hand history
+ *          re-renders correctly because it stores XIDs, not names.
  * 0.15.0 - Position is read from HERO'S SEAT, not from the action. It used to
  *          assume "hero must be the next seat to act" whenever hero wasn't yet
  *          in the log's action rotation — true only at hero's own decision
@@ -776,16 +788,30 @@
       const link = seat.querySelector(SELECTORS.seatNameLink);
       if (link && (link.textContent || '').trim() === name) {
         const xid = resolveXidFromSeat(seat);
-        if (xid) { mergePseudoPlayer(xid, name); return xid; }
+        if (xid) { noteResolvedName(xid, name); return xid; }
       }
     }
     for (const seat of seats) {
       if ((seat.textContent || '').includes(name)) {
         const xid = resolveXidFromSeat(seat);
-        if (xid) { mergePseudoPlayer(xid, name); return xid; }
+        if (xid) { noteResolvedName(xid, name); return xid; }
       }
     }
     return 'name:' + name; // fallback pseudo-id if XID can't be resolved yet
+  }
+
+  // Bind a display name to a numeric XID.
+  //
+  // Nothing did this before: getPlayer(xid, name) accepts a name but was never
+  // once called with one, so emptyPlayer() stored the "#3722665" placeholder as
+  // the player's actual name and playerDisplayName happily returned it. That is
+  // why hand history showed ids instead of usernames — the name was known at
+  // this exact point every time and simply thrown away.
+  function noteResolvedName(xid, name) {
+    mergePseudoPlayer(xid, name); // must run first: it bails if the record exists
+    if (!name) return;
+    const p = getPlayer(xid);
+    if (p.name !== name) { p.name = name; saveStore(); }
   }
 
   // If this player was previously tracked under a name-based pseudo-id (because
@@ -801,6 +827,42 @@
     STORE.players[xid] = pseudo;
     delete STORE.players[pseudoKey];
     saveStore();
+  }
+
+  // Torn usernames are alphanumeric plus _ and -. Used to decide whether text
+  // scraped off a seat is actually a name, since SELECTORS.seatName matches on
+  // `name_` and could just as easily land on a wrapper holding the chip stack.
+  const USERNAME_RE = /^[A-Za-z0-9_\-]{1,20}$/;
+
+  function seatDisplayName(seat) {
+    const link = seat.querySelector(SELECTORS.seatNameLink);
+    const fromLink = cleanName(link ? link.textContent : '');
+    if (fromLink && USERNAME_RE.test(fromLink)) return fromLink;
+    const el = seat.querySelector(SELECTORS.seatName);
+    if (!el) return null;
+    // Take the first line only — the name element may also wrap the stack.
+    const first = cleanName((el.textContent || '').split('\n')[0]);
+    return first && USERNAME_RE.test(first) ? first : null;
+  }
+
+  // Read usernames straight off the seats. This is a second, independent source
+  // from the log: it names a player who is sitting there but hasn't acted yet,
+  // and it repairs records already stored under the "#<xid>" placeholder.
+  // SELECTORS.seatName was declared and read by nothing until now.
+  function harvestSeatNames() {
+    let dirty = false;
+    document.querySelectorAll(SELECTORS.seatContainer).forEach((seat) => {
+      const xid = resolveXidFromSeat(seat);
+      if (!xid) return;
+      const name = seatDisplayName(seat);
+      if (!name) return;
+      const existing = STORE.players[xid];
+      if (existing && existing.name === name) return;
+      mergePseudoPlayer(xid, name);
+      getPlayer(xid).name = name;
+      dirty = true;
+    });
+    if (dirty) saveStore();
   }
 
   // The body-wide fallback observer sees all of Torn's page chrome, not just the
@@ -1157,10 +1219,14 @@
     return false;
   }
 
+  // "#<xid>" is emptyPlayer's placeholder, not a name anyone chose. Treat it as
+  // absent so a stored placeholder can never shadow a real name, and so callers
+  // can tell the two apart.
   function playerDisplayName(xid) {
     const p = STORE.players[xid];
-    if (p && p.name) return p.name;
-    return String(xid).startsWith('name:') ? String(xid).slice(5) : '#' + xid;
+    const placeholder = '#' + xid;
+    if (p && p.name && p.name !== placeholder) return p.name;
+    return String(xid).startsWith('name:') ? String(xid).slice(5) : placeholder;
   }
 
   // Render one stored hand as a compact, readable summary.
@@ -1492,7 +1558,11 @@
     setInterval(() => {
       if (!heroXid) heroXid = findHeroXid();
       attachLogObserver();
+      // Cheap, and it repairs "#<xid>" names from earlier versions as soon as
+      // that player is seen at a table again.
+      harvestSeatNames();
     }, 3000);
+    harvestSeatNames();
 
     // Safety net. The snapshot scan is idempotent — a poll that finds nothing new
     // emits nothing — so it costs a textContent read per row and covers any
