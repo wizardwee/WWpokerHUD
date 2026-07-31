@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.14.0
+// @version      0.15.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -14,6 +14,22 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 0.15.0 - Position is read from HERO'S SEAT, not from the action. It used to
+ *          assume "hero must be the next seat to act" whenever hero wasn't yet
+ *          in the log's action rotation — true only at hero's own decision
+ *          point, but the coach re-renders continuously (actionButtons matches
+ *          nothing, so it falls back to "hole cards visible"), so the index grew
+ *          with every opponent who acted and the label followed whoever was on
+ *          action. Seats are now ordered by their on-screen geometry and rotated
+ *          so the small blind is first, with the big blind fixing the direction;
+ *          the log rotation is a fallback used only once hero has really acted.
+ *          heroIsInPositionVs had the same flaw and silently picked the looser
+ *          in-position 3-bet chart; it now uses the seat ring or returns unknown.
+ *          Seat badges show a TYPE again — below the hand minimum they show the
+ *          provisional archetype with a "?" instead of just "13h", which said
+ *          nothing about the player. History cards and the panel now pin their
+ *          own colours (!important, no inherited text colour, card LIGHTER than
+ *          the panel) because Torn's stylesheet was leaving them unreadable.
  * 0.14.0 - Hand history in the player panel is rendered as one block per hand
  *          instead of up to 40 hands run together in a single monospace <pre>
  *          on the panel's own background; the tracked player's actions are
@@ -1533,6 +1549,14 @@
 
   function classify(player) {
     if (player.hands < STORE.settings.minHands) return 'Unrated';
+    return classifyProvisional(player);
+  }
+
+  // Same rules with no minimum-hands gate. The seat badge uses this so a player
+  // you have only just met still gets a readable type rather than the word
+  // "Unrated", which is the least useful thing a HUD can put on the felt. The
+  // caller is responsible for marking it as provisional.
+  function classifyProvisional(player) {
     const r = computeRates(player);
     for (const rule of ARCHETYPE_RULES) {
       if (rule.test(r)) return rule.name;
@@ -1704,17 +1728,22 @@
     return seen.size;
   }
 
-  // True if hero acts after `villainXid` postflop. The rotation is SB-first,
-  // which is exactly postflop order, so a later index means later to act.
-  // Returns null when it can't be established — the caller must not guess.
+  // True if hero acts after `villainXid` POSTFLOP, which is what "in position"
+  // means for the 3-bet chart. Both rotations are SB-first — exactly postflop
+  // order — so a later index means later to act.
+  //
+  // Prefer the seat ring. The log rotation only contains players who have acted,
+  // and this used to fall back to "hero hasn't acted, so hero is after everyone
+  // who has" — which answers a question about PREFLOP order, and quietly picked
+  // the looser in-position chart whenever hero hadn't acted yet. Returning null
+  // is the honest answer; the caller then uses the tighter chart and says so.
   function heroIsInPositionVs(hand, villainXid) {
     if (!heroXid || !villainXid) return null;
-    const rot = buildRotation(hand);
+    const rot = seatRotationFromDom(hand) || buildRotation(hand);
     if (!rot) return null;
     const vi = rot.indexOf(villainXid);
-    if (vi < 0) return null;
-    let hi = rot.indexOf(heroXid);
-    if (hi < 0) hi = rot.length; // yet to act preflop, so after everyone who has
+    const hi = rot.indexOf(heroXid);
+    if (vi < 0 || hi < 0) return null;
     return hi > vi;
   }
 
@@ -2032,42 +2061,93 @@
         : 'set your username in Settings';
     }
     if (!hand.sbXid) return 'no blind posts read from the log yet this hand';
-    if (!buildRotation(hand)) return 'not enough action read to order the table';
-    if (buildRotation(hand).indexOf(heroXid) < 0) return 'you have not appeared in the parsed action yet';
+    // The seat-layout path is preferred and needs hero's seat to be resolvable
+    // in the DOM; the log path is the fallback and needs hero to have acted.
+    if (!seatRotationFromDom(hand)) {
+      const rot = buildRotation(hand);
+      if (!rot) return 'could not order the seats on screen, and not enough action read yet';
+      if (rot.indexOf(heroXid) < 0) return 'could not order the seats on screen, and you have not acted yet this hand';
+      return null;
+    }
+    if (seatRotationFromDom(hand).indexOf(heroXid) < 0) {
+      return 'your seat is not among the ones readable on screen — check the username in Settings';
+    }
     return null;
   }
 
-  // Returns { label, inferred } or null.
+  // Sort seats into table order using their positions on screen. Torn lays the
+  // table out as an oval, so sorting by angle around the centroid recovers the
+  // seating ring regardless of DOM order.
+  function orderSeatsByAngle(seats) {
+    if (seats.length < 2) return null;
+    const cx = seats.reduce((s, p) => s + p.cx, 0) / seats.length;
+    const cy = seats.reduce((s, p) => s + p.cy, 0) / seats.length;
+    return seats
+      .map((p) => ({ xid: p.xid, ang: Math.atan2(p.cy - cy, p.cx - cx) }))
+      .sort((a, b) => a.ang - b.ang)
+      .map((p) => p.xid);
+  }
+
+  // Rotate a seating ring so the small blind is index 0, and orient it so the
+  // big blind lands at index 1. The BB is what tells us which way round the
+  // table the action travels — an angular sort could be either direction, and
+  // getting it backwards would mirror every position.
+  function rotateToBlinds(order, sbXid, bbXid) {
+    if (!order || !sbXid) return null;
+    const si = order.indexOf(sbXid);
+    if (si < 0) return null;
+    const fwd = order.slice(si).concat(order.slice(0, si));
+    if (!bbXid || fwd.length === 2) return fwd; // heads-up: only one other seat
+    if (fwd[1] === bbXid) return fwd;
+    const rev = [fwd[0]].concat(fwd.slice(1).reverse());
+    if (rev[1] === bbXid) return rev;
+    return null; // direction can't be established — don't guess
+  }
+
+  function seatRotationFromDom(hand) {
+    if (!hand.sbXid) return null;
+    const seats = [];
+    document.querySelectorAll(SELECTORS.seatContainer).forEach((el) => {
+      const xid = resolveSeatKey(el);
+      if (!xid) return;
+      const r = el.getBoundingClientRect();
+      if (!r.width && !r.height) return; // not laid out / empty seat
+      seats.push({ xid, cx: r.left + r.width / 2, cy: r.top + r.height / 2 });
+    });
+    return rotateToBlinds(orderSeatsByAngle(seats), hand.sbXid, hand.bbXid);
+  }
+
+  // Returns { label, inferred, seats } or null.
   //
-  // The rotation only contains players who have already acted, so at a preflop
-  // decision — the one moment an RFI chart is worth anything — you are not in it
-  // unless you posted a blind. Rather than give up there, take the fact that it
-  // is your turn as the position itself: preflop action passes each seat once in
-  // order, so the next seat to act is the one immediately after the last player
-  // in the rotation. That is an inference, and it is flagged as one.
-  //
-  // Table size comes from the seats rather than the rotation. `rot.length` only
-  // counts players who acted, so a player sitting out would otherwise shift
-  // every label after them — naming the real cutoff as the button.
+  // Position is read from WHERE HERO SITS relative to the small blind, not from
+  // how much action has happened. The previous version had no way to place hero
+  // until hero acted, so it assumed "hero must be the next seat to act" and set
+  // the index to the length of the action rotation. That is only true at hero's
+  // own decision point — but the coach panel re-renders continuously (it falls
+  // back to "your hole cards are visible" because actionButtons matches nothing
+  // on this table), so the index grew with every opponent who acted and the
+  // label tracked whoever was on action instead of hero. Do not reintroduce
+  // that inference.
   function heroPositionLabel(hand) {
     if (!heroXid) return null;
-    const rot = buildRotation(hand);
-    if (!rot) return null;
 
-    let i = rot.indexOf(heroXid);
-    let inferred = false;
-    if (i < 0) {
-      // Only valid preflop. Postflop the order is SB-first and unrelated to who
-      // has yet to act, so the same trick would produce a confident wrong seat.
-      if (hand.street !== 'preflop') return null;
-      i = rot.length;
-      inferred = true;
+    // Exact, and available from the moment the blinds are posted.
+    const domRot = seatRotationFromDom(hand);
+    if (domRot) {
+      const i = domRot.indexOf(heroXid);
+      if (i >= 0) return { label: seatLabel(i, domRot.length), inferred: false, seats: domRot.length };
     }
 
+    // Fallback: order reconstructed from the log. Hero's index must be REAL
+    // here — if hero hasn't acted yet there is no honest answer, so say so
+    // rather than assume a seat.
+    const rot = buildRotation(hand);
+    if (!rot) return null;
+    const i = rot.indexOf(heroXid);
+    if (i < 0) return null;
     const n = Math.max(countSeats(hand), i + 1, rot.length);
     if (n < 2) return null;
-
-    return { label: seatLabel(i, n), inferred, seats: n };
+    return { label: seatLabel(i, n), inferred: true, seats: n };
   }
 
   // How many players were actually at the table this hand.
@@ -2257,15 +2337,19 @@
     /* Deliberately understated and anchored UNDER the seat: at 11px with a solid
        border sitting above the seat it covered the player's name, which is the
        one thing on a seat you always need to read. */
-    .tph-badge { position: fixed; z-index: 99998; background: rgba(12,12,16,0.62); color: #9aa;
-      border: none; border-radius: 3px; padding: 0 3px; font: 9px/1.5 -apple-system, sans-serif;
+    .tph-badge { position: fixed; z-index: 99998; background: rgba(10,10,14,0.82) !important;
+      color: #cfd6dd !important; border: none; border-radius: 3px; padding: 1px 4px;
+      font: 10px/1.45 -apple-system, sans-serif !important;
       letter-spacing: 0.2px; white-space: nowrap; cursor: pointer; pointer-events: auto;
-      max-width: 120px; overflow: hidden; }
-    .tph-badge b { color: #c8a24a; font-weight: 600; }
-    .tph-badge .tph-badge-dim { opacity: 0.55; }
+      max-width: 140px; overflow: hidden; }
+    .tph-badge b { color: #ffc94d !important; font-weight: 700; }
+    .tph-badge .tph-badge-dim { color: #9fb0bf !important; }
+    /* background/color pinned: we inject into Torn's page, so an inherited or
+       lower-specificity colour can be overridden by their stylesheet and leave
+       dark text on a dark panel. */
     .tph-panel { position: fixed; z-index: 99999; top: 10%; left: 5%; right: 5%; max-height: 80%; overflow-y: auto;
-      background: #1b1b1f; color: #eee; border: 1px solid #666; border-radius: 8px; padding: 12px;
-      font: 13px/1.4 -apple-system, sans-serif; }
+      background: #1b1b1f !important; color: #eee !important; border: 1px solid #666; border-radius: 8px; padding: 12px;
+      font: 13px/1.4 -apple-system, sans-serif; opacity: 1 !important; }
     .tph-panel h3 { margin: 0 0 8px; font-size: 15px; }
     .tph-panel textarea { width: 100%; height: 90px; background: #111; color: #ddd; border: 1px solid #444; }
     .tph-panel .tph-tabs { display: flex; gap: 6px; margin-bottom: 8px; }
@@ -2282,15 +2366,22 @@
        the panel's own background — nothing separated one hand from the next and
        the focus player was marked only by a "*". Each hand is now its own block
        with its own surface, and their actions are coloured rather than starred. */
-    .tph-hh { background: #131317; border: 1px solid #2b2b33; border-left: 3px solid #4a5568;
-      border-radius: 5px; padding: 7px 9px; margin-bottom: 8px; }
-    .tph-hh-head { font-size: 11px; opacity: 0.6; margin-bottom: 5px; }
-    .tph-hh-row { font-size: 12px; line-height: 1.55; }
-    .tph-hh-st { display: inline-block; min-width: 54px; color: #7fb0d8; font-size: 10px;
-      text-transform: uppercase; letter-spacing: 0.5px; opacity: 0.85; }
-    .tph-hh-me { color: #ffd166; font-weight: 600; }
-    .tph-hh-sd { font-size: 11px; color: #c3a2dd; margin-top: 3px; }
-    .tph-hh-win { font-size: 12px; color: #7ed957; margin-top: 3px; }
+    /* Every colour here is explicit and !important, and nothing relies on
+       inheritance or opacity. Torn's own page stylesheet is an unknown quantity
+       that we are injecting into — a recessed card tinted only slightly darker
+       than the panel, with inherited text colour, came out unreadable on the
+       real page. A clearly LIGHTER card with pinned foreground colours does not
+       depend on winning the cascade. */
+    .tph-hh { background: #2a2a33 !important; color: #f2f4f6 !important;
+      border: 1px solid #3d3d48; border-left: 3px solid #6b8cae;
+      border-radius: 5px; padding: 8px 10px; margin-bottom: 9px; }
+    .tph-hh-head { font-size: 11px; color: #a8b2bd !important; margin-bottom: 6px; }
+    .tph-hh-row { font-size: 12.5px; line-height: 1.6; color: #f2f4f6 !important; }
+    .tph-hh-st { display: inline-block; min-width: 54px; color: #8ec5f0 !important;
+      font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .tph-hh-me { color: #ffc94d !important; font-weight: 700; }
+    .tph-hh-sd { font-size: 11.5px; color: #d4b3f0 !important; margin-top: 4px; }
+    .tph-hh-win { font-size: 12.5px; color: #8ce89a !important; margin-top: 4px; }
     .tph-close { position: absolute; top: 8px; right: 10px; cursor: pointer; }
     /* Raised well above the bottom edge so it doesn't sit under Torn PDA's own
        native controls, enlarged and labelled so it's unmistakably OUR button. */
@@ -2382,12 +2473,19 @@
       badge.style.left = Math.max(0, rect.left) + 'px';
       const label = player ? classify(player) : 'Unrated';
       const r = player ? computeRates(player) : {};
-      // Bare numbers, no "%" and no "AFq" caption: three percent signs and a
-      // label per seat is a lot of ink for something sitting on the felt.
-      badge.innerHTML = label === 'Unrated'
-        ? `<span class="tph-badge-dim">${player ? player.hands : 0}h</span>`
-        : `<b>${label}</b> <span class="tph-badge-dim">${fmtNum(r.vpip)}/${fmtNum(r.pfr)}/${fmtNum(r.afq)}</span>`;
-      badge.title = 'VPIP/PFR/AFq — tap for full stats';
+      // Always show a TYPE, never just a hand count. Below minHands `classify`
+      // returns "Unrated", which told you nothing about the player — the read is
+      // the point of the badge. Show the provisional archetype with a "?" so it
+      // is visibly not yet trustworthy, and keep the numbers alongside it.
+      const hands = player ? player.hands : 0;
+      const type = hands === 0 ? 'new'
+        : (label === 'Unrated' ? classifyProvisional(player) + '?' : label);
+      badge.innerHTML = hands === 0
+        ? `<b>new</b>`
+        : `<b>${type}</b> <span class="tph-badge-dim">${fmtNum(r.vpip)}/${fmtNum(r.pfr)}/${fmtNum(r.afq)}</span>`;
+      badge.title = `${playerDisplayName(xid)} — ${hands} hand(s) seen. VPIP/PFR/AFq.`
+        + (label === 'Unrated' && hands > 0 ? ` "?" = provisional, under the ${STORE.settings.minHands}-hand minimum.` : '')
+        + ' Tap for full stats.';
       badge.addEventListener('click', () => openPlayerPanel(xid));
       document.body.appendChild(badge);
     });

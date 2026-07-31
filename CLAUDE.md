@@ -19,7 +19,7 @@ single hand-edited file. Userscript managers compare `@version` to decide
 whether an update exists, so leaving it stale means a reinstall elsewhere won't
 see new code as newer. Bump it in the same commit as the change.
 
-## Current status (v0.14.0)
+## Current status (v0.15.0)
 
 Selectors and log wording are **calibrated against real scans**. Parsing is
 believed working — action rows no longer appear unmatched — but no stat or
@@ -246,21 +246,47 @@ header where an editor will see them.
 Leave alone: the numbered section scheme itself (renumbering churns the whole
 file for no behavioural gain), and the single-file structure.
 
+## Position comes from the seat ring (v0.15.0)
+
+`heroPositionLabel` reads **where hero sits**, via `seatRotationFromDom`: collect
+every resolvable seat's centre from `getBoundingClientRect`, sort by angle around
+the centroid (Torn's table is an oval, so that recovers the seating ring
+regardless of DOM order), rotate so `sbXid` is index 0, and use `bbXid` to fix
+the direction — an angular sort could run either way, and mirroring the table
+would mirror every position. If the BB is not adjacent to the SB in either
+direction, `rotateToBlinds` returns null rather than guessing.
+
+**Do not reintroduce the old inference.** It set hero's index to
+`buildRotation(hand).length` — "hero must be the next seat to act". That holds
+only at hero's own decision point, but the coach panel re-renders continuously
+(`isHeroTurn()` can't work because `actionButtons` matches nothing, so it falls
+back to "your hole cards are visible"). The index therefore grew with every
+opponent who acted, and the reported position walked around the table following
+the action instead of naming hero's seat. This was reported from a live table.
+
+`heroIsInPositionVs` had the same bug in a quieter form — with hero not yet in
+the rotation it concluded hero was in position vs the raiser, which is a claim
+about preflop order, not postflop, and it silently selected the looser
+in-position 3-bet chart. It now uses the seat ring, or returns null so the caller
+takes the tighter chart and says so.
+
+The log rotation survives only as a fallback, and only when hero's index in it is
+real. Known remaining exposure: a seated player who is sitting out still occupies
+a seat in the ring, which would shift labels by one.
+
 ## Next task
 
-Confirm at a live table that stats populate and that inferred positions ("CO?")
-are actually right. The position inference assumes every seat between the BB and
-hero has acted; if Torn silently skips a seat (already all-in, or timed out
-without a log line) the labels drift by one in a consistent direction.
+Confirm at a live table that stats populate and that positions are right now
+that they come from the seat ring rather than the action.
 
-Still unresolved, and both remain inference: **`actionButtons`** and
+Still unresolved: **`actionButtons`** (matches nothing, which is why the coach
+can't tell whose turn it is — the cause of the position bug above) and
 **`dealerButton`**.
 
-`dealerButton` is a red herring for position — it is declared in `SELECTORS` and
-referenced nowhere else. Position comes entirely from the log: `buildRotation`
-needs a parsed `postSB` line for `sbXid`, then orders the table by preflop
-action. **Position therefore depends on log parsing working, not on finding the
-dealer button.** Fixing that selector would not move position on its own.
+`dealerButton` remains a red herring: it is declared in `SELECTORS` and
+referenced nowhere else. The seat ring is anchored on the small blind parsed from
+the log, not on the button, so **position depends on the `postSB` line being
+parsed plus seats being readable in the DOM** — not on finding the dealer button.
 
 An unexploited find worth considering: `SPAN[class*="srOnly_"]` carries the full
 sentence in plain text — `"GhostNote420 checked The river: 4 of hearts"` — with
