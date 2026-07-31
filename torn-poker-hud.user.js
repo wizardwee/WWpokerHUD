@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.17.0
+// @version      0.18.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -14,6 +14,24 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 0.18.0 - Fixes from the first live deep scan (v0.17.0, 5-handed table).
+ *          The coach was printing "defend roughly NaN% of your range (MDF)":
+ *          minimumDefenseFrequency computed pot/(pot+bet), and BOTH were zero
+ *          because the log snapshot is primed rather than parsed on attach, so
+ *          hand.pot starts at 0 whenever the HUD loads mid-hand. It returns null
+ *          now and the coach says the pot is unknown instead of printing NaN.
+ *          Root fix: the pot is read from the table. The scan confirmed
+ *          DIV.potsWrapper_ > DIV.totalPotWrap_ renders "POT:$7,000,000", so
+ *          readDomPot parses it and effectivePot prefers it over the running log
+ *          sum. This closes the longest-standing known gap — the pot previously
+ *          had NO cross-check, and any missed amount skewed pot odds and MDF for
+ *          the rest of the hand with nothing to detect it.
+ *          Equity was quoted "vs 8 (9-max)" at a five-handed table because the
+ *          baseline came from the tableMax setting; it now uses the seat count
+ *          observed that hand. Sub-1% equity printed a flat "0%", which reads as
+ *          "cannot win" rather than "under one percent" — it shows "<1%" now.
+ *          Deep scan reports both pot figures and flags a mismatch, plus heroXid
+ *          and why it failed to resolve.
  * 0.17.0 - Per-opponent P/L was wrong, not just badly formatted. Each opponent's
  *          share was their contribution divided by the total contributed
  *          INCLUDING hero's own, so the shares never summed to 1 — heads-up,
@@ -197,7 +215,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '0.17.0';
+  const HUD_VERSION = '0.18.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -1656,6 +1674,17 @@
     return v == null ? '–' : v.toFixed(0);
   }
 
+  // Equity rounded to whole percent printed a flat "0%" for anything under 0.5,
+  // which reads as "this hand cannot win" when it means "under one percent".
+  // Against 8 random hands a weak holding genuinely lands there, so the
+  // distinction matters.
+  function fmtEquity(v) {
+    if (v == null) return '–';
+    if (v > 0 && v < 0.5) return '<1%';
+    if (v < 100 && v >= 99.5) return '>99%';
+    return v.toFixed(0) + '%';
+  }
+
   // Torn poker runs at millions per blind, so raw digit strings are unreadable
   // and even comma-grouped ones are long. Abbreviate at millions and above,
   // comma-group below that. Several call sites printed a bare Math.round() with
@@ -1880,8 +1909,15 @@
     return range.has(handToShorthand(cardA, cardB));
   }
 
+  // Fraction of the time the defender must continue. Returns null when the pot
+  // isn't known: 0/(0+0) is NaN, and "defend roughly NaN% of your range" was
+  // reaching the live coach panel whenever the script loaded mid-hand, because
+  // the log snapshot is primed (not parsed) on attach so hand.pot starts at 0.
   function minimumDefenseFrequency(bet, pot) {
-    return pot / (pot + bet); // fraction of the time defender must continue
+    const p = Number(pot) || 0;
+    const b = Number(bet) || 0;
+    if (p + b <= 0) return null;
+    return p / (p + b);
   }
 
   // How many players limped in before any raise. An RFI chart is a raise-FIRST-in
@@ -1985,11 +2021,12 @@
   function gtoBaselineSuggestion(ctx) {
     const { street, heroCards, betFacing, pot } = ctx;
     if (street === 'preflop' && heroCards) return preflopBaseline(ctx);
-    if (betFacing != null && pot != null) {
-      const mdf = minimumDefenseFrequency(betFacing, pot);
-      return `Baseline: defend roughly ${fmtPct(mdf * 100)} of your range here (MDF).`;
+    const mdf = minimumDefenseFrequency(betFacing, pot);
+    if (mdf != null) {
+      return `Baseline: defend roughly ${fmtPct(mdf * 100)} of your range here (MDF), pot ${fmtMoney(pot)}.`;
     }
-    return 'Baseline: check/bet a balanced portion of your range.';
+    return 'Baseline: check/bet a balanced portion of your range. (Pot size unknown '
+      + 'this hand — no MDF or pot odds; this happens when the HUD starts mid-hand.)';
   }
 
   function exploitDeviation(villainXid) {
@@ -2058,6 +2095,41 @@
     const cards = [];
     els.forEach((el) => { const c = parseCardEl(el); if (c) cards.push(c); });
     return cards.slice(0, 2);
+  }
+
+  // Read the pot straight off the table.
+  //
+  // Confirmed live (v0.17.0 scan): DIV.potsWrapper_ > DIV.totalPotWrap_, whose
+  // text is "POT:$7,000,000". Until now the pot was ONLY the running sum of
+  // parsed log amounts, which starts at zero whenever the HUD attaches mid-hand
+  // (the visible log is primed, not parsed) and drifts permanently on any amount
+  // the parser misses. That silently corrupted pot odds and MDF — and produced
+  // "defend roughly NaN%" on a live table.
+  //
+  // The DOM figure is authoritative when present; the log sum stays as fallback.
+  function readDomPot() {
+    for (const sel of ['[class*="totalPotWrap_"]', '[class*="potsWrapper_"]']) {
+      const el = document.querySelector(sel);
+      if (!el) continue;
+      const text = el.textContent || '';
+      let best = null;
+      const re = /\$\s*([\d,]+)/g;
+      let m;
+      // Side pots put several figures in the wrapper; the total is the largest.
+      while ((m = re.exec(text))) {
+        const v = parseAmount(m[1]);
+        if (v > 0 && (best === null || v > best)) best = v;
+      }
+      if (best !== null) return best;
+    }
+    return null;
+  }
+
+  // Pot to reason with: the table's own number if we can read it, else our sum.
+  function effectivePot(hand) {
+    const dom = readDomPot();
+    if (dom != null) return dom;
+    return (hand && hand.pot) || 0;
   }
 
   function readBoardCards() {
@@ -2395,6 +2467,8 @@
     const betFacing = villainXid ? (hand.streetContributions[villainXid] || 0) : 0;
     const pos = heroPositionLabel(hand);
     const position = pos ? pos.label : null;
+    // Prefer the table's own pot over our running log sum — see readDomPot.
+    const pot = effectivePot(hand);
     const out = [];
 
     out.push(gtoBaselineSuggestion({
@@ -2403,7 +2477,7 @@
       positionInferred: !!(pos && pos.inferred),
       heroCards: heroCards.length === 2 ? heroCards : null,
       betFacing,
-      pot: hand.pot,
+      pot,
       posDiag: position ? null : positionDiagnosis(hand),
       // Seat count for THIS hand picks the chart set — Torn runs both short and
       // full ring, and the tableMax setting only drives the equity quote.
@@ -2424,7 +2498,12 @@
 
     if (heroCards.length === 2) {
       const live = Math.max(1, hand.playersIn.size - 1);
-      const full = Math.max(1, (STORE.settings.tableMax || 9) - 1);
+      // Seats actually at THIS table. The tableMax setting (default 9) was
+      // quoting "vs 8 (9-max)" at a five-handed table, which is a number about
+      // a game you are not playing. Fall back to the setting only when the seat
+      // count can't be read.
+      const seatsNow = (pos && pos.seats) || countSeats(hand) || STORE.settings.tableMax || 9;
+      const full = Math.max(1, seatsNow - 1);
 
       // Always quote the full-ring number so the figure means the same thing
       // every hand — equity against the live count alone swings wildly as people
@@ -2443,14 +2522,14 @@
 
       if (quotes.length) {
         out.push('Equity (random hands): '
-          + quotes.map((w) => `<b>${w.eq.toFixed(0)}%</b> vs ${w.n} (${w.label})`).join(' · '));
+          + quotes.map((w) => `<b>${fmtEquity(w.eq)}</b> vs ${w.n} (${w.label})`).join(' · '));
 
         // Pot odds compare against the players actually still contesting the
         // pot — using the full-ring baseline here would tell you to fold
         // profitable calls in a short-handed pot.
         const liveEq = quotes.find((w) => w.n === live);
         if (betFacing > 0 && liveEq) {
-          const need = (100 * betFacing) / (hand.pot + betFacing);
+          const need = (100 * betFacing) / (pot + betFacing);
           out.push(`Pot odds: need ${need.toFixed(0)}% to call — ${liveEq.eq >= need ? 'calling is +EV on raw equity' : 'folding is likely correct'}.`);
         }
       }
@@ -3097,6 +3176,15 @@
       : 'added-nodes fallback — logRow selector matches nothing'));
     L.push('handsRecorded: ' + (STORE.hands || []).length
       + ', withGameId: ' + (STORE.hands || []).filter((h) => h && h.g).length);
+    // The two pots should agree mid-hand. A DOM pot with a log pot of 0 means
+    // the HUD attached mid-hand; a persistent mismatch means the parser is
+    // missing amounts, which silently skews pot odds and MDF.
+    const domPot = readDomPot();
+    L.push('pot: dom=' + (domPot == null ? 'UNREADABLE' : fmtMoney(domPot))
+      + ' log=' + fmtMoney(currentHand ? currentHand.pot : 0)
+      + (domPot != null && currentHand && currentHand.pot > 0 && Math.abs(domPot - currentHand.pot) > domPot * 0.02
+        ? '  <-- MISMATCH' : ''));
+    L.push('heroXid: ' + (heroXid || 'NOT RESOLVED') + ' — ' + (heroProblem() || 'ok'));
     L.push('');
 
     L.push('--- SELECTOR ALTERNATIVES (each tested separately) ---');

@@ -19,7 +19,7 @@ single hand-edited file. Userscript managers compare `@version` to decide
 whether an update exists, so leaving it stale means a reinstall elsewhere won't
 see new code as newer. Bump it in the same commit as the change.
 
-## Current status (v0.17.0)
+## Current status (v0.18.0)
 
 Selectors and log wording are **calibrated against real scans**. Parsing is
 believed working — action rows no longer appear unmatched — but no stat or
@@ -200,12 +200,12 @@ a 3-bet.
 Reviewed and deliberately left, in rough priority order. Also listed in the
 script header so they're visible while editing.
 
-1. **The pot has no cross-check.** It is only ever the running sum of parsed log
-   amounts. `SELECTORS.potDisplay` resolves on the live table and is read
-   nowhere. One missed or unparsed amount skews `hand.pot` for the rest of the
-   hand, which silently corrupts pot odds and MDF — and nothing detects it.
-   Reading the DOM pot and warning on divergence is the single highest-value
-   QA improvement available, and it needs a live table to calibrate.
+1. ~~**The pot has no cross-check.**~~ **CLOSED in v0.18.0.** The live scan
+   showed `DIV.potsWrapper_ > DIV.totalPotWrap_` rendering `POT:$7,000,000`, so
+   `readDomPot()` parses it and `effectivePot()` prefers it over the running log
+   sum. The deep scan prints both and flags a mismatch over 2%. Remaining
+   exposure: `hand.pot` (log-summed) is still what P/L falls back to when a
+   winner line carries no amount.
 2. **`STORE.players` grows forever.** `lastSeen` is written on every access and
    never read; nothing prunes. `saveStore` catches quota errors and logs, so
    hitting the localStorage ceiling stops persistence *silently*. Surface a save
