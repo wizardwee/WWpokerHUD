@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.16.0
+// @version      0.16.1
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -172,6 +172,12 @@
 
   if (window.__tornPokerHUDLoaded) return;
   window.__tornPokerHUDLoaded = true;
+
+  // MUST match the @version line in the userscript header above. The header is a
+  // metadata comment and can't be read from JS, so this is a second place to
+  // bump — it exists so a pasted deep scan says which build produced it, which
+  // is otherwise unknowable when diagnosing from a phone.
+  const HUD_VERSION = '0.16.1';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -2981,7 +2987,7 @@
 
   function runDeepScan() {
     const L = [];
-    L.push('=== TORN POKER HUD DEEP SCAN v0.4.0 ===');
+    L.push(`=== TORN POKER HUD DEEP SCAN — script v${HUD_VERSION} ===`);
     L.push('url: ' + location.pathname + location.search);
     L.push('logObserver: ' + (logObserver ? (logUsingFallback ? 'ACTIVE (body fallback)' : 'ACTIVE (container)') : 'NOT ATTACHED'));
     // If duplicate hands ever come back, this line says which ingestion path ran.
