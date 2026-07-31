@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.16.1
+// @version      0.17.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -14,6 +14,26 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 0.17.0 - Per-opponent P/L was wrong, not just badly formatted. Each opponent's
+ *          share was their contribution divided by the total contributed
+ *          INCLUDING hero's own, so the shares never summed to 1 — heads-up,
+ *          where both players put in half the pot, a villain was credited with
+ *          exactly HALF the money you won from them. It also charged your losses
+ *          to opponents who folded early and lost nothing to you, while
+ *          crediting nothing extra to whoever actually took the pot. Attribution
+ *          now splits by each opponent's NET result: money you win comes from
+ *          the players who lost, money you lose goes to the players who won.
+ *          Exact heads-up, and sums to your own delta multiway.
+ *          Money now goes through one formatter everywhere — "$12.5M", "$41k",
+ *          "$9,999" — replacing bare digit strings with no grouping at all,
+ *          which is what the P/L readouts in the Stats tab and report printed.
+ *          Failure to identify hero is surfaced in Settings and the players
+ *          list. With heroXid null, P/L attribution is skipped for EVERY player
+ *          and a tendency badge is drawn on your own seat; those look like two
+ *          separate bugs and are the same unset/misspelled username.
+ * 0.16.1 - Deep scan reports the script version that produced it, via
+ *          HUD_VERSION (which must be bumped alongside @version — the userscript
+ *          header is a metadata comment and can't be read from JS).
  * 0.16.0 - Usernames are actually recorded. Hand history showed "#3722665"
  *          instead of names because nothing ever bound a name to an XID:
  *          getPlayer(xid, name) accepts a name and was never once called with
@@ -177,7 +197,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '0.16.1';
+  const HUD_VERSION = '0.17.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -1166,7 +1186,6 @@
       });
 
       const contributors = Object.keys(hand.contributions);
-      const totalContributed = contributors.reduce((sum, xid) => sum + hand.contributions[xid], 0) || 1;
 
       if (heroXid) {
         const heroWon = wonByXid[heroXid] || 0;
@@ -1175,15 +1194,36 @@
         STORE.hero.netChips += heroDelta;
         touchSession(heroDelta, false);
 
-        // Proportional P/L attribution, stored from HERO's perspective:
-        // positive plChipsEst means you're up against that player. Split the
-        // pot's net swing to/from hero across contributing opponents in
-        // proportion to their contribution (an estimate for multiway pots,
-        // exact when it's just hero + one villain).
+        // P/L attribution, stored from HERO's perspective: positive plChipsEst
+        // means you are up against that player.
+        //
+        // Money you win comes from the players who LOST this hand, and money you
+        // lose goes to the players who WON it — so split by each opponent's net
+        // result, not by what they put in. The old version divided each
+        // opponent's contribution by the total contributed INCLUDING hero's own,
+        // so the shares never summed to 1: heads-up each player puts in half the
+        // pot, so a villain was credited with exactly HALF the money you won
+        // from them. It also charged a loss to opponents who folded early and
+        // lost nothing to you, while crediting nothing extra to whoever actually
+        // took the pot.
+        //
+        // This version is exact heads-up and sums to heroDelta multiway. It is
+        // still an estimate in one respect: with three or more players it cannot
+        // know whose chips ended up in whose stack, only the net movement.
+        const net = {};
+        let poolTotal = 0;
         for (const xid of contributors) {
           if (xid === heroXid) continue;
-          const share = hand.contributions[xid] / totalContributed;
-          getPlayer(xid).plChipsEst += heroDelta * share;
+          const oppNet = (wonByXid[xid] || 0) - hand.contributions[xid];
+          // Hero won -> draw from opponents who lost. Hero lost -> credit the
+          // opponents who won. Either way we want the opposite sign to hero's.
+          const weight = heroDelta >= 0 ? Math.max(0, -oppNet) : Math.max(0, oppNet);
+          if (weight > 0) { net[xid] = weight; poolTotal += weight; }
+        }
+        if (poolTotal > 0) {
+          for (const xid of Object.keys(net)) {
+            getPlayer(xid).plChipsEst += heroDelta * (net[xid] / poolTotal);
+          }
         }
       }
     }
@@ -1228,6 +1268,26 @@
   // "#<xid>" is emptyPlayer's placeholder, not a name anyone chose. Treat it as
   // absent so a stored placeholder can never shadow a real name, and so callers
   // can tell the two apart.
+  // Why hero can't be identified, or null if all is well.
+  //
+  // This failing is not cosmetic: with heroXid null, applyHandResults skips P/L
+  // attribution entirely, so EVERY opponent's P/L stays frozen at zero, and
+  // renderBadges can't tell which seat is yours so it draws a tendency badge on
+  // your own seat. Both look like separate bugs and are the same missing
+  // setting, so say so where the numbers are read instead of failing silently.
+  function heroProblem() {
+    const configured = (STORE.settings.heroName || '').trim();
+    if (!configured) return 'Set “Your Torn username” in Settings — until then no profit/loss is attributed to anyone.';
+    if (!heroXid) {
+      return `No seat matches the username “${configured}”. Check the spelling against your seat — `
+        + 'until it matches, no profit/loss is attributed to anyone.';
+    }
+    if (String(heroXid).startsWith('name:')) {
+      return `“${configured}” matched by name but not to a seat ID yet — sit at a table for this to resolve.`;
+    }
+    return null;
+  }
+
   function playerDisplayName(xid) {
     const p = STORE.players[xid];
     const placeholder = '#' + xid;
@@ -1238,7 +1298,7 @@
   // Render one stored hand as a compact, readable summary.
   function formatHand(h, focusXid) {
     const when = new Date(h.t).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-    const lines = [`[${when}] pot $${(h.pot || 0).toLocaleString()} — reached ${h.street}`];
+    const lines = [`[${when}] pot ${fmtMoney(h.pot)} — reached ${h.street}`];
     const byStreet = {};
     (h.actions || []).forEach((a) => { (byStreet[a.s] = byStreet[a.s] || []).push(a); });
     ['preflop', 'flop', 'turn', 'river'].forEach((street) => {
@@ -1246,7 +1306,7 @@
       const acts = byStreet[street].map((a) => {
         const nm = playerDisplayName(a.x);
         const mark = (focusXid && a.x === focusXid) ? '*' : '';
-        const amt = a.amt ? ` $${a.amt.toLocaleString()}` : '';
+        const amt = a.amt ? ` ${fmtMoney(a.amt)}` : '';
         return `${mark}${nm} ${a.a}${amt}`;
       }).join(', ');
       lines.push(`  ${street}: ${acts}`);
@@ -1255,7 +1315,7 @@
       lines.push(`  showdown: ${playerDisplayName(xid)} shows ${h.shown[xid]}`);
     });
     (h.winners || []).forEach((w) => {
-      lines.push(`  → ${playerDisplayName(w.xid)} wins $${(w.amount || 0).toLocaleString()}`);
+      lines.push(`  → ${playerDisplayName(w.xid)} wins ${fmtMoney(w.amount)}`);
     });
     return lines.join('\n');
   }
@@ -1265,7 +1325,7 @@
   // text — so the two must be changed together if the content changes.
   function formatHandHtml(h, focusXid) {
     const when = new Date(h.t).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-    const parts = [`<div class="tph-hh-head">${escapeHtml(when)} · pot $${(h.pot || 0).toLocaleString()}`
+    const parts = [`<div class="tph-hh-head">${escapeHtml(when)} · pot ${fmtMoney(h.pot)}`
       + ` · reached ${escapeHtml(h.street || 'preflop')}</div>`];
 
     const byStreet = {};
@@ -1273,7 +1333,7 @@
     ['preflop', 'flop', 'turn', 'river'].forEach((street) => {
       if (!byStreet[street]) return;
       const acts = byStreet[street].map((a) => {
-        const amt = a.amt ? ` $${a.amt.toLocaleString()}` : '';
+        const amt = a.amt ? ` ${fmtMoney(a.amt)}` : '';
         const txt = `${escapeHtml(playerDisplayName(a.x))} ${escapeHtml(a.a)}${amt}`;
         return (focusXid && a.x === focusXid) ? `<span class="tph-hh-me">${txt}</span>` : txt;
       }).join(', ');
@@ -1286,7 +1346,7 @@
     });
     (h.winners || []).forEach((w) => {
       parts.push(`<div class="tph-hh-win">→ ${escapeHtml(playerDisplayName(w.xid))}`
-        + ` wins $${(w.amount || 0).toLocaleString()}</div>`);
+        + ` wins ${fmtMoney(w.amount)}</div>`);
     });
     return `<div class="tph-hh">${parts.join('')}</div>`;
   }
@@ -1594,6 +1654,39 @@
   // seat is more clutter than information.
   function fmtNum(v) {
     return v == null ? '–' : v.toFixed(0);
+  }
+
+  // Torn poker runs at millions per blind, so raw digit strings are unreadable
+  // and even comma-grouped ones are long. Abbreviate at millions and above,
+  // comma-group below that. Several call sites printed a bare Math.round() with
+  // no grouping at all, which is what made P/L figures impossible to scan.
+  const MONEY_TIERS = [[1e3, 'k', 0], [1e6, 'M', 1], [1e9, 'B', 1]];
+  function fmtMoney(n) {
+    const v = Math.round(Number(n) || 0);
+    const abs = Math.abs(v);
+    const sign = v < 0 ? '-' : '';
+    if (abs < 1e4) return `${sign}$${abs.toLocaleString()}`;
+    for (let i = 0; i < MONEY_TIERS.length; i++) {
+      const [div, suffix, dp] = MONEY_TIERS[i];
+      const scaled = abs / div;
+      // Promote when rounding would print 1000 of a unit: $999,999 is "$1M",
+      // never "$1000k".
+      const shown = dp ? Number(scaled.toFixed(dp)) : Math.round(scaled);
+      if (shown >= 1000 && i < MONEY_TIERS.length - 1) continue;
+      return `${sign}$${dp ? trimZero(scaled) : shown}${suffix}`;
+    }
+    return `${sign}$${abs.toLocaleString()}`;
+  }
+
+  // One decimal, but never a trailing ".0" — "$13M" reads better than "$13.0M".
+  function trimZero(x) {
+    return x.toFixed(1).replace(/\.0$/, '');
+  }
+
+  // Same, with an explicit + on gains, for anything that is a profit/loss.
+  function fmtSignedMoney(n) {
+    const v = Math.round(Number(n) || 0);
+    return (v > 0 ? '+' : '') + fmtMoney(v);
   }
 
   function computeRates(p) {
@@ -2400,7 +2493,7 @@
             : 'fairly standard sizing.'));
     }
     if (r.wtsd != null) lines.push(`Goes to showdown ${fmtPct(r.wtsd)} of hands played.`);
-    lines.push(`Your estimated chips won/lost against them: ${p.plChipsEst >= 0 ? '+' : ''}${Math.round(p.plChipsEst)} (est., proportional multiway attribution — positive means you're up).`);
+    lines.push(`Your estimated chips won/lost against them: ${fmtSignedMoney(p.plChipsEst)} (estimate — positive means you're up on them).`);
     if (p.notes) lines.push(`Notes: ${p.notes}`);
     return lines.join('\n');
   }
@@ -2459,6 +2552,9 @@
     .tph-hh-sd { font-size: 11.5px; color: #d4b3f0 !important; margin-top: 4px; }
     .tph-hh-win { font-size: 12.5px; color: #8ce89a !important; margin-top: 4px; }
     .tph-close { position: absolute; top: 8px; right: 10px; cursor: pointer; }
+    .tph-warn { background: #4a2c12 !important; color: #ffd9a0 !important; border: 1px solid #8a5a24;
+      border-radius: 5px; padding: 7px 9px; margin: 6px 0 10px; font-size: 12px; line-height: 1.45; }
+    .tph-ok { color: #7ed957 !important; font-size: 12px; margin: 2px 0 10px; }
     /* Raised well above the bottom edge so it doesn't sit under Torn PDA's own
        native controls, enlarged and labelled so it's unmistakably OUR button. */
     /* touch-action:none so dragging the button doesn't scroll the page under it */
@@ -2696,7 +2792,7 @@
           <tr><td>C-Bet</td><td>${fmtPct(r.cbet)}</td></tr>
           <tr><td>WTSD</td><td>${fmtPct(r.wtsd)}</td></tr>
           <tr><td>Avg bet size</td><td>${r.avgBetPct != null ? r.avgBetPct.toFixed(0) + '% pot' : '—'}</td></tr>
-          <tr><td>Your P/L vs them</td><td>${p.plChipsEst >= 0 ? '+' : ''}${Math.round(p.plChipsEst)}</td></tr>
+          <tr><td>Your P/L vs them</td><td>${fmtSignedMoney(p.plChipsEst)}</td></tr>
         </table>
       `;
     } else if (openPlayerTab === 'report') {
@@ -2763,23 +2859,25 @@
             <td>${classify(p)}</td>
             <td>${p.hands}</td>
             <td>${fmtPct(r.vpip)}/${fmtPct(r.pfr)}</td>
-            <td style="color:${pl >= 0 ? '#7ed957' : '#ff6b6b'}">${pl >= 0 ? '+' : ''}${pl.toLocaleString()}</td>
+            <td style="color:${pl >= 0 ? '#7ed957' : '#ff6b6b'}">${fmtSignedMoney(pl)}</td>
           </tr>`;
       }).join('')
       : `<tr><td colspan="5"><i>No players tracked yet.</i></td></tr>`;
 
+    const problem = heroProblem();
     panel.innerHTML = `
       <span class="tph-close">✕</span>
       <h3>Tracked players (${all.length})</h3>
+      ${problem ? `<div class="tph-warn">⚠ ${escapeHtml(problem)}</div>` : ''}
       <input class="tph-pfilter" placeholder="Filter by name…" value="${escapeHtml(playersFilter)}" style="width:60%">
       <table class="tph-ptable">
         <tr><th>Name</th><th>Type</th><th>Hands</th><th>VPIP/PFR</th><th>P/L</th></tr>
         ${rows}
       </table>
       <div style="opacity:.75;margin-top:10px;border-top:1px solid #444;padding-top:8px">
-        <b>Session:</b> ${STORE.session.hands} hands, ${STORE.session.net >= 0 ? '+' : ''}${Math.round(STORE.session.net).toLocaleString()}
+        <b>Session:</b> ${STORE.session.hands} hands, ${fmtSignedMoney(STORE.session.net)}
         ${STORE.session.startedAt ? ' (since ' + new Date(STORE.session.startedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + ')' : ''}<br>
-        <b>Lifetime:</b> ${STORE.hero.hands} hands, ${STORE.hero.netChips >= 0 ? '+' : ''}${Math.round(STORE.hero.netChips).toLocaleString()}
+        <b>Lifetime:</b> ${STORE.hero.hands} hands, ${fmtSignedMoney(STORE.hero.netChips)}
         &nbsp;|&nbsp; ${(STORE.hands || []).length} hands in history
       </div>
     `;
@@ -2814,7 +2912,8 @@
       <h3>Settings</h3>
       <button class="tph-open-players" style="width:100%;padding:9px;margin-bottom:10px">👥 View tracked players &amp; hand history</button>
       <label><b>Your Torn username:</b> <input type="text" class="tph-hero-name" value="${escapeHtml(STORE.settings.heroName)}" placeholder="required for P/L" style="width:55%"></label><br>
-      <div style="opacity:.7;margin:2px 0 10px">Needed to attribute profit/loss and work out your position.</div>
+      <div style="opacity:.7;margin:2px 0 6px">Needed to attribute profit/loss and work out your position.</div>
+      ${heroProblem() ? `<div class="tph-warn">⚠ ${escapeHtml(heroProblem())}</div>` : '<div class="tph-ok">✓ Matched to your seat — profit/loss is being attributed.</div>'}
       <label>Min hands before rating: <input type="number" class="tph-min-hands" value="${STORE.settings.minHands}" style="width:60px"></label><br><br>
       <h4>Seat labels</h4>
       <label><input type="checkbox" class="tph-badge-toggle" ${STORE.settings.showBadges ? 'checked' : ''}> Show tendency labels on seats</label>

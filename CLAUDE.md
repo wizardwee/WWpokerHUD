@@ -19,7 +19,7 @@ single hand-edited file. Userscript managers compare `@version` to decide
 whether an update exists, so leaving it stale means a reinstall elsewhere won't
 see new code as newer. Bump it in the same commit as the change.
 
-## Current status (v0.16.0)
+## Current status (v0.17.0)
 
 Selectors and log wording are **calibrated against real scans**. Parsing is
 believed working — action rows no longer appear unmatched — but no stat or
@@ -245,6 +245,47 @@ header where an editor will see them.
 
 Leave alone: the numbered section scheme itself (renumbering churns the whole
 file for no behavioural gain), and the single-file structure.
+
+## P/L attribution, and why hero identity matters (v0.17.0)
+
+Per-opponent P/L lives on the **opponent**, from hero's perspective:
+`plChipsEst > 0` means you are up against that player. Your own record's field
+is never written (it would mean your P/L against yourself); your real total is
+`STORE.hero.netChips`, shown as the Lifetime line.
+
+Attribution splits hero's net result for the hand by each opponent's **net
+result**, not by what they contributed: money you win comes from the players who
+lost, money you lose goes to the players who won. That is exact heads-up and
+sums to `heroDelta` multiway.
+
+The previous version divided each opponent's contribution by the total
+contributed *including hero's own*, so the shares never summed to 1 — heads-up,
+where both players put in half the pot, a villain was credited with exactly half
+the money won from them. It also charged hero's losses to players who folded
+early and lost nothing to hero. Verified with worked hands plus a 500-hand
+random sweep asserting the attributed total equals `heroDelta`.
+
+Still an estimate in one respect, and the UI should keep saying so: with three or
+more players it knows only the net movement, not whose chips ended up where.
+
+**`heroXid` being null is not cosmetic.** `applyHandResults` guards the whole
+attribution block on it, so with hero unidentified *every* opponent's P/L stays
+frozen at zero, and `renderBadges` can't tell which seat is hero's so it draws a
+tendency badge on hero's own seat. Those present as two unrelated bugs and are
+one unset or misspelled username. `heroProblem()` returns the reason, surfaced in
+Settings (with a green confirmation when it resolves) and at the top of the
+players list. Don't let this fail silently again.
+
+## Money formatting (v0.17.0)
+
+`fmtMoney` / `fmtSignedMoney` are the only places money is rendered. Torn poker
+runs at millions per blind, so figures abbreviate at `$12.5M` / `$1.2B`, use
+`$41k` from ten thousand, and comma-group below that. Rounding promotes between
+tiers, so `$999,999` reads `$1M` rather than `$1000k`.
+
+Several call sites previously printed a bare `Math.round()` with no grouping
+whatsoever — the Stats tab's "Your P/L vs them" and the tendency report both did.
+Route new money output through these rather than adding another ad-hoc format.
 
 ## Names must be bound explicitly (v0.16.0)
 
