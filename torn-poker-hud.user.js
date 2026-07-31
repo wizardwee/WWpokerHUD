@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.18.1
+// @version      0.18.2
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -14,6 +14,18 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 0.18.2 - The dark-on-dark text was never specific to the hand history: the
+ *          Stats table and the Report <pre> were unreadable too, in the same
+ *          panel, which a screenshot of the Stats tab made obvious. Cause:
+ *          `.tph-panel { color: #eee }` only reached its children by
+ *          INHERITANCE, and inheritance loses to any direct rule on the child —
+ *          no !important needed. Torn styles bare `td` and `pre`, so exactly
+ *          those went dark while the panel title and tab labels (which Torn has
+ *          no rule for) stayed fine. pinTextColor() now walks each panel after
+ *          render and sets `color: inherit !important` inline on every element
+ *          that isn't one of ours, which no stylesheet can override. Elements
+ *          carrying a tph- class are skipped so warnings and history colours
+ *          survive.
  * 0.18.1 - Hand history text was dark-on-dark on the live page. Two class-based
  *          attempts failed (a recessed card relying on inherited colour, then a
  *          lighter card with !important in our own stylesheet) while the Stats
@@ -225,7 +237,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '0.18.1';
+  const HUD_VERSION = '0.18.2';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -2721,6 +2733,28 @@
     .tph-banner .tph-banner-x { float: right; padding-left: 10px; opacity: 0.8; }
   `;
 
+  // Force every unstyled descendant to take the panel's colour, inline and
+  // !important.
+  //
+  // `.tph-panel { color: #eee }` only ever reached children by INHERITANCE, and
+  // inheritance loses to any direct rule on the child — no !important required.
+  // Torn styles bare `td` and `pre`, so the Stats table and the Report text
+  // rendered dark-on-dark while the panel title and tab labels (which Torn has
+  // no rule for) looked fine. That is why this presented as "only the history is
+  // broken": it was every table and pre in every panel.
+  //
+  // Elements carrying one of our own tph- classes are skipped, so deliberate
+  // colours (warnings, the history cards, winner lines) are preserved.
+  function pinTextColor(root) {
+    if (!root) return;
+    root.querySelectorAll('td, th, pre, p, li, b, i, u, small, label, span, div').forEach((el) => {
+      if (el.style && el.style.color) return;                     // already explicit
+      const cls = typeof el.className === 'string' ? el.className : '';
+      if (cls.indexOf('tph-') !== -1) return;                     // ours, already styled
+      el.style.setProperty('color', 'inherit', 'important');
+    });
+  }
+
   function injectStyles() {
     const style = document.createElement('style');
     style.textContent = CSS;
@@ -2858,7 +2892,9 @@
       applyStoredPos(el, 'coachPos', COACH_KEEP_VISIBLE_PX);
     }
 
-    el.querySelector('.tph-coach-body').innerHTML = advice.map((line) => `<div>${line}</div>`).join('');
+    const coachBody = el.querySelector('.tph-coach-body');
+    coachBody.innerHTML = advice.map((line) => `<div>${line}</div>`).join('');
+    pinTextColor(coachBody);
   }
 
   let openPlayerXid = null;
@@ -2944,6 +2980,8 @@
         saveStore();
       });
     }
+    // Every tab: the Stats table and the Report <pre> were the worst hit.
+    pinTextColor(panel);
   }
 
   function renderReportIfOpen() {
@@ -3000,6 +3038,7 @@
     `;
     document.body.appendChild(panel);
 
+    pinTextColor(panel); // the tracked-players table is <td>, same problem
     panel.querySelector('.tph-close').addEventListener('click', () => { playersListOpen = false; renderPlayersList(); });
     const filterEl = panel.querySelector('.tph-pfilter');
     filterEl.addEventListener('input', (e) => {
@@ -3058,6 +3097,7 @@
     // names — can't break out of the textarea.
     panel.querySelector('.tph-export').value = exportJson();
 
+    pinTextColor(panel);
     panel.querySelector('.tph-close').addEventListener('click', () => { settingsOpen = false; renderSettingsPanel(); });
     panel.querySelector('.tph-open-players').addEventListener('click', () => {
       settingsOpen = false;
@@ -3294,6 +3334,7 @@
       `<button class="tph-deep-copy">Copy report</button><br>` +
       `<textarea class="tph-calib-out" readonly placeholder="Tap 'Run deep scan', then 'Copy report' and paste it to Claude."></textarea>`;
 
+    pinTextColor(el);
     const out = el.querySelector('.tph-calib-out');
     if (preserved) out.value = preserved;
 
