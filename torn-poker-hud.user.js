@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.10.0
+// @version      0.13.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -14,6 +14,42 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 0.13.0 - Preflop charts re-grounded in published sources instead of recall,
+ *          and full-ring support added. There are now TWO chart sets, picked
+ *          from the seat count observed that hand: at a 9-handed table four
+ *          distinct early seats used to share one "EP" label and one 6-max
+ *          chart, so true UTG was opening ~17% where published full-ring UTG is
+ *          ~11%. Positions at 7+ handed tables are named UTG/UTG1/LJ/HJ/CO/BTN.
+ *          6-max early position widened to match sources (EP 15.5->17.3%,
+ *          MP 19.5->21.0%). Every published range string was re-measured against
+ *          its own published percentage before use — several disagree with
+ *          themselves, usually by omitting the offsuit block. Sources cited at
+ *          RFI_RANGES. "GTO baseline" relabelled "Baseline" with a provenance
+ *          footnote: these are reference charts, not solver output, and the old
+ *          wording claimed the authority of an equilibrium solution.
+ * 0.12.0 - Preflop coach corrected. Every opening chart but the button was far
+ *          too tight (EP 10.3%, MP 14.3%, CO 22.8%, SB 30.9% of hands), so it
+ *          advised folding standard opens; they are now 15.5/19.5/26.4/41.8/
+ *          42.1%, measured by combo weight and documented per line. The chart is
+ *          now picked by SITUATION, not by whether a bet exists: unopened,
+ *          limped (isolation, not RFI), facing one open, facing a re-raise, and
+ *          hero-already-opened are separate cases. The out-of-position 3-bet
+ *          range was defined but never used — every 3-bet call was made off the
+ *          in-position chart; unknown relative position now takes the tighter
+ *          one. Big blind no longer silently borrows the cutoff opening range.
+ *          Facing a 3-bet is called a 4-bet decision instead of a 3-bet. Fixed
+ *          the "A5s-A9s" range token, whose backreferences were on the wrong
+ *          groups so it expanded to nothing without error.
+ * 0.11.0 - Log ingestion reads whole-list snapshots and diffs them instead of
+ *          parsing MutationObserver added-nodes. Torn rewrites the TEXT of
+ *          existing <li> rows as the list shifts, so every old line was seen
+ *          again on every new line and the 1.5s text dedup couldn't suppress it
+ *          — one real hand landed in the history several times and every stat
+ *          was inflated with it. Hand records also carry the "Game <hex>" id now
+ *          and a repeated id is ignored. Seat badges moved BELOW the seat (they
+ *          were covering the player name), restyled to be unobtrusive, and can
+ *          be switched off in Settings. The collapsed GTO pill is draggable like
+ *          the expanded panel; it previously had no drag handler at all.
  * 0.10.0 - Hand boundaries now match Torn's real "Game <hex> started" wording;
  *          before this no hand ever ended, so actionOrder accumulated across
  *          hands and every derived position was nonsense. Streets match
@@ -171,7 +207,11 @@
     calibrationMode: false,
     gearPos: null, // {left, top} once you've dragged the HUD button somewhere
     coachPos: null,      // {left, top} once you've dragged the coach panel
+    coachPillPos: null,  // {left, top} for the collapsed pill — tracked separately
+                         // from coachPos so collapsing doesn't teleport the pill
+                         // to wherever the big panel happened to be parked
     coachHidden: false,  // collapsed to a pill so it stops covering the table
+    showBadges: true,    // per-seat tendency labels; off = table completely clear
     historyLimit: 200, // how many recent hands to keep for the History tab
     heroName: '',      // YOUR Torn username. Without it P/L and position can't be attributed.
     equityIters: 1200, // Monte Carlo samples per equity estimate
@@ -505,7 +545,9 @@
     // id off a body-fallback fragment that had already lost the "Game " prefix
     // and anchored on the hex, so the real line never matched and hands were
     // never segmented. Prefix optional, in case the fragment form reappears.
-    { type: 'newHandMarker', re: /^(?:game\s+)?[0-9a-f]{6,}\s+started\b/i },
+    // The id is captured: it uniquely names one real hand, which is what lets a
+    // re-read of the same marker be ignored instead of opening a second record.
+    { type: 'newHandMarker', re: /^(?:game\s+)?([0-9a-f]{6,})\s+started\b/i },
     { type: 'postSB', re: /^(.+?)\s+post(?:s|ed)?\s+(?:the\s+)?small\s*blind(?:\s*\$?([\d,]+))?/i },
     { type: 'postBB', re: /^(.+?)\s+post(?:s|ed)?\s+(?:the\s+)?big\s*blind(?:\s*\$?([\d,]+))?/i },
     { type: 'allin', re: /^(.+?)\s+(?:is\s+|goes\s+|went\s+)?all[\s-]?in(?:\s*(?:for|with)?\s*\$?([\d,]+))?/i },
@@ -544,9 +586,16 @@
   let currentHand = null;
   const seenUnmatchedLines = []; // for calibration panel
 
+  // Torn game ids opened this session, newest last. Bounded because only ids
+  // still visible in the log can ever be re-read, and the log holds a handful of
+  // hands at most.
+  const SEEN_GAME_IDS_MAX = 40;
+  const seenGameIds = [];
+
   function freshHandState() {
     const dealtIn = seatedXids(); // snapshot of who's seated *before* any folds happen this hand
     return {
+      gameId: null,            // Torn's hex id from "Game <id> started", when seen
       street: 'preflop',
       pot: 0,
       contributions: {},       // xid -> total chips this hand
@@ -709,7 +758,21 @@
     const hand = ensureHand();
 
     if (type === 'newHandMarker') {
+      // Only the "Game <hex> started" pattern captures an id; the speculative
+      // "dealing a new hand" one captures a verb, so hex-test before trusting it.
+      const gameId = (m[1] && /^[0-9a-f]{6,}$/i.test(m[1])) ? m[1].toLowerCase() : null;
+      // A marker for a hand we've already opened is a re-read of the log, not a
+      // second deal. Acting on it would close the live hand early and file the
+      // same hand twice. Checked against ids seen this session (covers hands
+      // that ended with nothing worth recording) and against stored history
+      // (covers a page reload mid-session).
+      if (gameId && (seenGameIds.includes(gameId) || handAlreadyRecorded(gameId))) return;
       applyHandResultsAndReset();
+      currentHand.gameId = gameId;
+      if (gameId) {
+        seenGameIds.push(gameId);
+        if (seenGameIds.length > SEEN_GAME_IDS_MAX) seenGameIds.shift();
+      }
       return;
     }
 
@@ -980,8 +1043,10 @@
   // involves several players, and the History tab just filters this list.
   function recordHandHistory(hand) {
     if (!hand.actions.length && !hand.winners.length) return; // nothing happened
+    if (hand.gameId && handAlreadyRecorded(hand.gameId)) return; // already filed
     STORE.hands.unshift({
       t: Date.now(),
+      g: hand.gameId || null,
       street: hand.street,
       pot: hand.pot,
       players: Array.from(hand.dealtInXids),
@@ -992,6 +1057,18 @@
     });
     const limit = STORE.settings.historyLimit || 200;
     if (STORE.hands.length > limit) STORE.hands.length = limit;
+  }
+
+  // Has this Torn game id already been written to history? Only the newest few
+  // are checked — a re-read of the log can only ever replay lines still on
+  // screen, and scanning the whole ring buffer on every marker is wasted work.
+  const RECORDED_LOOKBACK = 50;
+  function handAlreadyRecorded(gameId) {
+    if (!gameId) return false;
+    const recent = STORE.hands || [];
+    const n = Math.min(recent.length, RECORDED_LOOKBACK);
+    for (let i = 0; i < n; i++) { if (recent[i] && recent[i].g === gameId) return true; }
+    return false;
   }
 
   function playerDisplayName(xid) {
@@ -1047,10 +1124,20 @@
     return !!(node.closest && node.closest('[class^="tph-"], [class*=" tph-"]'));
   }
 
+  // Mutation targets are often text nodes; resolve to the owning element first
+  // or every one of our own text edits reads as "not ours" and triggers a scan.
+  function isOwnTarget(node) {
+    if (!node) return false;
+    return isOwnNode(node.nodeType === 1 ? node : node.parentElement);
+  }
+
   // The same log line can arrive via several mutation records (once for the row,
   // once for an inner span), and the body-wide fallback makes that much more
   // likely. Suppress an identical line seen again within a short window —
   // but not longer, since "X folds" legitimately recurs across hands.
+  // ONLY used by the added-nodes fallback below: the snapshot scanner already
+  // guarantees a line is new, and running it through a time window there would
+  // silently drop a genuine repeat that happens to arrive quickly.
   const recentLines = new Map();
   const DEDUP_MS = 1500;
   function recentlyHandled(text) {
@@ -1059,6 +1146,134 @@
     if (recentLines.has(text)) return true;
     recentLines.set(text, now);
     return false;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Log ingestion by whole-list snapshot diff.
+  //
+  // Reading MutationObserver's addedNodes looked right and was wrong. Torn's
+  // message list re-renders in place: the <li> elements persist and their TEXT
+  // is rewritten as messages shift through the list, so a single new message
+  // mutates every row. Every one of those rows then got re-parsed as if it had
+  // just happened, and the 1.5s text dedup couldn't catch it because the lines
+  // were minutes old. That replayed whole hands — the same "Game <hex> started"
+  // and the same actions again and again — which is why one real hand appeared
+  // several times in the history and inflated every stat with it.
+  //
+  // Diffing snapshots of the entire visible list is immune to that, because it
+  // compares CONTENT, not node identity or arrival time: a re-render that
+  // produces the same lines produces no new lines. It also survives Torn's SPA
+  // swapping in a whole new log element, which node-based tracking would not.
+  // ---------------------------------------------------------------------------
+
+  let logSnapshot = [];
+  let logSnapshotPrimed = false;
+  let logOrientation = null; // 'append' (newest last) or 'prepend' (newest first)
+
+  function logRoot() {
+    return (logObserverTarget && logObserverTarget.isConnected) ? logObserverTarget : document.body;
+  }
+
+  // Cheap path test for the observer callback, which runs on every mutation
+  // batch: stop at the first row instead of reading textContent for all of them.
+  function hasLogRows() {
+    const root = logRoot();
+    return !!(root && root.querySelector && root.querySelector(SELECTORS.logRow));
+  }
+
+  function readLogRows() {
+    const root = logRoot();
+    if (!root || !root.querySelectorAll) return null;
+    const rows = root.querySelectorAll(SELECTORS.logRow);
+    if (!rows.length) return null; // uncalibrated page — caller uses the fallback
+    return Array.from(rows, (row) => (row.textContent || '').trim());
+  }
+
+  // How many of the previous lines are still present, assuming new lines land at
+  // the END of the list (cur === prev.slice(k) + new). Longest overlap wins, so
+  // trimming from the front of the list is handled too.
+  function tailOverlap(prev, cur) {
+    for (let k = 0; k <= prev.length; k++) {
+      const n = prev.length - k;
+      if (n > cur.length) continue;
+      let ok = true;
+      for (let i = 0; i < n; i++) { if (prev[k + i] !== cur[i]) { ok = false; break; } }
+      if (ok) return n;
+    }
+    return 0;
+  }
+
+  // Same question, assuming new lines land at the START (cur === new + prev.slice(0, n)).
+  function headOverlap(prev, cur) {
+    for (let k = 0; k <= prev.length; k++) {
+      const n = prev.length - k;
+      if (n > cur.length) continue;
+      const start = cur.length - n;
+      let ok = true;
+      for (let i = 0; i < n; i++) { if (prev[i] !== cur[start + i]) { ok = false; break; } }
+      if (ok) return n;
+    }
+    return 0;
+  }
+
+  // Returns true if the structured path handled this tick, false if there are no
+  // log rows to read and the caller should fall back to parsing added nodes.
+  function scanLogRows() {
+    const cur = readLogRows();
+    if (!cur) return false;
+
+    // Lines already on screen when the script loads are history, not events —
+    // parsing them would replay an arbitrary slice of a hand already over.
+    if (!logSnapshotPrimed) {
+      logSnapshot = cur;
+      logSnapshotPrimed = true;
+      return true;
+    }
+
+    const tailN = tailOverlap(logSnapshot, cur);
+    const headN = headOverlap(logSnapshot, cur);
+
+    // Which end the log grows from isn't documented and can't be checked without
+    // a live table, so infer it and latch it. A tie means no usable overlap
+    // (the list was replaced wholesale); reuse the direction already observed
+    // rather than guessing again and replaying a hand backwards.
+    let fresh;
+    if (tailN > headN) {
+      logOrientation = 'append';
+      fresh = cur.slice(tailN);
+    } else if (headN > tailN) {
+      logOrientation = 'prepend';
+      fresh = cur.slice(0, cur.length - headN).reverse();
+    } else {
+      fresh = logOrientation === 'prepend'
+        ? cur.slice(0, cur.length - headN).reverse()
+        : cur.slice(tailN);
+    }
+
+    // Snapshot before parsing: handleLogLine can render panels, and a re-entrant
+    // scan must not see the pre-update snapshot and emit these lines twice.
+    logSnapshot = cur;
+
+    fresh.forEach((rowText) => {
+      if (!rowText || rowText.length > 1000) return;
+      // A row can render several lines; parse each separately or a multi-line
+      // blob matches nothing at all.
+      rowText.split('\n').forEach((raw) => {
+        const line = raw.trim();
+        if (!line || line.length > 300) return;
+        handleLogLine(line);
+      });
+    });
+    return true;
+  }
+
+  // Coalesce a burst of mutations into one scan per frame. Safe to drop extra
+  // calls: the scan is snapshot-based, so one run catches everything queued.
+  let logScanQueued = false;
+  function scheduleLogScan() {
+    if (logScanQueued) return;
+    logScanQueued = true;
+    requestAnimationFrame(() => { logScanQueued = false; scanLogRows(); });
   }
 
   function attachLogObserver() {
@@ -1075,32 +1290,56 @@
     logUsingFallback = !container;
     logObserverTarget = target;
     logObserver = new MutationObserver((mutations) => {
+      // Ignore batches that are entirely our own DOM — otherwise rendering a
+      // badge or panel re-triggers the parser on itself.
+      let relevant = false;
       for (const mut of mutations) {
-        mut.addedNodes.forEach((node) => {
-          if (isOwnNode(node)) return;
-          // Torn builds a log row as `<li><span>Name</span><span>called $X</span></li>`
-          // and mutates the inner span, so reading the added node alone yielded
-          // "called $3,500,000" with no actor — which failed every name-anchored
-          // pattern and was the real reason no stats were ever recorded. Climb to
-          // the enclosing row so the name and the verb arrive as one line.
-          const el = node.nodeType === 1 ? node : node.parentElement;
-          const row = el && el.closest ? el.closest(SELECTORS.logRow) : null;
-          const source = row || node;
-          const text = (source.textContent || '').trim();
-          if (!text || text.length > 1000) return;
-          // A single inserted node can carry several rendered lines; parse each
-          // separately or a multi-line blob matches nothing at all.
-          text.split('\n').forEach((raw) => {
-            const line = raw.trim();
-            if (!line || line.length > 300) return;
-            if (recentlyHandled(line)) return;
-            handleLogLine(line);
-          });
-        });
+        if (!isOwnTarget(mut.target)) { relevant = true; break; }
       }
+      if (!relevant) return;
+
+      // Preferred path: diff the whole rendered list. Falls through only when
+      // the logRow selector matches nothing, i.e. an uncalibrated page.
+      if (hasLogRows()) { scheduleLogScan(); return; }
+      parseAddedNodes(mutations);
     });
-    logObserver.observe(target, { childList: true, subtree: true });
+    // characterData too: Torn rewrites existing rows in place, so a new message
+    // may arrive with no node insertion at all.
+    logObserver.observe(target, { childList: true, subtree: true, characterData: true });
+    // Prime the snapshot immediately, so lines already on screen aren't replayed
+    // as if they had just happened the first time anything mutates.
+    scanLogRows();
     return true;
+  }
+
+  // Legacy added-nodes parsing, kept ONLY for pages where the log row selector
+  // doesn't match and there is nothing to snapshot. It cannot tell a re-render
+  // from a new event, which is exactly the bug the snapshot scanner fixes — so
+  // it is a last resort, not a parallel path.
+  function parseAddedNodes(mutations) {
+    for (const mut of mutations) {
+      mut.addedNodes.forEach((node) => {
+        if (isOwnNode(node)) return;
+        // Torn builds a log row as `<li><span>Name</span><span>called $X</span></li>`
+        // and mutates the inner span, so reading the added node alone yielded
+        // "called $3,500,000" with no actor — which failed every name-anchored
+        // pattern and was the real reason no stats were ever recorded. Climb to
+        // the enclosing row so the name and the verb arrive as one line.
+        const el = node.nodeType === 1 ? node : node.parentElement;
+        const row = el && el.closest ? el.closest(SELECTORS.logRow) : null;
+        const source = row || node;
+        const text = (source.textContent || '').trim();
+        if (!text || text.length > 1000) return;
+        // A single inserted node can carry several rendered lines; parse each
+        // separately or a multi-line blob matches nothing at all.
+        text.split('\n').forEach((raw) => {
+          const line = raw.trim();
+          if (!line || line.length > 300) return;
+          if (recentlyHandled(line)) return;
+          handleLogLine(line);
+        });
+      });
+    }
   }
 
   const ACTION_WORD_RE = /^(fold|check|call|bet|raise|all[\s-]?in)\b/i;
@@ -1137,6 +1376,12 @@
       if (!heroXid) heroXid = findHeroXid();
       attachLogObserver();
     }, 3000);
+
+    // Safety net. The snapshot scan is idempotent — a poll that finds nothing new
+    // emits nothing — so it costs a textContent read per row and covers any
+    // rendering path the observer doesn't see (a canvas-ish re-layout, a
+    // mutation type we don't subscribe to, an observer detached by an SPA swap).
+    setInterval(scanLogRows, 1000);
   }
 
   // ===========================================================================
@@ -1150,6 +1395,12 @@
 
   function fmtPct(v) {
     return v == null ? '—' : v.toFixed(0) + '%';
+  }
+
+  // Percentage without the sign, for the seat badge where three "%" glyphs per
+  // seat is more clutter than information.
+  function fmtNum(v) {
+    return v == null ? '–' : v.toFixed(0);
   }
 
   function computeRates(p) {
@@ -1192,21 +1443,86 @@
   // 9. GTO-INSPIRED STRATEGY MODULE
   // ===========================================================================
 
-  // Simplified, approximate RFI (raise-first-in) charts, 6-max 100bb style —
-  // heuristic reference points, not solver output. Standard range notation.
+  // RFI (raise-first-in) charts, 100bb. TWO sets: Torn tables run both short and
+  // full ring, and one set cannot serve both — full-ring UTG opens roughly 11%
+  // where 6-max UTG opens roughly 17%, so using the 6-max chart at a 9-handed
+  // table opens about half again too many hands from the worst seat at the table.
+  // `rfiChartFor` picks the set from the seat count observed that hand.
+  //
+  // These are simplified reference charts, NOT solver output. Widths are
+  // calibrated to published figures (see SOURCES below); the exact hand at each
+  // range edge is a reconstruction that hits that width.
+  //
+  // The percentage on each line is MEASURED, not asserted: expand the range with
+  // expandRangeToken and weight by combos (pair 6, suited 4, offsuit 12) out of
+  // 1326. Re-measure and update the comment if you touch a range. Eyeballing a
+  // range string undercounts offsuit hands 3x, which is how an earlier pass
+  // shipped charts at roughly two-thirds of their intended width.
+  //
+  // SOURCES (frequencies cross-checked, then each published range string
+  // re-measured against its own published percentage — several charts found in
+  // the wild disagree with their own stated figure, usually because the offsuit
+  // block is omitted, so a figure was only used when the two agreed):
+  //   upswingpoker.com/charts        6-max UTG 18.5 / BTN 43.1;
+  //                                  9-max UTG 10.2 / BTN 40.8
+  //   pokercoaching.com/preflop-charts  6-max LJ 17.0, HJ 21.1, CO 27.8;
+  //                                  full ring UTG 12.1, UTG+1 13.3, LJ 16.1, HJ 19.6
+  //   preflopwizard.app/blog/preflop-charts  6-max CO 25.2, BTN 41.8;
+  //                                  full ring UTG 12.5, MP 13.4, HJ 16.7, CO 22.8, BTN 40.6
+  //   blog.freebetrange.com          6-max bands EP 15-17, HJ 19-22, CO 25-30,
+  //                                  BTN 40-48, SB 39-47
   const RFI_RANGES = {
-    EP: '77+,ATs+,KTs+,QTs+,JTs,AJo+,KQo',
-    MP: '66+,A9s+,K9s+,QTs+,JTs,T9s,A9o+,KJo+',
-    CO: '44+,A2s+,K8s+,Q9s+,J9s+,T8s+,98s,87s,A7o+,KTo+,QJo',
-    BTN: '22+,A2s+,K2s+,Q6s+,J7s+,T7s+,96s+,85s+,75s+,64s+,A2o+,K7o+,Q9o+,J9o+,T9o',
-    SB: '22+,A2s+,K5s+,Q8s+,J8s+,T8s+,97s+,86s+,75s+,A5o+,K9o+,QTo+,JTo',
+    // <= 6 handed.
+    SHORT: {
+      EP: '22+,A2s+,KTs+,QTs+,JTs,T9s,98s,ATo+,KJo+',                                    // 17.3%
+      MP: '22+,A2s+,K8s+,Q8s+,J8s+,T8s+,98s,87s,76s,ATo+,KJo+,QJo',                      // 21.0%
+      CO: '22+,A2s+,K7s+,Q8s+,J8s+,T8s+,97s+,87s,76s,65s,A8o+,KTo+,QTo+,JTo',            // 26.4%
+      BTN: '22+,A2s+,K2s+,Q6s+,J7s+,T7s+,96s+,85s+,75s+,64s+,54s,A2o+,K7o+,Q9o+,J9o+,T9o', // 41.8%
+      // SB is raise-or-fold with only the BB left to act, so it is wide despite
+      // being out of position — it is not "one step tighter than the button".
+      SB: '22+,A2s+,K2s+,Q4s+,J6s+,T6s+,96s+,85s+,75s+,64s+,54s,A2o+,K8o+,Q9o+,J9o+,T9o', // 42.1%
+    },
+    // 7+ handed. Early position tightens sharply; the button barely moves, which
+    // is why only the early seats really need a separate chart.
+    FULL: {
+      UTG: '22+,ATs+,KTs+,QTs+,JTs,AQo+,KQo',                                            // 11.6%
+      UTG1: '22+,A9s+,KTs+,QTs+,JTs,T9s,AJo+,KQo',                                       // 13.1%
+      LJ: '22+,A7s+,K9s+,Q9s+,J9s+,T9s,ATo+,KJo+',                                       // 16.4%
+      HJ: '22+,A2s+,K8s+,Q9s+,J9s+,T9s,98s,ATo+,KTo+',                                   // 19.5%
+      CO: '22+,A2s+,K7s+,Q9s+,J8s+,T8s+,97s+,87s,76s,A9o+,KTo+,QJo',                     // 23.1%
+      BTN: '22+,A2s+,K2s+,Q5s+,J7s+,T7s+,96s+,86s+,75s+,65s,54s,A2o+,K8o+,Q9o+,J9o+,T9o', // 40.6%
+      // WEAKEST NUMBER IN THE SET: no full-ring SB figure survived the
+      // consistency check (published SB charts mix raising and limping, so the
+      // quoted percentage covers both). Banded by analogy with the 6-max SB, one
+      // notch tighter. Treat as the least trustworthy chart here.
+      SB: '22+,A2s+,K3s+,Q6s+,J7s+,T7s+,96s+,86s+,75s+,65s,54s,A2o+,K9o+,Q9o+,J9o+,T9o', // 39.1%
+    },
+    // No BB entry in either set, on purpose. The big blind is never raising
+    // FIRST in — it is always defending or isolating, and preflopBaseline routes
+    // it there. Do not add one: the code used to fall back to the CO chart for
+    // any unknown label, which silently gave big-blind advice off a cutoff range.
   };
 
-  // Approximate 3-bet ranges vs. an EP/MP-style open, in position vs out of position.
+  // Seven or more players makes it a full-ring hand. Below that the short-handed
+  // charts apply; Torn tables run both, so this is read per hand rather than
+  // taken from the tableMax setting (which only drives the equity quote).
+  const FULL_RING_SEATS = 7;
+  function rfiChartFor(position, seats) {
+    const set = (seats >= FULL_RING_SEATS) ? RFI_RANGES.FULL : RFI_RANGES.SHORT;
+    return set[position] || null;
+  }
+
+  // 3-bet ranges facing a single open. Split by whether hero will be in position
+  // postflop — the OOP chart existed before this and was never actually used,
+  // so every 3-bet call was made on the in-position range.
   const THREE_BET_RANGES = {
-    IP: 'QQ+,AKs,AKo,A5s,A4s,KQs',
-    OOP: 'QQ+,AKs,AKo',
+    IP: '99+,ATs+,KJs+,QTs+,JTs,T9s,98s,A5s,A4s,A3s,AQo+,KQo',  // 9.7%
+    OOP: 'TT+,AJs+,KQs,QJs,A5s,A4s,AQo+',                        // 6.2%
   };
+
+  // Facing a 3-bet (or more). Deliberately value-heavy: this is a "continue at
+  // all" reference, not a balanced 4-betting strategy.
+  const FOUR_BET_RANGE = 'QQ+,AKs,AKo,A5s'; // 2.9%
 
   function expandRangeToken(token) {
     // Handles: pair "88", pair+ "88+", pair range "66-99",
@@ -1218,7 +1534,11 @@
     const pairRange = /^([2-9TJQKA])\1-([2-9TJQKA])\2$/.exec(token);
     const pairExact = /^([2-9TJQKA])\1$/.exec(token);
     const suitedPlus = /^([2-9TJQKA])([2-9TJQKA])(s|o)\+$/.exec(token);
-    const suitedRange = /^([2-9TJQKA])([2-9TJQKA])(s|o)-([2-9TJQKA])\2(s|o)$/.exec(token);
+    // Both sides must share the high card and the suitedness: "A5s-A9s". The
+    // backreferences used to be on the wrong groups, so this form matched
+    // nothing and the token was dropped in silence — a range could lose a whole
+    // chunk of hands with no error anywhere.
+    const suitedRange = /^([2-9TJQKA])([2-9TJQKA])(s|o)-\1([2-9TJQKA])\3$/.exec(token);
     const suitedExact = /^([2-9TJQKA])([2-9TJQKA])(s|o)$/.exec(token);
 
     if (pairPlus) {
@@ -1270,33 +1590,107 @@
     return pot / (pot + bet); // fraction of the time defender must continue
   }
 
-  function gtoBaselineSuggestion(ctx) {
-    const { street, position, positionInferred, heroCards, betFacing, pot, posDiag } = ctx;
-    if (street === 'preflop' && heroCards) {
-      // Without a known position an RFI chart is meaningless — say so rather
-      // than quietly assuming a seat and giving confidently wrong advice.
-      if (!position) {
-        return `GTO baseline: position unknown this hand (${posDiag || 'reason unclear'}) — no preflop chart applied.`;
-      }
-      // An inferred seat is read off whose turn it is, not off observed action.
-      // Say so in the label: a misread seat changes the chart, and advice that
-      // looks equally confident either way is the failure mode worth avoiding.
-      const pos = positionInferred ? `${position}?` : position;
-      const rfiRange = RFI_RANGES[position] || RFI_RANGES.CO;
-      if (!betFacing) {
-        return isHandInRange(heroCards[0], heroCards[1], rfiRange)
-          ? `GTO baseline (${pos}): open-raise — in your RFI range.`
-          : `GTO baseline (${pos}): fold — outside a standard ${position} opening range.`;
-      }
-      return isHandInRange(heroCards[0], heroCards[1], THREE_BET_RANGES.IP)
-        ? 'GTO baseline: 3-bet (in a standard 3-bet range).'
-        : 'GTO baseline: fold/flat depending on pot odds (outside standard 3-bet range).';
+  // How many players limped in before any raise. An RFI chart is a raise-FIRST-in
+  // chart: over limpers the spot is an isolation raise, and the old code applied
+  // the opening chart to it and called the result "open-raise".
+  function preflopLimperCount(hand) {
+    const seen = new Set();
+    for (const a of hand.actions) {
+      if (a.s !== 'preflop') break;          // actions are in order; preflop is first
+      if (a.a === 'raise' || a.a === 'all-in') break;
+      if (a.a === 'call') seen.add(a.x);
     }
+    return seen.size;
+  }
+
+  // True if hero acts after `villainXid` postflop. The rotation is SB-first,
+  // which is exactly postflop order, so a later index means later to act.
+  // Returns null when it can't be established — the caller must not guess.
+  function heroIsInPositionVs(hand, villainXid) {
+    if (!heroXid || !villainXid) return null;
+    const rot = buildRotation(hand);
+    if (!rot) return null;
+    const vi = rot.indexOf(villainXid);
+    if (vi < 0) return null;
+    let hi = rot.indexOf(heroXid);
+    if (hi < 0) hi = rot.length; // yet to act preflop, so after everyone who has
+    return hi > vi;
+  }
+
+  // Preflop is split by SITUATION first, then by chart. Applying an opening
+  // range to a limped pot, or a 3-bet range to a 4-bet decision, gives advice
+  // that reads as confident and is answering a different question.
+  function preflopBaseline(ctx) {
+    const { position, positionInferred, heroCards, posDiag, seats,
+            preflopRaises, limpers, heroInPosition, heroHasRaised } = ctx;
+
+    // Without a known position no chart is meaningful — say so rather than
+    // quietly assuming a seat and giving confidently wrong advice.
+    if (!position) {
+      return `Baseline: position unknown this hand (${posDiag || 'reason unclear'}) — no preflop chart applied.`;
+    }
+    // An inferred seat is read off whose turn it is, not off observed action.
+    // Say so in the label: a misread seat changes the chart, and advice that
+    // looks equally confident either way is the failure mode worth avoiding.
+    const pos = positionInferred ? `${position}?` : position;
+    const inRange = (r) => isHandInRange(heroCards[0], heroCards[1], r);
+
+    // --- facing a re-raise -------------------------------------------------
+    if (preflopRaises >= 2) {
+      const verb = heroHasRaised ? '4-bet or call' : 'call';
+      return inRange(FOUR_BET_RANGE)
+        ? `Baseline (${pos}): ${verb} — inside a standard continuing range vs a re-raise.`
+        : `Baseline (${pos}): fold to the re-raise — outside a standard continuing range.`;
+    }
+
+    // --- facing a single open ----------------------------------------------
+    if (preflopRaises === 1 && !heroHasRaised) {
+      // Unknown relative position falls back to the TIGHTER chart. The old code
+      // used the in-position range unconditionally, which is the loose one.
+      const ip = heroInPosition === true;
+      const chart = ip ? THREE_BET_RANGES.IP : THREE_BET_RANGES.OOP;
+      const note = heroInPosition == null
+        ? ', position vs the raiser unknown so the tighter out-of-position chart is used'
+        : (ip ? ', in position' : ', out of position');
+      return inRange(chart)
+        ? `Baseline (${pos}): 3-bet — in a standard 3-bet range${note}.`
+        : `Baseline (${pos}): fold, or flat if the pot odds and your reads justify it — outside a standard 3-bet range${note}.`;
+    }
+
+    // --- hero already opened and is only facing calls -----------------------
+    if (heroHasRaised) {
+      return `Baseline (${pos}): you are the preflop aggressor — no further preflop chart applies.`;
+    }
+
+    // --- big blind: never raise-first-in ------------------------------------
+    const rfiRange = rfiChartFor(position, seats);
+    if (!rfiRange) {
+      return limpers > 0
+        ? `Baseline (${pos}): no raise to face, ${limpers} limper(s) — isolating with the top of your range is usually right. The big blind has no RFI chart (it is never first in), so none is applied.`
+        : `Baseline (${pos}): checking is free. The big blind has no RFI chart (it is never first in), so none is applied.`;
+    }
+
+    // --- limped pot: isolation, not RFI -------------------------------------
+    if (limpers > 0) {
+      return inRange(rfiRange)
+        ? `Baseline (${pos}): raise to isolate the ${limpers} limper(s) — in your ${position} opening range (an opening chart is only a rough floor here; limpers rarely fold, so lean toward value).`
+        : `Baseline (${pos}): fold — outside your ${position} opening range, and limpers make a steal less likely to get through.`;
+    }
+
+    // --- genuinely unopened: the one spot an RFI chart is for ----------------
+    return inRange(rfiRange)
+      ? `Baseline (${pos}): open-raise — in your ${position} RFI range.`
+      : `Baseline (${pos}): fold — outside a standard ${position} opening range.`;
+  }
+
+  function gtoBaselineSuggestion(ctx) {
+    const { street, heroCards, betFacing, pot } = ctx;
+    if (street === 'preflop' && heroCards) return preflopBaseline(ctx);
     if (betFacing != null && pot != null) {
       const mdf = minimumDefenseFrequency(betFacing, pot);
-      return `GTO baseline: defend roughly ${fmtPct(mdf * 100)} of your range here (MDF).`;
+      return `Baseline: defend roughly ${fmtPct(mdf * 100)} of your range here (MDF).`;
     }
-    return 'GTO baseline: check/bet a balanced portion of your range.';
+    return 'Baseline: check/bet a balanced portion of your range.';
   }
 
   function exploitDeviation(villainXid) {
@@ -1573,15 +1967,32 @@
     const n = Math.max(seated, i + 1, rot.length);
     if (n < 2) return null;
 
-    let label;
-    if (n === 2) label = i === 0 ? 'SB' : 'BB';
-    else if (i === 0) label = 'SB';
-    else if (i === 1) label = 'BB';
-    else if (i === n - 1) label = 'BTN';
-    else if (i === n - 2) label = 'CO';
-    else if (i === n - 3) label = 'MP';
-    else label = 'EP';
-    return { label, inferred };
+    return { label: seatLabel(i, n), inferred, seats: n };
+  }
+
+  // Index in the rotation (0 = SB) to a position name. Short-handed collapses to
+  // EP/MP/CO/BTN; full ring names the early seats separately, because at a
+  // 9-handed table four distinct seats used to share one "EP" label and one
+  // chart, and the tightest of them was being given a range meant for the
+  // loosest. Measured from the BUTTON backwards, so it degrades sensibly at 7-
+  // and 8-handed tables instead of assuming exactly nine.
+  function seatLabel(i, n) {
+    if (n === 2) return i === 0 ? 'SB' : 'BB';
+    if (i === 0) return 'SB';
+    if (i === 1) return 'BB';
+    const fromBtn = n - 1 - i;
+    if (n < FULL_RING_SEATS) {
+      if (fromBtn === 0) return 'BTN';
+      if (fromBtn === 1) return 'CO';
+      if (fromBtn === 2) return 'MP';
+      return 'EP';
+    }
+    if (fromBtn === 0) return 'BTN';
+    if (fromBtn === 1) return 'CO';
+    if (fromBtn === 2) return 'HJ';
+    if (fromBtn === 3) return 'LJ';
+    if (fromBtn === 4) return 'UTG1';
+    return 'UTG';
   }
 
   // A "session" is just play separated by a gap; no explicit start/stop to forget.
@@ -1628,6 +2039,21 @@
       betFacing,
       pot: hand.pot,
       posDiag: position ? null : positionDiagnosis(hand),
+      // Seat count for THIS hand picks the chart set — Torn runs both short and
+      // full ring, and the tableMax setting only drives the equity quote.
+      seats: pos ? pos.seats : 0,
+      // Which preflop spot this actually is. Without these the chart was chosen
+      // from betFacing alone, which cannot tell an unopened pot from a limped
+      // one, or a 3-bet from a 4-bet.
+      // KNOWN IMPRECISION: preflopRaiseEvents counts an all-in as a raise, so a
+      // short stack shoving what is really a CALL can push this to 2 and make
+      // the coach read the spot as facing a 3-bet. Fixing it needs the all-in
+      // amount compared against the current bet, which the log doesn't always
+      // print.
+      preflopRaises: hand.preflopRaiseEvents,
+      limpers: preflopLimperCount(hand),
+      heroInPosition: heroIsInPositionVs(hand, villainXid),
+      heroHasRaised: !!(heroXid && hand.countedPfr.has(heroXid)),
     }));
 
     if (heroCards.length === 2) {
@@ -1711,10 +2137,15 @@
   // ===========================================================================
 
   const CSS = `
-    .tph-badge { position: fixed; z-index: 99998; background: rgba(20,20,24,0.92); color: #eee;
-      border: 1px solid #555; border-radius: 6px; padding: 3px 6px; font: 11px/1.3 -apple-system, sans-serif;
-      cursor: pointer; pointer-events: auto; max-width: 150px; }
-    .tph-badge b { color: #ffd166; }
+    /* Deliberately understated and anchored UNDER the seat: at 11px with a solid
+       border sitting above the seat it covered the player's name, which is the
+       one thing on a seat you always need to read. */
+    .tph-badge { position: fixed; z-index: 99998; background: rgba(12,12,16,0.62); color: #9aa;
+      border: none; border-radius: 3px; padding: 0 3px; font: 9px/1.5 -apple-system, sans-serif;
+      letter-spacing: 0.2px; white-space: nowrap; cursor: pointer; pointer-events: auto;
+      max-width: 120px; overflow: hidden; }
+    .tph-badge b { color: #c8a24a; font-weight: 600; }
+    .tph-badge .tph-badge-dim { opacity: 0.55; }
     .tph-panel { position: fixed; z-index: 99999; top: 10%; left: 5%; right: 5%; max-height: 80%; overflow-y: auto;
       background: #1b1b1f; color: #eee; border: 1px solid #666; border-radius: 8px; padding: 12px;
       font: 13px/1.4 -apple-system, sans-serif; }
@@ -1756,10 +2187,16 @@
     .tph-coach.tph-dragging .tph-coach-head { cursor: grabbing; }
     .tph-coach-body { padding: 8px; }
     .tph-coach-body b { color: #fff; }
+    .tph-coach-foot { padding: 0 8px 7px; font-size: 10px; line-height: 1.35;
+      opacity: 0.5; border-top: 1px solid #334; padding-top: 6px; margin-top: 2px; }
+    /* touch-action:none so dragging the pill moves it instead of scrolling the
+       table underneath — without it the pointermove handler never gets to run. */
     .tph-coach-pill { position: fixed; z-index: 99998; bottom: 150px; right: 12px;
       background: rgba(20,20,24,0.95); color: #9bd; border: 1px solid #556; border-radius: 999px;
-      padding: 7px 13px; font: 12px/1 -apple-system, sans-serif; cursor: pointer;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.5); user-select: none; -webkit-user-select: none; }
+      padding: 7px 13px; font: 12px/1 -apple-system, sans-serif; cursor: grab;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.5); touch-action: none;
+      user-select: none; -webkit-user-select: none; }
+    .tph-coach-pill.tph-dragging { cursor: grabbing; opacity: 0.85; }
     .tph-calib { position: fixed; z-index: 99999; top: 4px; left: 4px; right: 4px; max-height: 62%; overflow-y: auto;
       background: rgba(10,10,10,0.97); color: #9f9; border: 1px solid #494; border-radius: 6px; padding: 8px;
       font: 10px/1.3 monospace; }
@@ -1792,21 +2229,35 @@
     requestAnimationFrame(() => { badgeFrameQueued = false; renderBadges(); });
   }
 
+  // Roughly the badge's own height, used to keep it inside the viewport when a
+  // seat sits right at the bottom edge.
+  const BADGE_HEIGHT_PX = 14;
+
   function renderBadges() {
     document.querySelectorAll('.tph-badge').forEach((el) => el.remove());
+    if (!STORE.settings.showBadges) return;
     const seats = document.querySelectorAll(SELECTORS.seatContainer);
     seats.forEach((seat) => {
       const xid = resolveSeatKey(seat);
       if (!xid || xid === heroXid) return;
       const player = STORE.players[xid];
       const rect = seat.getBoundingClientRect();
+      if (!rect.width && !rect.height) return; // seat not laid out (empty/hidden)
       const badge = document.createElement('div');
       badge.className = 'tph-badge';
-      badge.style.top = Math.max(0, rect.top - 20) + 'px';
-      badge.style.left = rect.left + 'px';
+      // Below the seat — i.e. under the name and chip stack — rather than over
+      // the top of it. Clamped so a bottom-row seat doesn't push it off screen.
+      const maxTop = Math.max(0, window.innerHeight - BADGE_HEIGHT_PX);
+      badge.style.top = Math.min(Math.max(0, rect.bottom + 1), maxTop) + 'px';
+      badge.style.left = Math.max(0, rect.left) + 'px';
       const label = player ? classify(player) : 'Unrated';
       const r = player ? computeRates(player) : {};
-      badge.innerHTML = `<b>${label}</b> ${fmtPct(r.vpip)}/${fmtPct(r.pfr)} AFq${fmtPct(r.afq)}`;
+      // Bare numbers, no "%" and no "AFq" caption: three percent signs and a
+      // label per seat is a lot of ink for something sitting on the felt.
+      badge.innerHTML = label === 'Unrated'
+        ? `<span class="tph-badge-dim">${player ? player.hands : 0}h</span>`
+        : `<b>${label}</b> <span class="tph-badge-dim">${fmtNum(r.vpip)}/${fmtNum(r.pfr)}/${fmtNum(r.afq)}</span>`;
+      badge.title = 'VPIP/PFR/AFq — tap for full stats';
       badge.addEventListener('click', () => openPlayerPanel(xid));
       document.body.appendChild(badge);
     });
@@ -1817,6 +2268,10 @@
   // edges — otherwise there is nowhere for it to go. 100px keeps enough of the
   // header grabbable to drag it back.
   const COACH_KEEP_VISIBLE_PX = 100;
+
+  // The pill is small enough to keep whole on screen, so no allowance is needed
+  // beyond the default — named for symmetry with the panel above.
+  const PILL_KEEP_VISIBLE_PX = 0;
 
   function setCoachHidden(hidden) {
     STORE.settings.coachHidden = hidden;
@@ -1843,9 +2298,18 @@
         pill = document.createElement('div');
         pill.className = 'tph-coach-pill';
         pill.textContent = '📊 GTO';
-        pill.title = 'Show the GTO coach';
-        pill.addEventListener('click', () => setCoachHidden(false));
+        pill.title = 'Tap to show the GTO coach — drag to move';
         document.body.appendChild(pill);
+        applyStoredPos(pill, 'coachPillPos', PILL_KEEP_VISIBLE_PX);
+        // The expanded panel was draggable and the collapsed pill was not — it
+        // only had a click handler, so there was no way to get it off whatever
+        // it was covering. Tap still expands; makeDraggable's threshold keeps a
+        // slightly-imprecise tap from being read as a drag.
+        makeDraggable(pill, {
+          onTap: () => setCoachHidden(false),
+          posKey: 'coachPillPos',
+          keepVisiblePx: PILL_KEEP_VISIBLE_PX,
+        });
       }
       return;
     }
@@ -1857,9 +2321,17 @@
     if (!el) {
       el = document.createElement('div');
       el.className = 'tph-coach';
+      // The footnote is part of the chrome, not the advice, so it is written
+      // once and survives the 1.5s advice refresh. "Baseline" replaced "GTO
+      // baseline" throughout for the same reason it exists: these are reference
+      // charts calibrated to published opening frequencies, not solver output,
+      // and the old wording claimed the authority of an equilibrium solution.
       el.innerHTML = '<div class="tph-coach-head"><span class="tph-grip">⠿</span>'
-        + '<span>GTO coach</span><span class="tph-coach-hide">Hide</span></div>'
-        + '<div class="tph-coach-body"></div>';
+        + '<span>Coach</span><span class="tph-coach-hide">Hide</span></div>'
+        + '<div class="tph-coach-body"></div>'
+        + '<div class="tph-coach-foot">Baselines are reference charts calibrated to '
+        + 'published opening frequencies — not solver output. Equity is vs random '
+        + 'hands, and P/L is an estimate.</div>';
       document.body.appendChild(el);
 
       const head = el.querySelector('.tph-coach-head');
@@ -2037,6 +2509,9 @@
       <label><b>Your Torn username:</b> <input type="text" class="tph-hero-name" value="${escapeHtml(STORE.settings.heroName)}" placeholder="required for P/L" style="width:55%"></label><br>
       <div style="opacity:.7;margin:2px 0 10px">Needed to attribute profit/loss and work out your position.</div>
       <label>Min hands before rating: <input type="number" class="tph-min-hands" value="${STORE.settings.minHands}" style="width:60px"></label><br><br>
+      <h4>Seat labels</h4>
+      <label><input type="checkbox" class="tph-badge-toggle" ${STORE.settings.showBadges ? 'checked' : ''}> Show tendency labels on seats</label>
+      <div style="opacity:.7;margin:2px 0 10px">Small line under each seat: archetype and VPIP/PFR/AFq. Tap one for full stats. Turn off to leave the table completely clear.</div>
       <h4>GTO coach</h4>
       <label><input type="checkbox" class="tph-coach-toggle" ${STORE.settings.coachHidden ? '' : 'checked'}> Show coach panel</label><br>
       <label>Full table size: <input type="number" class="tph-table-max" min="2" max="10" value="${STORE.settings.tableMax}" style="width:60px"></label>
@@ -2076,6 +2551,11 @@
       STORE.settings.minHands = parseInt(e.target.value, 10) || 20;
       saveStore();
     });
+    panel.querySelector('.tph-badge-toggle').addEventListener('change', (e) => {
+      STORE.settings.showBadges = e.target.checked;
+      saveStore();
+      renderBadges(); // clears them immediately rather than waiting for the tick
+    });
     panel.querySelector('.tph-coach-toggle').addEventListener('change', (e) => {
       setCoachHidden(!e.target.checked);
     });
@@ -2089,9 +2569,13 @@
     // a corner that the other screen orientation doesn't have.
     panel.querySelector('.tph-coach-reset').addEventListener('click', () => {
       STORE.settings.coachPos = null;
+      STORE.settings.coachPillPos = null; // the pill is draggable too, and can be
+                                          // parked out of reach just as easily
       saveStore();
       const coach = document.querySelector('.tph-coach');
       if (coach) coach.remove(); // rebuilt at the default anchor on the next tick
+      const pill = document.querySelector('.tph-coach-pill');
+      if (pill) pill.remove();
     });
     panel.querySelector('.tph-calib-toggle').addEventListener('change', (e) => {
       STORE.settings.calibrationMode = e.target.checked;
@@ -2199,6 +2683,14 @@
     L.push('=== TORN POKER HUD DEEP SCAN v0.4.0 ===');
     L.push('url: ' + location.pathname + location.search);
     L.push('logObserver: ' + (logObserver ? (logUsingFallback ? 'ACTIVE (body fallback)' : 'ACTIVE (container)') : 'NOT ATTACHED'));
+    // If duplicate hands ever come back, this line says which ingestion path ran.
+    // "added-nodes fallback" means logRow matched nothing and the parser cannot
+    // tell a re-render from a new event.
+    L.push('logIngest: ' + (hasLogRows()
+      ? `snapshot diff (${logSnapshot.length} rows, ${logOrientation || 'orientation not yet inferred'})`
+      : 'added-nodes fallback — logRow selector matches nothing'));
+    L.push('handsRecorded: ' + (STORE.hands || []).length
+      + ', withGameId: ' + (STORE.hands || []).filter((h) => h && h.g).length);
     L.push('');
 
     L.push('--- SELECTOR ALTERNATIVES (each tested separately) ---');
@@ -2404,6 +2896,11 @@
       if (coach && STORE.settings.coachPos) {
         const cr = coach.getBoundingClientRect();
         setFixedPos(coach, cr.left, cr.top, COACH_KEEP_VISIBLE_PX);
+      }
+      const pill = document.querySelector('.tph-coach-pill');
+      if (pill && STORE.settings.coachPillPos) {
+        const pr = pill.getBoundingClientRect();
+        setFixedPos(pill, pr.left, pr.top, PILL_KEEP_VISIBLE_PX);
       }
     });
   }
