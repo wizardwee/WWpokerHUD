@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.18.0
+// @version      0.18.1
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -14,6 +14,16 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 0.18.1 - Hand history text was dark-on-dark on the live page. Two class-based
+ *          attempts failed (a recessed card relying on inherited colour, then a
+ *          lighter card with !important in our own stylesheet) while the Stats
+ *          tab in the SAME panel rendered fine — which rules out the panel and
+ *          inheritance, and means a Torn rule was beating ours on specificity.
+ *          Colours are now inline with !important, the highest-priority
+ *          declaration in CSS, so no page stylesheet can override them. The
+ *          Report tab's <pre> is pinned the same way, since bare elements like
+ *          <pre> are exactly what a page stylesheet is most likely to target.
+ *          Layout is unchanged — only the colours are forced.
  * 0.18.0 - Fixes from the first live deep scan (v0.17.0, 5-handed table).
  *          The coach was printing "defend roughly NaN% of your range (MDF)":
  *          minimumDefenseFrequency computed pot/(pot+bet), and BOTH were zero
@@ -215,7 +225,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '0.18.0';
+  const HUD_VERSION = '0.18.1';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -1338,12 +1348,36 @@
     return lines.join('\n');
   }
 
+  // History styling is INLINE with !important, not class-based.
+  //
+  // Two class-based attempts were reported unreadable on the live page — first a
+  // recessed card relying on inherited text colour, then a lighter card with
+  // `!important` in our own stylesheet. Both lost, while the Stats tab in the
+  // same panel rendered perfectly, which rules out the panel and inheritance and
+  // means Torn has a rule beating ours on specificity. An inline declaration
+  // marked !important is the highest-priority thing in CSS: no stylesheet can
+  // override it, so this stops being a contest we can lose.
+  //
+  // Keep the classes on the elements too — they still carry layout, and
+  // .tph-hh-me is used to colour the legend line.
+  const HH = {
+    card: 'background:#2a2a33 !important;color:#f2f4f6 !important;border:1px solid #3d3d48;'
+      + 'border-left:3px solid #6b8cae;border-radius:5px;padding:8px 10px;margin-bottom:9px;',
+    head: 'color:#a8b2bd !important;font-size:11px;margin-bottom:6px;',
+    row: 'color:#f2f4f6 !important;font-size:12.5px;line-height:1.6;',
+    street: 'color:#8ec5f0 !important;display:inline-block;min-width:54px;font-size:10px;'
+      + 'text-transform:uppercase;letter-spacing:0.5px;',
+    me: 'color:#ffc94d !important;font-weight:700;',
+    showdown: 'color:#d4b3f0 !important;font-size:11.5px;margin-top:4px;',
+    win: 'color:#8ce89a !important;font-size:12.5px;margin-top:4px;',
+  };
+
   // Same hand as formatHand, rendered as markup instead of a line of text.
   // formatHand is kept for the Copy button — clipboard output should stay plain
   // text — so the two must be changed together if the content changes.
   function formatHandHtml(h, focusXid) {
     const when = new Date(h.t).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-    const parts = [`<div class="tph-hh-head">${escapeHtml(when)} · pot ${fmtMoney(h.pot)}`
+    const parts = [`<div class="tph-hh-head" style="${HH.head}">${escapeHtml(when)} · pot ${fmtMoney(h.pot)}`
       + ` · reached ${escapeHtml(h.street || 'preflop')}</div>`];
 
     const byStreet = {};
@@ -1353,20 +1387,22 @@
       const acts = byStreet[street].map((a) => {
         const amt = a.amt ? ` ${fmtMoney(a.amt)}` : '';
         const txt = `${escapeHtml(playerDisplayName(a.x))} ${escapeHtml(a.a)}${amt}`;
-        return (focusXid && a.x === focusXid) ? `<span class="tph-hh-me">${txt}</span>` : txt;
+        return (focusXid && a.x === focusXid)
+          ? `<span class="tph-hh-me" style="${HH.me}">${txt}</span>` : txt;
       }).join(', ');
-      parts.push(`<div class="tph-hh-row"><span class="tph-hh-st">${street}</span>${acts}</div>`);
+      parts.push(`<div class="tph-hh-row" style="${HH.row}">`
+        + `<span class="tph-hh-st" style="${HH.street}">${street}</span>${acts}</div>`);
     });
 
     Object.keys(h.shown || {}).forEach((xid) => {
-      parts.push(`<div class="tph-hh-sd">showdown: ${escapeHtml(playerDisplayName(xid))}`
+      parts.push(`<div class="tph-hh-sd" style="${HH.showdown}">showdown: ${escapeHtml(playerDisplayName(xid))}`
         + ` shows ${escapeHtml(h.shown[xid])}</div>`);
     });
     (h.winners || []).forEach((w) => {
-      parts.push(`<div class="tph-hh-win">→ ${escapeHtml(playerDisplayName(w.xid))}`
+      parts.push(`<div class="tph-hh-win" style="${HH.win}">→ ${escapeHtml(playerDisplayName(w.xid))}`
         + ` wins ${fmtMoney(w.amount)}</div>`);
     });
-    return `<div class="tph-hh">${parts.join('')}</div>`;
+    return `<div class="tph-hh" style="${HH.card}">${parts.join('')}</div>`;
   }
 
   function handsInvolving(xid) {
@@ -2876,7 +2912,8 @@
       `;
     } else if (openPlayerTab === 'report') {
       const text = buildReport(openPlayerXid);
-      body.innerHTML = `<pre style="white-space:pre-wrap">${escapeHtml(text)}</pre><button class="tph-copy-report">Copy report</button>`;
+      body.innerHTML = `<pre style="white-space:pre-wrap;color:#f2f4f6 !important;background:transparent !important">`
+        + `${escapeHtml(text)}</pre><button class="tph-copy-report">Copy report</button>`;
       body.querySelector('.tph-copy-report').addEventListener('click', () => {
         navigator.clipboard && navigator.clipboard.writeText(text);
       });
@@ -2888,8 +2925,9 @@
         const shown = hands.slice(0, 40);
         // Clipboard stays plain text; only the on-screen rendering is markup.
         const text = shown.map((h) => formatHand(h, openPlayerXid)).join('\n\n');
-        body.innerHTML = `<div style="opacity:.7;margin-bottom:8px">${hands.length} hand(s) recorded`
-          + `${hands.length > shown.length ? `, showing ${shown.length}` : ''} — <span class="tph-hh-me">their actions highlighted</span></div>`
+        body.innerHTML = `<div style="color:#c9d1d9 !important;margin-bottom:8px">${hands.length} hand(s) recorded`
+          + `${hands.length > shown.length ? `, showing ${shown.length}` : ''} — `
+          + `<span style="${HH.me}">their actions highlighted</span></div>`
           + shown.map((h) => formatHandHtml(h, openPlayerXid)).join('')
           + `<button class="tph-copy-hist">Copy history</button>`;
         body.querySelector('.tph-copy-hist').addEventListener('click', () => {
