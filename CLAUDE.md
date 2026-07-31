@@ -19,7 +19,7 @@ single hand-edited file. Userscript managers compare `@version` to decide
 whether an update exists, so leaving it stale means a reinstall elsewhere won't
 see new code as newer. Bump it in the same commit as the change.
 
-## Current status (v0.13.0)
+## Current status (v0.14.0)
 
 Selectors and log wording are **calibrated against real scans**. Parsing is
 believed working — action rows no longer appear unmatched — but no stat or
@@ -194,6 +194,57 @@ rather than solver output, no ante/straddle modelling, ~100bb assumed. One known
 routing hazard is noted in the code — `preflopRaiseEvents` counts an all-in as a
 raise, so a short-stack all-in *call* can make the coach read the spot as facing
 a 3-bet.
+
+## Review findings still open (v0.14.0)
+
+Reviewed and deliberately left, in rough priority order. Also listed in the
+script header so they're visible while editing.
+
+1. **The pot has no cross-check.** It is only ever the running sum of parsed log
+   amounts. `SELECTORS.potDisplay` resolves on the live table and is read
+   nowhere. One missed or unparsed amount skews `hand.pot` for the rest of the
+   hand, which silently corrupts pot odds and MDF — and nothing detects it.
+   Reading the DOM pot and warning on divergence is the single highest-value
+   QA improvement available, and it needs a live table to calibrate.
+2. **`STORE.players` grows forever.** `lastSeen` is written on every access and
+   never read; nothing prunes. `saveStore` catches quota errors and logs, so
+   hitting the localStorage ceiling stops persistence *silently*. Surface a save
+   failure in the UI before adding pruning — silent data loss is the worse half.
+3. **All-in is counted as a raise** (`preflopRaiseEvents`), so a short-stack
+   all-in *call* can make the coach read the spot as facing a 3-bet. Needs the
+   all-in amount compared against the current bet, which the log doesn't always
+   print.
+4. **Calibration's 3s refresh only starts if the setting was on at load.**
+   Enabling it mid-session gives a panel that updates on log lines only.
+5. **`tableMax` (default 9) only drives the equity quote**, not the preflop
+   charts, which read the per-hand seat count. At a 6-max table with the default
+   left alone, equity reads pessimistically (quoted vs 8 opponents).
+
+## Should this be refactored?
+
+**Not into modules.** There is no build step and the install model is "fetch one
+file whole" — splitting it would mean adding a bundler, which breaks the thing
+that makes this deployable to Torn PDA at all. 3000 lines in one file is a
+consequence of the constraint, not neglect.
+
+**The seam worth building is testability.** Every QA harness this repo has used
+recovers functions by slicing the source with `indexOf` and `eval`. That works,
+but it breaks whenever anything is renamed or a `const` moves — several harnesses
+broke mid-session for exactly that reason, and one silently reported false
+failures because a regex matched the wrong chart. If the pure logic (log
+patterns, range expansion, the evaluator, stat maths, position mapping) were
+exposed behind one explicit object — say `window.__TPH_TEST` assigned only when
+a debug flag is set — the harnesses would import a stable surface instead of
+re-deriving one. That is the refactor with real payoff; do it the next time a
+harness breaks rather than as its own task.
+
+Two cheap things already done rather than deferred: the section map at the top
+now lists sections **in file order** (they are not in numeric order, and there is
+no section 10 — P/L lives inside section 4), and the known gaps above are in the
+header where an editor will see them.
+
+Leave alone: the numbered section scheme itself (renumbering churns the whole
+file for no behavioural gain), and the single-file structure.
 
 ## Next task
 

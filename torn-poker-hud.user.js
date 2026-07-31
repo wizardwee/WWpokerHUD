@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.13.0
+// @version      0.14.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -14,6 +14,21 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 0.14.0 - Hand history in the player panel is rendered as one block per hand
+ *          instead of up to 40 hands run together in a single monospace <pre>
+ *          on the panel's own background; the tracked player's actions are
+ *          coloured rather than marked with an asterisk. Clipboard output is
+ *          unchanged (still plain text).
+ *          Review fixes: (1) seat counting ignored the "name:" pseudo-ids that
+ *          nameToXidGuess falls back to, so ONE unmatched log name inflated the
+ *          table size by one and shifted every position label by a seat —
+ *          exactly the drift the position notes describe; (2) cross-device hand
+ *          merging deduped on timestamp, so two devices at one table recorded
+ *          every shared hand twice — it now prefers Torn's game id; (3) a
+ *          player record missing a street inside streetActions threw in
+ *          computeRates and took the panel down, and records are now repaired at
+ *          load rather than only on getPlayer access, since renderBadges and the
+ *          players list read STORE.players directly.
  * 0.13.0 - Preflop charts re-grounded in published sources instead of recall,
  *          and full-ring support added. There are now TWO chart sets, picked
  *          from the seat count observed that hand: at a 9-handed table four
@@ -81,21 +96,38 @@
  * KNOWN UNRESOLVED: actionButtons and dealerButton match nothing on the live
  * table. dealerButton is a red herring for position — it is declared in
  * SELECTORS and referenced nowhere else; position comes from the log.
+ *
+ * KNOWN GAPS (reviewed, deliberately not fixed — see CLAUDE.md for the reasoning):
+ *  - The pot is tracked ONLY by summing parsed log amounts. SELECTORS.potDisplay
+ *    resolves on the live table and is never read, so there is no cross-check:
+ *    one missed or unparsed amount silently skews pot odds and MDF for the rest
+ *    of the hand, with nothing to notice it.
+ *  - STORE.players grows without bound. `lastSeen` is written on every access
+ *    and never read, so nothing prunes players you met once. localStorage
+ *    failures are caught and logged, which means hitting quota stops saving
+ *    silently rather than telling you.
+ *  - Calibration mode's 3s refresh only starts if the setting was already on at
+ *    load; enabling it mid-session gives a panel that updates on log lines only.
  */
 
 /*
- * SECTION MAP (matches the design plan 1:1):
+ * SECTION MAP — in the order they actually appear in the file. The numbering is
+ * historical (it came from a design plan) and the sections are NOT in numeric
+ * order; this list is the honest one, so read it top to bottom.
+ *
+ *   0. Shared utilities
  *   1. PDA/browser adapter shim
  *   2. Storage layer
  *   3. GitHub Gist sync (Device Flow)
- *   4. Table state capture (DOM selectors + log parsing + hand state machine)
+ *   4. Table state capture — DOM selectors, log ingestion, hand state machine,
+ *      and profit/loss attribution (there is no separate P/L section)
  *   5. Stat engine
  *   6. Archetype classifier
- *   7. HUD overlay (badges, player panel, settings panel)
+ *   9. GTO-inspired strategy module (preflop charts + baselines)
+ *  12. Card reading, equity, position, session
  *   8. Coach prompts
- *   9. GTO-inspired strategy module
- *  10. Profit/loss tracking
  *  11. Tendency report
+ *   7. HUD overlay (badges, player panel, players list, settings, calibration)
  *
  * CALIBRATION NOTE: Torn's poker page uses hashed/webpack-style CSS module
  * class names. As of 0.10.0 the selectors in SECTION 4 are calibrated against
@@ -269,6 +301,7 @@
       parsed.hands = parsed.hands || [];
       parsed.hero = parsed.hero || { hands: 0, netChips: 0 };
       parsed.session = parsed.session || { startedAt: 0, hands: 0, net: 0, lastHandAt: 0 };
+      normalizePlayers(parsed);
       return parsed;
     } catch (e) {
       console.warn('[TornPokerHUD] Corrupt storage, resetting.', e);
@@ -293,7 +326,32 @@
   function ensurePlayerShape(p, xid) {
     const t = emptyPlayer(xid, p.name);
     Object.keys(t).forEach((k) => { if (p[k] === undefined) p[k] = t[k]; });
+    // streetActions is nested, and a top-level backfill won't repair a record
+    // that HAS the object but is missing a street inside it — computeRates reads
+    // p.streetActions.flop.bet unguarded, so a hand-edited or partially-merged
+    // import would throw there and take the whole panel down with it.
+    Object.keys(t.streetActions).forEach((street) => {
+      if (!p.streetActions[street] || typeof p.streetActions[street] !== 'object') {
+        p.streetActions[street] = { ...t.streetActions[street] };
+      } else {
+        Object.keys(t.streetActions[street]).forEach((act) => {
+          if (typeof p.streetActions[street][act] !== 'number') p.streetActions[street][act] = 0;
+        });
+      }
+    });
     return p;
+  }
+
+  // Repair every record once, at load and after an import. getPlayer() also
+  // repairs on access, but it is NOT the only reader — renderBadges and the
+  // players list read STORE.players[xid] straight out of the object, so a
+  // malformed record reaching computeRates would throw there instead.
+  function normalizePlayers(store) {
+    Object.keys(store.players || {}).forEach((xid) => {
+      const p = store.players[xid];
+      if (!p || typeof p !== 'object') { delete store.players[xid]; return; }
+      ensurePlayerShape(p, xid);
+    });
   }
 
   function getPlayer(xid, name) {
@@ -330,6 +388,7 @@
     parsed.hands = parsed.hands || [];
     parsed.hero = parsed.hero || { hands: 0, netChips: 0 };
     parsed.session = parsed.session || { startedAt: 0, hands: 0, net: 0, lastHandAt: 0 };
+    normalizePlayers(parsed); // imported JSON is hand-editable and often stale
     STORE = parsed;
     saveStore();
   }
@@ -362,12 +421,23 @@
     return merged;
   }
 
-  // Hands are immutable once written, so a union deduped by timestamp is safe —
-  // this keeps history from both devices rather than letting one overwrite.
+  // Hands are immutable once written, so a union deduped per hand is safe — this
+  // keeps history from both devices rather than letting one overwrite.
+  //
+  // Prefer Torn's own game id: two devices at the same table record the SAME
+  // hand at different local timestamps, so a timestamp key let every shared hand
+  // through twice. Fall back to timestamp+pot for records written before hands
+  // carried an id.
   function mergeHands(a, b, limit) {
     const seen = new Set();
     return a.concat(b)
-      .filter((h) => { const k = h.t + ':' + (h.pot || 0); if (seen.has(k)) return false; seen.add(k); return true; })
+      .filter((h) => {
+        if (!h) return false;
+        const k = h.g ? 'g:' + h.g : 't:' + h.t + ':' + (h.pot || 0);
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return true;
+      })
       .sort((x, y) => y.t - x.t)
       .slice(0, limit || 200);
   }
@@ -1100,6 +1170,37 @@
       lines.push(`  → ${playerDisplayName(w.xid)} wins $${(w.amount || 0).toLocaleString()}`);
     });
     return lines.join('\n');
+  }
+
+  // Same hand as formatHand, rendered as markup instead of a line of text.
+  // formatHand is kept for the Copy button — clipboard output should stay plain
+  // text — so the two must be changed together if the content changes.
+  function formatHandHtml(h, focusXid) {
+    const when = new Date(h.t).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    const parts = [`<div class="tph-hh-head">${escapeHtml(when)} · pot $${(h.pot || 0).toLocaleString()}`
+      + ` · reached ${escapeHtml(h.street || 'preflop')}</div>`];
+
+    const byStreet = {};
+    (h.actions || []).forEach((a) => { (byStreet[a.s] = byStreet[a.s] || []).push(a); });
+    ['preflop', 'flop', 'turn', 'river'].forEach((street) => {
+      if (!byStreet[street]) return;
+      const acts = byStreet[street].map((a) => {
+        const amt = a.amt ? ` $${a.amt.toLocaleString()}` : '';
+        const txt = `${escapeHtml(playerDisplayName(a.x))} ${escapeHtml(a.a)}${amt}`;
+        return (focusXid && a.x === focusXid) ? `<span class="tph-hh-me">${txt}</span>` : txt;
+      }).join(', ');
+      parts.push(`<div class="tph-hh-row"><span class="tph-hh-st">${street}</span>${acts}</div>`);
+    });
+
+    Object.keys(h.shown || {}).forEach((xid) => {
+      parts.push(`<div class="tph-hh-sd">showdown: ${escapeHtml(playerDisplayName(xid))}`
+        + ` shows ${escapeHtml(h.shown[xid])}</div>`);
+    });
+    (h.winners || []).forEach((w) => {
+      parts.push(`<div class="tph-hh-win">→ ${escapeHtml(playerDisplayName(w.xid))}`
+        + ` wins $${(w.amount || 0).toLocaleString()}</div>`);
+    });
+    return `<div class="tph-hh">${parts.join('')}</div>`;
   }
 
   function handsInvolving(xid) {
@@ -1963,11 +2064,27 @@
       inferred = true;
     }
 
-    const seated = hand.dealtInXids ? hand.dealtInXids.size : 0;
-    const n = Math.max(seated, i + 1, rot.length);
+    const n = Math.max(countSeats(hand), i + 1, rot.length);
     if (n < 2) return null;
 
     return { label: seatLabel(i, n), inferred, seats: n };
+  }
+
+  // How many players were actually at the table this hand.
+  //
+  // dealtInXids can hold the SAME person twice: it is seeded from the DOM (real
+  // numeric XIDs) and then grown by logAction with whatever nameToXidGuess
+  // returned, which falls back to a "name:Bob" pseudo-id when a log name can't
+  // be matched to a seat. One unmatched name therefore inflated the seat count
+  // by one, and since every position is derived from that count, it shifted
+  // EVERY label by one seat in a consistent direction — the exact symptom the
+  // position notes describe. Count real XIDs when there are any, and only fall
+  // back to the raw size on a table where nothing resolved.
+  function countSeats(hand) {
+    if (!hand.dealtInXids) return 0;
+    let real = 0;
+    hand.dealtInXids.forEach((xid) => { if (!String(xid).startsWith('name:')) real += 1; });
+    return real >= 2 ? real : hand.dealtInXids.size;
   }
 
   // Index in the rotation (0 = SB) to a position name. Short-handed collapses to
@@ -2161,6 +2278,19 @@
     .tph-ptable td { padding: 6px 4px; border-bottom: 1px solid #2a2a2e; }
     .tph-prow { cursor: pointer; }
     .tph-prow:active { background: #2c2c33; }
+    /* Hand history was one 11px monospace blob of up to 40 hands run together on
+       the panel's own background — nothing separated one hand from the next and
+       the focus player was marked only by a "*". Each hand is now its own block
+       with its own surface, and their actions are coloured rather than starred. */
+    .tph-hh { background: #131317; border: 1px solid #2b2b33; border-left: 3px solid #4a5568;
+      border-radius: 5px; padding: 7px 9px; margin-bottom: 8px; }
+    .tph-hh-head { font-size: 11px; opacity: 0.6; margin-bottom: 5px; }
+    .tph-hh-row { font-size: 12px; line-height: 1.55; }
+    .tph-hh-st { display: inline-block; min-width: 54px; color: #7fb0d8; font-size: 10px;
+      text-transform: uppercase; letter-spacing: 0.5px; opacity: 0.85; }
+    .tph-hh-me { color: #ffd166; font-weight: 600; }
+    .tph-hh-sd { font-size: 11px; color: #c3a2dd; margin-top: 3px; }
+    .tph-hh-win { font-size: 12px; color: #7ed957; margin-top: 3px; }
     .tph-close { position: absolute; top: 8px; right: 10px; cursor: pointer; }
     /* Raised well above the bottom edge so it doesn't sit under Torn PDA's own
        native controls, enlarged and labelled so it's unmistakably OUR button. */
@@ -2406,9 +2536,12 @@
       if (!hands.length) {
         body.innerHTML = '<i>No hands recorded with this player yet.</i>';
       } else {
-        const text = hands.slice(0, 40).map((h) => formatHand(h, openPlayerXid)).join('\n\n');
-        body.innerHTML = `<div style="opacity:.7;margin-bottom:6px">${hands.length} hand(s) recorded — their actions marked *</div>`
-          + `<pre style="white-space:pre-wrap;font:11px/1.35 monospace">${escapeHtml(text)}</pre>`
+        const shown = hands.slice(0, 40);
+        // Clipboard stays plain text; only the on-screen rendering is markup.
+        const text = shown.map((h) => formatHand(h, openPlayerXid)).join('\n\n');
+        body.innerHTML = `<div style="opacity:.7;margin-bottom:8px">${hands.length} hand(s) recorded`
+          + `${hands.length > shown.length ? `, showing ${shown.length}` : ''} — <span class="tph-hh-me">their actions highlighted</span></div>`
+          + shown.map((h) => formatHandHtml(h, openPlayerXid)).join('')
           + `<button class="tph-copy-hist">Copy history</button>`;
         body.querySelector('.tph-copy-hist').addEventListener('click', () => {
           navigator.clipboard && navigator.clipboard.writeText(text);
