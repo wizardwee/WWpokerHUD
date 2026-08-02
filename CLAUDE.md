@@ -476,6 +476,59 @@ Two rules for anything downstream of this:
   players list footer shows it beside the assumed figure. If they diverge over a
   few hundred hands, `POOL_AVG` is what to fix.
 
+### The WTSD anchor was wrong (corrected in v0.23.0)
+
+v0.22.0 set `POOL_AVG.wtsd = 20.9`, lifted from the source's `wwsf` — **won when
+saw flop**, which is not went-to-showdown (typically ~25–30% vs ~45%). No pool
+figure for WTSD exists, so WTSD is now left **unshrunk**, same as AFq. Don't
+reinstate it without a source. The correctly-mapped `foldToCbet` (56.1) and
+`limpShareOfVpip` (44.8) took its place.
+
+The general rule this produced: **only shrink toward a figure that measures the
+same thing the stat measures.** An anchor that is merely plausible is worse than
+no anchor, because shrinkage makes it invisible.
+
+## Big blinds are the unit (v0.23.0)
+
+`hand.bbAmount` is read off the `postBB` line, seeded from a session-level
+`lastSeenBB` so a hand joined mid-way still has a unit. `hero.netBB`,
+`hero.bbHands` and each opponent's `plBBEst` accrue **at settlement**, in
+`applyHandResults`, because that is the only point the blind level is known —
+a chip figure cannot be converted afterwards.
+
+- `plBBEst` starts at 0 for players tracked before this, so it lags `plChipsEst`
+  until they're seen again. That is deliberate: wiping the chip figures to make
+  them agree would destroy good data to fix a cosmetic mismatch.
+- Hands with no readable blind still record chips, and are excluded from
+  `bbHands` so they can't distort the win rate. Guard the division — an
+  unguarded `heroDelta / 0` poisons `netBB` with Infinity permanently.
+- `fmtBB100` withholds a win rate under 50 hands. Below that it changes sign
+  repeatedly and quoting it invites reading noise as a result.
+
+**Effective stack in bb is a correctness matter, not decoration.** The preflop
+charts are 100bb charts. While depth was unreadable, saying so in a footnote was
+honest; now that `effectiveStack()` works, the coach warns under 40bb and says
+outright under 20bb that the real decision is push-or-fold.
+
+## Stats that were collected but never shown (v0.23.0)
+
+Two were pure display gaps — no new collection, the data was already there:
+
+- **Fold-to-c-bet.** `foldToCbetMade`/`foldToCbetOpp` were written from the day
+  C-bets were added and appeared in neither `computeRates` nor the Stats tab.
+- **Per-street aggression and fold frequency.** `streetActions` has always held
+  per-street counts; `computeRates` collapsed all three into one AFq, hiding the
+  most exploitable postflop pattern there is — firing flops, giving up on turns.
+
+**Before adding a stat, check whether it is already being collected.** Two of
+the four items in this batch were.
+
+One was genuinely new: **limp frequency** (`limpMade`), counted as a preflop
+call with `preflopRaiseEvents === 0`. The big blind is excluded — with no raise
+to face they have nothing to call, and counting it would make every BB look like
+a habitual limper. It inherits the known imprecision that an all-in is counted
+as a raise.
+
 ### Shrinkage replaced the hard sample gate
 
 `computeShrunkRates` pulls every rate toward `POOL_AVG` with a

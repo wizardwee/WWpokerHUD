@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.22.0
+// @version      0.23.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -16,6 +16,36 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 0.23.0 - Everything is expressible in big blinds, and three stats that were
+ *          already being collected are finally visible.
+ *          CORRECTION: 0.22.0 set POOL_AVG.wtsd = 20.9, taken from the source's
+ *          `wwsf` (won when saw flop) — a different statistic from went-to-
+ *          showdown. WTSD is now left UNSHRUNK, like AFq, rather than anchored
+ *          to an unrelated number. The correctly-mapped foldToCbet (56.1) and
+ *          limpShareOfVpip (44.8) are added in its place.
+ *          - hand.bbAmount is read off the postBB line, with a session-level
+ *            last-seen fallback for hands joined mid-way. hero.netBB and
+ *            plBBEst accrue alongside the chip figures, converted AT SETTLEMENT
+ *            because the blind level cannot be recovered afterwards. The
+ *            players list shows a bb/100 win rate, withheld under 50 hands
+ *            where it would be pure noise.
+ *          - Fold-to-c-bet has been collected since C-bets were added and
+ *            displayed nowhere. Now in the Stats tab and the report, with a
+ *            read attached: over 60% and c-betting them prints.
+ *          - streetActions has always held per-street counts that computeRates
+ *            collapsed into one AFq. Split out, plus fold-frequency per street.
+ *            A player who fires flops and gives up on turns was invisible.
+ *          - Limp frequency, tracked per player and reported as a share of
+ *            VPIP against the pool's 44.8%. Against a pool this passive the
+ *            habitual limper is the most exploitable seat, and was previously
+ *            indistinguishable from a caller.
+ *          The coach now warns when effective stack is under 40bb that the
+ *            baselines are ~100bb charts, and under 20bb that the real decision
+ *            is push-or-fold. That assumption was previously only in a footnote,
+ *            which was defensible while depth was unknown and is not now.
+ *          ensureHeroShape backfills the new hero fields: a 0.22.0 store has
+ *            only {hands, netChips}, and an undefined netBB would make every
+ *            += produce NaN and poison the figure permanently.
  * 0.22.0 - Adopted findings from HopesG's public Torn poker HUD (MIT, GreasyFork
  *          569933), read as a reference. Selector work here is UNCONFIRMED on
  *          Torn PDA's layout — every addition degrades to the old path rather
@@ -478,7 +508,7 @@
       version: STORE_VERSION,
       players: {},
       hands: [],   // newest-first ring buffer of recent hand records
-      hero: { hands: 0, netChips: 0 },
+      hero: { hands: 0, netChips: 0, netBB: 0, bbHands: 0 },
       session: { startedAt: 0, hands: 0, net: 0, lastHandAt: 0 },
       settings: settings || { ...DEFAULT_SETTINGS },
     };
@@ -504,7 +534,17 @@
         river: { bet: 0, raise: 0, call: 0, check: 0, fold: 0 },
       },
       wtsd: 0,
+      // Preflop call with no raise yet. Counted per hand, and reported both
+      // per-hand and as a share of VPIP — against a pool that limps ~45% of its
+      // voluntary money, a habitual limper is the most exploitable seat here and
+      // was previously indistinguishable from a caller.
+      limpMade: 0,
       plChipsEst: 0,
+      // Same estimate as plChipsEst, in big blinds. Accumulated at hand time
+      // because that is the only point the blind level is known — it cannot be
+      // recovered later from plChipsEst. Starts at 0 for players tracked before
+      // v0.23.0, so it lags the chip figure until they are seen again.
+      plBBEst: 0,
       betSizePctSum: 0, // sum of bet-as-%-of-pot, for average sizing tells
       betSizeCount: 0,
       notes: '',
@@ -521,7 +561,7 @@
       parsed.settings = { ...DEFAULT_SETTINGS, ...(parsed.settings || {}) };
       parsed.players = parsed.players || {};
       parsed.hands = parsed.hands || [];
-      parsed.hero = parsed.hero || { hands: 0, netChips: 0 };
+      parsed.hero = ensureHeroShape(parsed.hero);
       parsed.session = parsed.session || { startedAt: 0, hands: 0, net: 0, lastHandAt: 0 };
       normalizePlayers(parsed);
       migrateStore(parsed);
@@ -542,6 +582,17 @@
       saveScheduled = false;
       try { localStorage.setItem(STORAGE_KEY, JSON.stringify(STORE)); } catch (e) { console.warn('[TornPokerHUD] Save failed', e); }
     }, 250);
+  }
+
+  // The hero record gains fields too, and `hero || {...}` only helps when it is
+  // absent entirely — a store from 0.22.0 has {hands, netChips} and would leave
+  // netBB undefined, which turns every += into NaN and poisons the figure
+  // permanently. Backfill each key instead.
+  function ensureHeroShape(hero) {
+    const h = hero && typeof hero === 'object' ? hero : {};
+    const t = { hands: 0, netChips: 0, netBB: 0, bbHands: 0 };
+    Object.keys(t).forEach((k) => { if (typeof h[k] !== 'number' || isNaN(h[k])) h[k] = t[k]; });
+    return h;
   }
 
   // Records written by an older version lack fields added since; backfill from
@@ -635,7 +686,7 @@
     parsed.settings = { ...DEFAULT_SETTINGS, ...(parsed.settings || {}), ...preserved };
     parsed.players = parsed.players || {};
     parsed.hands = parsed.hands || [];
-    parsed.hero = parsed.hero || { hands: 0, netChips: 0 };
+    parsed.hero = ensureHeroShape(parsed.hero);
     parsed.session = parsed.session || { startedAt: 0, hands: 0, net: 0, lastHandAt: 0 };
     normalizePlayers(parsed); // imported JSON is hand-editable and often stale
     migrateStore(parsed);     // a backup taken before 0.20.0 carries frozen P/L
@@ -946,6 +997,14 @@
   let currentHand = null;
   const seenUnmatchedLines = []; // for calibration panel
 
+  // Last big blind seen on any hand this session. Seeds each new hand so that a
+  // hand joined mid-way, or one whose blind line scrolled out of the log before
+  // the snapshot primed, still has a unit to express P/L in. Torn's blind level
+  // is fixed per table, so carrying it forward is safe within a session; it
+  // resets on reload rather than being persisted, because the next table may be
+  // a different stake.
+  let lastSeenBB = 0;
+
   // Torn game ids opened this session, newest last. Bounded because only ids
   // still visible in the log can ever be re-read, and the log holds a handful of
   // hands at most.
@@ -978,6 +1037,12 @@
       threeBetActive: false,
       threeBettorXid: null,
       countedVpip: new Set(),
+      countedLimp: new Set(),
+      // Blind level for THIS hand, read off the postSB/postBB lines. The only
+      // point at which it is known — P/L in big blinds cannot be recovered
+      // afterwards from the chip figure, so it is converted at settlement.
+      bbAmount: lastSeenBB,
+      sbAmount: 0,
       countedPfr: new Set(),
       countedThreeBetOpp: new Set(),
     };
@@ -1307,7 +1372,14 @@
       const amt = m[2] ? parseAmount(m[2]) : 0;
       addContribution(hand, xid, amt);
       logAction(hand, xid, type === 'postSB' ? 'sb' : 'bb', amt);
-      if (type === 'postSB') hand.sbXid = xid; else hand.bbXid = xid;
+      if (type === 'postSB') {
+        hand.sbXid = xid;
+        if (amt > 0) hand.sbAmount = amt;
+      } else {
+        hand.bbXid = xid;
+        // The blind level, and the unit everything else can be expressed in.
+        if (amt > 0) { hand.bbAmount = amt; lastSeenBB = amt; }
+      }
       hand.playersIn.add(xid);
       return;
     }
@@ -1341,6 +1413,7 @@
       recordStreetAction(xid, 'call', hand);
       logAction(hand, xid, 'call', amt);
       maybeCountVpip(xid, hand);
+      maybeCountLimp(xid, hand);
       return;
     }
 
@@ -1477,6 +1550,26 @@
     saveStore();
   }
 
+  // A limp is a preflop CALL into an unraised pot. Counted once per hand per
+  // player, off the same raise-event counter the coach uses.
+  //
+  // The big blind is excluded: with no raise to face they have nothing to call,
+  // so a "call" line from the BB in an unraised pot is a completing action, not
+  // a limp. Counting it would make every BB look like a habitual limper.
+  //
+  // Known imprecision, shared with the coach: preflopRaiseEvents counts an
+  // all-in as a raise, so a short-stack all-in that is really a call can make a
+  // genuine limp behind look like a call of a raise, and go uncounted.
+  function maybeCountLimp(xid, hand) {
+    if (hand.street !== 'preflop') return;
+    if (hand.preflopRaiseEvents > 0) return;
+    if (xid === hand.bbXid) return;
+    if (hand.countedLimp.has(xid)) return;
+    hand.countedLimp.add(xid);
+    getPlayer(xid).limpMade += 1;
+    saveStore();
+  }
+
   function maybeCountPfr(xid, hand) {
     if (hand.street !== 'preflop' || hand.countedPfr.has(xid)) return;
     hand.countedPfr.add(xid);
@@ -1546,6 +1639,17 @@
         STORE.hero.netChips += heroDelta;
         touchSession(heroDelta, false);
 
+        // Big blinds are the only comparable unit: "+$412M" says nothing about
+        // whether you are beating the game, and a chip figure cannot be
+        // converted afterwards because the blind level isn't stored per hand in
+        // older records. Convert now, or not at all.
+        const bb = hand.bbAmount || lastSeenBB;
+        const heroDeltaBB = bb > 0 ? heroDelta / bb : 0;
+        if (bb > 0) {
+          STORE.hero.netBB += heroDeltaBB;
+          STORE.hero.bbHands += 1; // denominator for bb/100, only over hands we could price
+        }
+
         // P/L attribution, stored from HERO's perspective: positive plChipsEst
         // means you are up against that player.
         //
@@ -1574,7 +1678,9 @@
         }
         if (poolTotal > 0) {
           for (const xid of Object.keys(net)) {
-            getPlayer(xid).plChipsEst += heroDelta * (net[xid] / poolTotal);
+            const share = net[xid] / poolTotal;
+            getPlayer(xid).plChipsEst += heroDelta * share;
+            if (bb > 0) getPlayer(xid).plBBEst += heroDeltaBB * share;
           }
         }
       }
@@ -2054,6 +2160,26 @@
   // which reads as "this hand cannot win" when it means "under one percent".
   // Against 8 random hands a weak holding genuinely lands there, so the
   // distinction matters.
+  // Big blinds. Signed, because every use is a result rather than a size.
+  function fmtBB(v) {
+    if (v == null || isNaN(v)) return '—';
+    const s = Math.abs(v) >= 100 ? v.toFixed(0) : v.toFixed(1);
+    return (v > 0 ? '+' : '') + s + 'bb';
+  }
+
+  // Win rate in big blinds per 100 hands — the standard unit, and the only one
+  // that says whether you are actually beating the game. Null below a sample
+  // where it would be pure noise: over 20 hands this is a number that will
+  // change sign several times before it means anything.
+  const BB100_MIN_HANDS = 50;
+  function fmtBB100(netBB, hands) {
+    if (!hands || hands < BB100_MIN_HANDS) {
+      return hands ? `(need ${BB100_MIN_HANDS}+ hands for a win rate)` : '';
+    }
+    const rate = (netBB / hands) * 100;
+    return `${rate > 0 ? '+' : ''}${rate.toFixed(1)} bb/100`;
+  }
+
   function fmtEquity(v) {
     if (v == null) return '–';
     if (v > 0 && v < 0.5) return '<1%';
@@ -2094,9 +2220,32 @@
     return (v > 0 ? '+' : '') + fmtMoney(v);
   }
 
+  const POSTFLOP_STREETS = ['flop', 'turn', 'river'];
+
+  // Aggression and fold frequency for ONE street.
+  //
+  // All of this comes out of streetActions, which has been fully populated the
+  // whole time — computeRates simply collapsed the three streets into one
+  // number. A player who fires flops and gives up on turns is a completely
+  // different opponent from one who barrels three streets, and that was
+  // invisible.
+  function streetRates(sa) {
+    if (!sa) return { afq: null, foldPct: null, actions: 0 };
+    const agg = sa.bet + sa.raise;
+    const passive = sa.call;
+    const total = agg + passive + sa.check + sa.fold;
+    return {
+      afq: pct(agg, agg + passive),
+      foldPct: pct(sa.fold, total),
+      actions: total,
+    };
+  }
+
   function computeRates(p) {
-    const aggActions = ['flop', 'turn', 'river'].reduce((sum, s) => sum + p.streetActions[s].bet + p.streetActions[s].raise, 0);
-    const passActions = ['flop', 'turn', 'river'].reduce((sum, s) => sum + p.streetActions[s].call, 0);
+    const aggActions = POSTFLOP_STREETS.reduce((sum, s) => sum + p.streetActions[s].bet + p.streetActions[s].raise, 0);
+    const passActions = POSTFLOP_STREETS.reduce((sum, s) => sum + p.streetActions[s].call, 0);
+    const byStreet = {};
+    POSTFLOP_STREETS.forEach((s) => { byStreet[s] = streetRates(p.streetActions[s]); });
     return {
       vpip: pct(p.vpip, p.hands),
       pfr: pct(p.pfr, p.hands),
@@ -2104,8 +2253,15 @@
       threeBet: pct(p.threeBetMade, p.hands),
       foldTo3Bet: pct(p.foldTo3BetMade, p.foldTo3BetOpp),
       cbet: pct(p.cbetMade, p.cbetOpp),
+      // Collected since the C-bet stat was added, and displayed nowhere until
+      // v0.23.0. It is the most actionable postflop read there is: it says
+      // directly whether c-betting this player prints.
+      foldToCbet: pct(p.foldToCbetMade, p.foldToCbetOpp),
+      limp: pct(p.limpMade, p.hands),
+      limpShareOfVpip: pct(p.limpMade, p.vpip),
       wtsd: pct(p.wtsd, p.hands),
       avgBetPct: p.betSizeCount ? (p.betSizePctSum / p.betSizeCount) : null,
+      byStreet,
     };
   }
 
@@ -2129,13 +2285,22 @@
   //
   // observedPoolAverages() below reports what THIS HUD has actually seen, and
   // the players list shows both, so the two can be compared as data accrues.
+  // NOTE ON WTSD: an earlier pass listed `wtsd: 20.9` here. That figure is the
+  // source's `wwsf` — won-when-saw-flop — which is a different statistic from
+  // went-to-showdown (typically ~25-30% vs ~45% in normal poker). No pool figure
+  // for WTSD exists, so WTSD is left UNSHRUNK rather than anchored to an
+  // unrelated number. Same reasoning as AFq. Don't reinstate it without a source.
   const POOL_AVG = {
     vpip: 50.9,
     pfr: 13.4,
     threeBet: 3.7,
     foldTo3Bet: 14.9,
     cbet: 40.3,
-    wtsd: 20.9,
+    foldToCbet: 56.1,
+    // Share of a player's VPIP that is limping rather than raising. The pool's
+    // defining trait: with VPIP 50.9 and PFR 13.4, most voluntary money goes in
+    // without a raise.
+    limpShareOfVpip: 44.8,
   };
 
   // Strength of the prior, in pseudo-observations.
@@ -2167,11 +2332,14 @@
       threeBet: shrunkPct(p.threeBetMade, p.hands, POOL_AVG.threeBet),
       foldTo3Bet: shrunkPct(p.foldTo3BetMade, p.foldTo3BetOpp, POOL_AVG.foldTo3Bet),
       cbet: shrunkPct(p.cbetMade, p.cbetOpp, POOL_AVG.cbet),
-      wtsd: shrunkPct(p.wtsd, p.hands, POOL_AVG.wtsd),
-      // Aggression frequency has no published pool figure, so it is left raw
-      // rather than shrunk toward a number that was never measured.
+      foldToCbet: shrunkPct(p.foldToCbetMade, p.foldToCbetOpp, POOL_AVG.foldToCbet),
+      limpShareOfVpip: shrunkPct(p.limpMade, p.vpip, POOL_AVG.limpShareOfVpip),
+      // No published pool figure for these, so they are left raw rather than
+      // shrunk toward a number that was never measured. See the WTSD note above.
+      wtsd: raw.wtsd,
       afq: raw.afq,
       avgBetPct: raw.avgBetPct,
+      byStreet: raw.byStreet,
     };
   }
 
@@ -2981,13 +3149,30 @@
     // stating it beats leaving it unmodelled. Only shown when at least two
     // stacks are readable, since "effective" is meaningless from one.
     const eff = effectiveStack(hand);
-    if (eff != null && pot > 0) {
-      const spr = eff / pot;
-      const read = spr < 1 ? 'committed — plan to get it in with any real equity'
-        : spr < 3 ? 'low — top pair is already a stack-off candidate'
-          : spr < 7 ? 'medium — one pair plays for one or two streets, not three'
-            : 'deep — implied odds matter, one pair is thin';
-      out.push(`Effective stack <b>${fmtMoney(eff)}</b> · SPR <b>${spr.toFixed(1)}</b> — ${read}.`);
+    const bb = hand.bbAmount || lastSeenBB;
+    if (eff != null) {
+      const effBB = bb > 0 ? eff / bb : null;
+      const depth = effBB != null ? ` (<b>${effBB.toFixed(0)}bb</b>)` : '';
+      if (pot > 0) {
+        const spr = eff / pot;
+        const read = spr < 1 ? 'committed — plan to get it in with any real equity'
+          : spr < 3 ? 'low — top pair is already a stack-off candidate'
+            : spr < 7 ? 'medium — one pair plays for one or two streets, not three'
+              : 'deep — implied odds matter, one pair is thin';
+        out.push(`Effective stack <b>${fmtMoney(eff)}</b>${depth} · SPR <b>${spr.toFixed(1)}</b> — ${read}.`);
+      } else {
+        out.push(`Effective stack <b>${fmtMoney(eff)}</b>${depth}.`);
+      }
+
+      // The preflop charts are 100bb charts. Saying so only in a footnote was
+      // fine while stack depth was unknown; now that it is readable, applying
+      // them silently at 15bb would be a confidently wrong answer.
+      if (effBB != null && effBB < 40) {
+        out.push(`<b>⚠ ${effBB.toFixed(0)}bb effective.</b> The baselines below are ~100bb charts — `
+          + (effBB < 20
+            ? 'at this depth the real decision is push-or-fold, and these ranges do not model it.'
+            : 'play tighter from early seats and prefer raising over calling; the charts overstate how much you can call.'));
+      }
     }
 
     out.push(gtoBaselineSuggestion({
@@ -3080,9 +3265,38 @@
       const ratio = r.pfr / r.vpip;
       lines.push(ratio > 0.6 ? 'Mostly raises rather than limps/calls preflop.' : 'Often just calls preflop rather than raising.');
     }
+    if (r.limpShareOfVpip != null && p.limpMade > 0) {
+      const share = r.limpShareOfVpip;
+      lines.push(`Limps into ${fmtPct(r.limp)} of hands — ${fmtPct(share)} of the pots they enter `
+        + `(pool average ${POOL_AVG.limpShareOfVpip}%). `
+        + (share > POOL_AVG.limpShareOfVpip + 12
+          ? 'A habitual limper: isolate them wide in position, and expect a capped range when they just call.'
+          : share < POOL_AVG.limpShareOfVpip - 15
+            ? 'Rarely limps — when they enter, they raise, so their calling range is genuinely a calling range.'
+            : 'About average for this pool.'));
+    }
     if (r.cbet != null) lines.push(`Continuation-bets ${fmtPct(r.cbet)} of flop opportunities.`);
+    if (r.foldToCbet != null) {
+      lines.push(`Folds to continuation bets ${fmtPct(r.foldToCbet)} of the time (${p.foldToCbetOpp} samples) — `
+        + (r.foldToCbet > 60 ? 'c-betting into them prints; fire the flop with anything.'
+          : r.foldToCbet < 40 ? 'they do not fold flops — c-bet for value, not as a bluff.'
+            : 'defends flops at roughly a normal rate.'));
+    }
     if (r.foldTo3Bet != null) lines.push(`Folds to 3-bets ${fmtPct(r.foldTo3Bet)} of the time (${p.foldTo3BetOpp} samples) — ${r.foldTo3Bet > 65 ? 'treat continuation bets/3-bets here as close to free' : 'defends 3-bets reasonably often'}.`);
     if (r.afq != null) lines.push(`Aggression frequency postflop: ${fmtPct(r.afq)}.`);
+    // Per street, because the aggregate hides the most exploitable pattern
+    // there is: firing flops and giving up on turns.
+    const streetLine = POSTFLOP_STREETS
+      .filter((s) => r.byStreet[s].actions >= 5)
+      .map((s) => `${s} ${fmtPct(r.byStreet[s].afq)}`);
+    if (streetLine.length) {
+      lines.push(`  by street — ${streetLine.join(', ')} (aggression).`);
+      const f = r.byStreet.flop.afq;
+      const t = r.byStreet.turn.afq;
+      if (f != null && t != null && r.byStreet.turn.actions >= 5 && f - t > 20) {
+        lines.push('  Fires the flop and gives up on the turn — floating the flop and taking it away on the turn is the counter.');
+      }
+    }
     if (r.avgBetPct != null) {
       const sz = r.avgBetPct;
       lines.push(`Average bet/raise is ${sz.toFixed(0)}% of pot (${p.betSizeCount} sized bets) — `
@@ -3091,7 +3305,8 @@
             : 'fairly standard sizing.'));
     }
     if (r.wtsd != null) lines.push(`Goes to showdown ${fmtPct(r.wtsd)} of hands played.`);
-    lines.push(`Your estimated chips won/lost against them: ${fmtSignedMoney(p.plChipsEst)} (estimate — positive means you're up on them).`);
+    lines.push(`Your estimated result against them: ${fmtSignedMoney(p.plChipsEst)} / ${fmtBB(p.plBBEst)} `
+      + '(estimate — positive means you are up on them).');
     if (p.notes) lines.push(`Notes: ${p.notes}`);
     return lines.join('\n');
   }
@@ -3451,9 +3666,17 @@
           <tr><td>3-Bet</td><td>${fmtPct(r.threeBet)}</td></tr>
           <tr><td>Fold to 3-Bet</td><td>${fmtPct(r.foldTo3Bet)}</td></tr>
           <tr><td>C-Bet</td><td>${fmtPct(r.cbet)}</td></tr>
+          <tr><td>Fold to C-Bet</td><td>${fmtPct(r.foldToCbet)}</td></tr>
+          <tr><td>Limp</td><td>${fmtPct(r.limp)}${r.limpShareOfVpip != null ? ` (${fmtPct(r.limpShareOfVpip)} of VPIP)` : ''}</td></tr>
           <tr><td>WTSD</td><td>${fmtPct(r.wtsd)}</td></tr>
           <tr><td>Avg bet size</td><td>${r.avgBetPct != null ? r.avgBetPct.toFixed(0) + '% pot' : '—'}</td></tr>
-          <tr><td>Your P/L vs them</td><td>${fmtSignedMoney(p.plChipsEst)}</td></tr>
+          <tr><td colspan="2" style="padding-top:6px"><b>By street</b> — aggression / fold</td></tr>
+          ${POSTFLOP_STREETS.map((s) => `<tr><td>${s[0].toUpperCase() + s.slice(1)}</td>`
+            + `<td>${fmtPct(r.byStreet[s].afq)} / ${fmtPct(r.byStreet[s].foldPct)}`
+            + `<span style="opacity:.6"> (${r.byStreet[s].actions} actions)</span></td></tr>`).join('')}
+          <tr><td colspan="2" style="padding-top:6px"><b>Your results vs them</b></td></tr>
+          <tr><td>Chips</td><td>${fmtSignedMoney(p.plChipsEst)}</td></tr>
+          <tr><td>Big blinds</td><td>${fmtBB(p.plBBEst)}</td></tr>
         </table>
       `;
     } else if (openPlayerTab === 'report') {
@@ -3552,7 +3775,8 @@
         <b>Session:</b> ${STORE.session.hands} hands, ${fmtSignedMoney(STORE.session.net)}
         ${STORE.session.startedAt ? ' (since ' + new Date(STORE.session.startedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + ')' : ''}<br>
         <b>Lifetime:</b> ${STORE.hero.hands} hands, ${fmtSignedMoney(STORE.hero.netChips)}
-        &nbsp;|&nbsp; ${(STORE.hands || []).length} hands in history
+        &nbsp;|&nbsp; <b>${fmtBB(STORE.hero.netBB)}</b> ${fmtBB100(STORE.hero.netBB, STORE.hero.bbHands)}
+        <br>${(STORE.hands || []).length} hands in history
         ${poolComparisonLine()}
       </div>
     `,
@@ -4106,6 +4330,12 @@
       isPDA,
       fmtMoney,
       fmtSignedMoney,
+      fmtBB,
+      fmtBB100,
+      streetRates,
+      ensureHeroShape,
+      get lastSeenBB() { return lastSeenBB; },
+      set lastSeenBB(v) { lastSeenBB = v; },
       STORE_VERSION,
       migrateStore,
 
