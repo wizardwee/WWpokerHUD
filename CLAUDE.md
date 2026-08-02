@@ -232,21 +232,64 @@ file whole" — splitting it would mean adding a bundler, which breaks the thing
 that makes this deployable to Torn PDA at all. 3000 lines in one file is a
 consequence of the constraint, not neglect.
 
-**The seam worth building is testability.** Every QA harness this repo has used
-recovers functions by slicing the source with `indexOf` and `eval`. That works,
-but it breaks whenever anything is renamed or a `const` moves — several harnesses
-broke mid-session for exactly that reason, and one silently reported false
-failures because a regex matched the wrong chart. If the pure logic (log
-patterns, range expansion, the evaluator, stat maths, position mapping) were
-exposed behind one explicit object — say `window.__TPH_TEST` assigned only when
-a debug flag is set — the harnesses would import a stable surface instead of
-re-deriving one. That is the refactor with real payoff; do it the next time a
-harness breaks rather than as its own task.
+**The testability seam is built (v0.21.0).** It used to be the open item here:
+every harness recovered functions by slicing the source with `indexOf`/`eval`
+against literal markers, which broke on any rename and once reported false
+passes because a regex matched the wrong chart. Now:
+
+- `window.__TPH_TEST` is assigned at the end of the IIFE, gated on
+  `window.__TPH_TEST_HOOKS` — a flag the harness sets **before** loading the
+  file. Production cost is one falsy property read; there is no user-facing
+  setting to toggle by accident.
+- `test/harness.js` runs the real file in a `vm` context with a stubbed
+  `window`/`document`/`localStorage` and returns that object. Nothing is sliced.
+  `document.readyState = 'loading'` is what keeps `init()` from firing.
+- `node test/run.js` syntax-checks the script and runs every `test/*.test.js`.
+
+Two things to keep true. **The seam is a test surface, not an API** — add to it
+freely, and update `test/` callers in the same commit when you rename something.
+**`test/` never ships**: the userscript is still one file fetched whole, and the
+no-build-step constraint is untouched.
+
+`STORE` and `heroXid` are exposed as get/set accessors, not plain references,
+because both are *rebound* rather than mutated — a plain reference would freeze
+at whatever value existed at load and quietly test nothing.
+
+The harness has two DOM modes. Default is inert (every selector returns empty),
+which is right for pure logic. `load({ dom: 'class' })` swaps in a document that
+matches single-class selectors only, enough for `renderPanel` mount/teardown.
+It deliberately refuses anything more complex rather than guessing — a stub that
+matches the wrong element is how the old harnesses produced false passes.
 
 Two cheap things already done rather than deferred: the section map at the top
 now lists sections **in file order** (they are not in numeric order, and there is
 no section 10 — P/L lives inside section 4), and the known gaps above are in the
 header where an editor will see them.
+
+## Panels go through renderPanel (v0.21.0)
+
+Nothing should create a `.tph-panel` element by hand. `renderPanel({ marker,
+open, html, onClose, wire })` mounts and tears down all three, and exists to
+enforce two invariants the hand-written copies had already drifted from:
+
+1. **Teardown is scoped to the panel's own marker class, never `.tph-panel`.**
+   `renderPlayerPanel` used to remove the shared base class, which also matched
+   the players list and the settings panel. Opening a player panel over Settings
+   deleted it from the DOM while `settingsOpen` stayed `true`, so the next gear
+   tap flipped the flag to `false` and appeared to do nothing — one dead tap, no
+   error, easy to write off as a mis-tap on a phone.
+2. **`pinTextColor` runs after `wire()`, not before.** It has to walk content
+   that `wire()` adds. Torn styles bare `td` and `pre`, so anything mounted after
+   the colour walk renders dark-on-dark — the v0.18.2 bug. The player panel
+   builds its tab bodies inside `wire()` for exactly this reason.
+
+`test/panel.test.js` covers both, and the mini-DOM was checked against the *old*
+behaviour first to confirm the test isn't vacuous: passing `marker: 'tph-panel'`
+still wipes the other panels, which is what the assertions rule out.
+
+The calibration panel is deliberately left outside this. It is not a
+`.tph-panel`, and it preserves its textarea contents across re-renders, so it
+has a genuinely different lifecycle.
 
 Leave alone: the numbered section scheme itself (renumbering churns the whole
 file for no behavioural gain), and the single-file structure.
@@ -415,11 +458,13 @@ is attributed.
 - **Torn PDA runtime is limited**: no `GM_xmlhttpRequest`, no IndexedDB. Use the
   `pdaFetch` adapter (`PDA_httpGet`/`PDA_httpPost`, falling back to `fetch`).
 - **Verify before pushing.** `node` IS available (this claim used to say
-  otherwise): run `node --check torn-poker-hud.user.js` on every edit, and
-  prototype tricky logic as a throwaway script — log patterns and the position
-  mapping were both validated that way against real scan lines before pushing.
-  The equity evaluator was validated in Python against published preflop
-  equities before porting.
+  otherwise). Run **`node test/run.js`** on every edit — it syntax-checks the
+  script and runs the suite. Add a `test/*.test.js` for anything with an
+  invariant worth stating; prototype the rest as a throwaway script, then port
+  it onto `test/harness.js` rather than leaving it in /tmp. Log patterns and the
+  position mapping were both validated that way against real scan lines before
+  pushing, and the equity evaluator was validated in Python against published
+  preflop equities before porting.
 - **Secrets never leave the device.** `exportJson()` feeds both the Copy button
   and the Gist upload; anything added to settings that is a credential must go
   in `LOCAL_ONLY_SETTINGS`.

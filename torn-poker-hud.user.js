@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.20.0
+// @version      0.21.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -16,6 +16,23 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 0.21.0 - Testability seam, and the panel bug it immediately caught.
+ *          Opening a player panel while Settings was up made the next gear tap
+ *          do nothing. renderPlayerPanel tore down `.tph-panel` — the class
+ *          EVERY panel carries — rather than its own marker, so it deleted the
+ *          settings panel from the DOM while `settingsOpen` stayed true; the
+ *          gear then toggled the flag back to false and rendered nothing.
+ *          All three panels now go through renderPanel(), which requires a
+ *          marker class, scopes teardown to it, and runs pinTextColor AFTER
+ *          the caller's wire() step so late-mounted content can't render
+ *          dark-on-dark the way it did in 0.18.2.
+ *          Added window.__TPH_TEST, exposed only when a harness sets
+ *          window.__TPH_TEST_HOOKS before load, plus test/ (harness + three
+ *          test files, run with `node test/run.js`). Harnesses used to recover
+ *          functions by slicing this file with indexOf/eval against literal
+ *          markers, which broke on every rename. Nothing about the install
+ *          model changes: still one file, still no build step, and test/ never
+ *          ships.
  * 0.20.0 - P/L was frozen at zero for everyone, and the cause was one truthy
  *          string. findHeroXid() returns the pseudo-id "name:<username>" when it
  *          can't find hero's seat, and the 3s retry was guarded by `if
@@ -2848,6 +2865,43 @@
     });
   }
 
+  // Mount or tear down one floating panel. Every panel in the HUD goes through
+  // here; nothing else should be creating `.tph-panel` elements by hand.
+  //
+  // Two invariants it exists to enforce, both of which were broken by the
+  // hand-written copies this replaced:
+  //
+  // 1. Removal is scoped to the panel's OWN marker class, never the shared
+  //    `.tph-panel` base. renderPlayerPanel used to remove `.tph-panel`, which
+  //    also matched the players list and the settings panel — so opening a
+  //    player panel over Settings deleted it from the DOM while `settingsOpen`
+  //    stayed true, and the next gear tap toggled the flag back to false and
+  //    appeared to do nothing. The marker is required, so that can't recur.
+  //
+  // 2. pinTextColor runs AFTER wire(), because it has to walk content that
+  //    wire() adds. Torn styles bare `td` and `pre`, so anything mounted after
+  //    the colour walk renders dark-on-dark — the v0.18.2 bug. Callers that
+  //    build tab bodies inside wire() get this ordering for free.
+  //
+  // opts: { marker, open, html, onClose, wire }
+  // Returns the panel element, or null when `open` is false.
+  function renderPanel(opts) {
+    document.querySelectorAll('.' + opts.marker).forEach((el) => el.remove());
+    if (!opts.open) return null;
+
+    const panel = document.createElement('div');
+    panel.className = 'tph-panel ' + opts.marker;
+    panel.innerHTML = opts.html;
+    document.body.appendChild(panel);
+
+    const close = panel.querySelector('.tph-close');
+    if (close && opts.onClose) close.addEventListener('click', opts.onClose);
+    if (opts.wire) opts.wire(panel);
+
+    pinTextColor(panel);
+    return panel;
+  }
+
   function injectStyles() {
     const style = document.createElement('style');
     style.textContent = CSS;
@@ -3000,13 +3054,13 @@
   }
 
   function renderPlayerPanel() {
-    document.querySelectorAll('.tph-panel').forEach((el) => el.remove());
-    if (!openPlayerXid) return;
-    const p = getPlayer(openPlayerXid);
-    const r = computeRates(p);
-    const panel = document.createElement('div');
-    panel.className = 'tph-panel';
-    panel.innerHTML = `
+    const p = openPlayerXid ? getPlayer(openPlayerXid) : null;
+    const r = p ? computeRates(p) : null;
+    renderPanel({
+      marker: 'tph-player-panel',
+      open: !!openPlayerXid,
+      onClose: () => { openPlayerXid = null; renderPlayerPanel(); },
+      html: !p ? '' : `
       <span class="tph-close">✕</span>
       <h3>${escapeHtml(p.name)} — ${classify(p)}</h3>
       <div class="tph-tabs">
@@ -3016,9 +3070,15 @@
         <div class="tph-tab ${openPlayerTab === 'notes' ? 'active' : ''}" data-tab="notes">Notes</div>
       </div>
       <div class="tph-tab-body"></div>
-    `;
-    document.body.appendChild(panel);
-    panel.querySelector('.tph-close').addEventListener('click', () => { openPlayerXid = null; renderPlayerPanel(); });
+    `,
+      wire: (panel) => renderPlayerPanelBody(panel, p, r),
+    });
+  }
+
+  // Tab content, built inside renderPanel's wire step so pinTextColor still
+  // runs after it — the Stats table and the Report <pre> are exactly the
+  // elements Torn's own `td`/`pre` rules would otherwise darken.
+  function renderPlayerPanelBody(panel, p, r) {
     panel.querySelectorAll('.tph-tab').forEach((tab) => {
       tab.addEventListener('click', () => { openPlayerTab = tab.dataset.tab; renderPlayerPanel(); });
     });
@@ -3073,8 +3133,6 @@
         saveStore();
       });
     }
-    // Every tab: the Stats table and the Report <pre> were the worst hit.
-    pinTextColor(panel);
   }
 
   function renderReportIfOpen() {
@@ -3088,16 +3146,11 @@
   let playersFilter = '';
 
   function renderPlayersList() {
-    document.querySelectorAll('.tph-players').forEach((el) => el.remove());
-    if (!playersListOpen) return;
-
-    const all = Object.keys(STORE.players)
+    const all = !playersListOpen ? [] : Object.keys(STORE.players)
       .map((xid) => ({ xid, p: STORE.players[xid] }))
       .filter(({ p }) => !playersFilter || (p.name || '').toLowerCase().includes(playersFilter.toLowerCase()))
       .sort((a, b) => (b.p.hands || 0) - (a.p.hands || 0));
 
-    const panel = document.createElement('div');
-    panel.className = 'tph-panel tph-players';
     const rows = all.length
       ? all.map(({ xid, p }) => {
         const r = computeRates(p);
@@ -3113,7 +3166,11 @@
       : `<tr><td colspan="5"><i>No players tracked yet.</i></td></tr>`;
 
     const problem = heroProblem();
-    panel.innerHTML = `
+    renderPanel({
+      marker: 'tph-players',
+      open: playersListOpen,
+      onClose: () => { playersListOpen = false; renderPlayersList(); },
+      html: `
       <span class="tph-close">✕</span>
       <h3>Tracked players (${all.length})</h3>
       ${problem ? `<div class="tph-warn">⚠ ${escapeHtml(problem)}</div>` : ''}
@@ -3128,35 +3185,37 @@
         <b>Lifetime:</b> ${STORE.hero.hands} hands, ${fmtSignedMoney(STORE.hero.netChips)}
         &nbsp;|&nbsp; ${(STORE.hands || []).length} hands in history
       </div>
-    `;
-    document.body.appendChild(panel);
-
-    pinTextColor(panel); // the tracked-players table is <td>, same problem
-    panel.querySelector('.tph-close').addEventListener('click', () => { playersListOpen = false; renderPlayersList(); });
-    const filterEl = panel.querySelector('.tph-pfilter');
-    filterEl.addEventListener('input', (e) => {
-      playersFilter = e.target.value;
-      renderPlayersList();
-      const again = document.querySelector('.tph-pfilter');
-      if (again) { again.focus(); again.setSelectionRange(again.value.length, again.value.length); }
-    });
-    panel.querySelectorAll('.tph-prow').forEach((row) => {
-      row.addEventListener('click', () => {
-        playersListOpen = false;
-        renderPlayersList();
-        openPlayerPanel(row.dataset.xid);
-      });
+    `,
+      wire: (panel) => {
+        const filterEl = panel.querySelector('.tph-pfilter');
+        filterEl.addEventListener('input', (e) => {
+          playersFilter = e.target.value;
+          renderPlayersList();
+          // Re-query: the line above replaced the panel, so `filterEl` is now
+          // detached and focusing it would do nothing.
+          const again = document.querySelector('.tph-pfilter');
+          if (again) { again.focus(); again.setSelectionRange(again.value.length, again.value.length); }
+        });
+        panel.querySelectorAll('.tph-prow').forEach((row) => {
+          row.addEventListener('click', () => {
+            playersListOpen = false;
+            renderPlayersList();
+            openPlayerPanel(row.dataset.xid);
+          });
+        });
+      },
     });
   }
 
   let settingsOpen = false;
 
   function renderSettingsPanel() {
-    document.querySelectorAll('.tph-settings').forEach((el) => el.remove());
-    if (!settingsOpen) return;
-    const panel = document.createElement('div');
-    panel.className = 'tph-panel tph-settings';
-    panel.innerHTML = `
+    renderPanel({
+      marker: 'tph-settings',
+      open: settingsOpen,
+      onClose: () => { settingsOpen = false; renderSettingsPanel(); },
+      wire: wireSettingsPanel,
+      html: !settingsOpen ? '' : `
       <span class="tph-close">✕</span>
       <h3>Settings</h3>
       <button class="tph-open-players" style="width:100%;padding:9px;margin-bottom:10px">👥 View tracked players &amp; hand history</button>
@@ -3184,14 +3243,15 @@
       <button class="tph-do-import">Import</button>
       <br><br>
       <button class="tph-reset">Reset all data</button>
-    `;
-    document.body.appendChild(panel);
+    `,
+    });
+  }
+
+  function wireSettingsPanel(panel) {
     // .value (not innerHTML) so exported JSON — which contains opponent display
     // names — can't break out of the textarea.
     panel.querySelector('.tph-export').value = exportJson();
 
-    pinTextColor(panel);
-    panel.querySelector('.tph-close').addEventListener('click', () => { settingsOpen = false; renderSettingsPanel(); });
     panel.querySelector('.tph-open-players').addEventListener('click', () => {
       settingsOpen = false;
       renderSettingsPanel();
@@ -3569,6 +3629,68 @@
         setFixedPos(pill, pr.left, pr.top, PILL_KEEP_VISIBLE_PX);
       }
     });
+  }
+
+  // ===========================================================================
+  // TEST SEAM
+  // ===========================================================================
+
+  // Every QA harness this repo has used recovered functions by slicing the
+  // source with indexOf/eval. That breaks the moment anything is renamed or a
+  // const moves — several harnesses broke mid-session for exactly that reason,
+  // and one silently reported false passes because a regex matched the wrong
+  // chart. Harnesses import this instead: one explicit surface that renames
+  // travel through, so a break is a compile error rather than a silent miss.
+  //
+  // Gated on a flag the harness sets BEFORE loading the file, so the live HUD
+  // never carries the global and no user-facing setting exists to get toggled
+  // by accident. Production cost is one falsy property read at startup.
+  //
+  // This is a test surface, not an API: add to it freely, and expect callers in
+  // test/ to be updated in the same commit when something here is renamed.
+  if (window.__TPH_TEST_HOOKS) {
+    window.__TPH_TEST = {
+      // --- pure logic: no DOM, no STORE ---
+      LOG_PATTERNS,
+      LOG_NOISE_RE,
+      cleanLogLine,
+      cleanName,
+      parseAmount,
+      RFI_RANGES,
+      THREE_BET_RANGES,
+      FOUR_BET_RANGE,
+      rfiChartFor,
+      expandRangeToken,
+      preflopBaseline,
+      evaluate7,
+      estimateEquity,
+      rotateToBlinds,
+      seatLabel,
+      computeRates,
+      classify,
+      classifyProvisional,
+      fmtMoney,
+      fmtSignedMoney,
+      STORE_VERSION,
+      migrateStore,
+
+      // --- stateful: reads or writes module-level STORE / heroXid ---
+      // Exposed as accessors because STORE and heroXid are rebound, not
+      // mutated — a plain reference would freeze at whatever loaded first.
+      applyHandResults,
+      freshHandState,
+      handleLogLine,
+      getPlayer,
+      emptyStore,
+      emptyPlayer,
+
+      // --- DOM-touching, exercised against the harness's minimal document ---
+      renderPanel,
+      get STORE() { return STORE; },
+      set STORE(s) { STORE = s; },
+      get heroXid() { return heroXid; },
+      set heroXid(x) { heroXid = x; },
+    };
   }
 
   // ===========================================================================
