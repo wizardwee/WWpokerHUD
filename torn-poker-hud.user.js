@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.23.0
+// @version      0.24.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -16,6 +16,35 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 0.24.0 - Fixes from the first live scan of the 0.22.0 work. Most of it held:
+ *          `self___` resolved hero to a real XID (heroXid: 311421, P/L bound at
+ *          last), `dealer___`+`position-2___` resolved the button, all 9 stacks
+ *          read, the PDA bridge is present, and the action buttons were found
+ *          by text. `playerPositioner-<N>___` DOES exist on PDA after all — the
+ *          earlier "no index on mobile" reading was the top-45 truncation
+ *          hiding eight count-1 classes, the same way it hid `self___`.
+ *          Three real problems, none of them in the new code:
+ *          - THE BOARD HAS NEVER BEEN READ. `communityCards_` matched zero with
+ *            five cards face-up, so every postflop equity number came from the
+ *            log-parsed fallback or nothing at all — and a preflop-looking
+ *            equity number is entirely plausible, so it never surfaced.
+ *            readBoardCards now derives the board from confirmed structure: any
+ *            face-up card not inside hero's hand and not inside a seat.
+ *          - "JDWV posted $2,500,000" was unparsed — a dead blind posted on
+ *            rejoining. Real money into the pot, previously invisible. Added as
+ *            `postDead`: contributed, but NOT counted as VPIP or a limp, since
+ *            it is forced.
+ *          - The buttons found were "Check / Fold" and "Call Any / Check" —
+ *            PRE-action controls shown while waiting, not turn buttons. Counting
+ *            them made isHeroTurn true for most of the hand, the same failure
+ *            as the hole-cards fallback it replaced. Only single-action labels
+ *            count now; heroCanPreAct() reports the rest.
+ *          HUD_VERSION had been stuck at 0.19.0 since 0.19.0, so every deep scan
+ *          from four releases reported the wrong version in its header — the
+ *          first line anyone reads when debugging. test/version.test.js now
+ *          fails if it drifts from @version, or if a release has no changelog
+ *          entry. The file header already carried that rule in prose; prose was
+ *          not enough.
  * 0.23.0 - Everything is expressible in big blinds, and three stats that were
  *          already being collected are finally visible.
  *          CORRECTION: 0.22.0 set POOL_AVG.wtsd = 20.9, taken from the source's
@@ -347,7 +376,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '0.19.0';
+  const HUD_VERSION = '0.24.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -896,7 +925,13 @@
     // in case a layout differs; resolveXidFromSeat needs only the element id.
     heroSeat: '[id^="player-"][class*="self_"], [class*="hero_"], [class*="you_"]',
     heroCards: '[class*="hand_"] [class*="front_"] > div[role="img"]:not([aria-label="card face down"])',
+    // Matched ZERO on a live scan with five board cards face-up. Kept as a
+    // first try only; readBoardCards derives the board from anyFaceUpCard.
     communityCards: '[class*="communityCards_"] [class*="front_"] > div[role="img"]:not([aria-label="card face down"])',
+    // Any face-up card anywhere on the table. Confirmed structure — this is the
+    // same shape heroCards uses, minus the hero container.
+    anyFaceUpCard: '[class*="front_"] > div[role="img"]:not([aria-label="card face down"])',
+    heroHand: '[class*="hand_"]',
     potDisplay: '[class*="totalPotWrap_"], [class*="potsWrapper_"]',
     // NOT used for turn detection — see findActionButtons(), which matches on
     // the button's TEXT instead. Torn's action controls carry no stable hashed
@@ -930,14 +965,30 @@
   const ACTION_BTN_RE = /^(fold|check|call|bet|raise|all[\s-]?in)\b/i;
   const ACTION_BTN_MAX_LEN = 24;
 
+  // PRE-action controls, shown while waiting for someone else to act so you can
+  // queue a decision: "Check / Fold", "Call Any / Check". A live scan found
+  // exactly these three and no bare action buttons, which means their presence
+  // is evidence you are IN the hand — not that it is your turn.
+  //
+  // Treating them as turn buttons made isHeroTurn true for most of the hand,
+  // which is the same failure mode as the old hole-cards fallback it replaced.
+  const PREACTION_BTN_RE = /\/|\bany\b/i;
+
   function findActionButtons() {
     const out = [];
     document.querySelectorAll('button, [role="button"]').forEach((b) => {
       if (b.closest('[class^="tph-"], [class*=" tph-"]')) return; // our own UI
       const t = (b.textContent || '').trim();
-      if (t && t.length < ACTION_BTN_MAX_LEN && ACTION_BTN_RE.test(t)) out.push(b);
+      if (!t || t.length >= ACTION_BTN_MAX_LEN || !ACTION_BTN_RE.test(t)) return;
+      b.__tphPreaction = PREACTION_BTN_RE.test(t);
+      out.push(b);
     });
     return out;
+  }
+
+  // Only a single-action label means it is actually your turn.
+  function findTurnButtons() {
+    return findActionButtons().filter((b) => !b.__tphPreaction);
   }
 
   const CARD_CLASS_RE = /(clubs|spades|hearts|diamonds)-([0-9TJQKA]+)/i;
@@ -961,6 +1012,15 @@
     { type: 'newHandMarker', re: /^(?:game\s+)?([0-9a-f]{6,})\s+started\b/i },
     { type: 'postSB', re: /^(.+?)\s+post(?:s|ed)?\s+(?:the\s+)?small\s*blind(?:\s*\$?([\d,]+))?/i },
     { type: 'postBB', re: /^(.+?)\s+post(?:s|ed)?\s+(?:the\s+)?big\s*blind(?:\s*\$?([\d,]+))?/i },
+    // A bare "Name posted $2,500,000" — a dead blind, posted when rejoining
+    // after sitting out or missing a blind. Seen unparsed on a live scan.
+    // MUST stay below postSB/postBB, which are more specific; it is anchored to
+    // end-of-line so "posted small blind $X" cannot reach it anyway.
+    //
+    // The money is real and goes into the pot, so it is contributed — but it is
+    // FORCED, so it must not count as VPIP or as a limp. Treating it as a call
+    // would have made anyone rejoining a table look voluntarily loose.
+    { type: 'postDead', re: /^(.+?)\s+post(?:s|ed)?\s+\$?([\d,]+)\s*$/i },
     { type: 'allin', re: /^(.+?)\s+(?:is\s+|goes\s+|went\s+)?all[\s-]?in(?:\s*(?:for|with)?\s*\$?([\d,]+))?/i },
     { type: 'fold', re: /^(.+?)\s+fold(?:s|ed)?\b/i },
     { type: 'check', re: /^(.+?)\s+check(?:s|ed)?\b/i },
@@ -1380,6 +1440,17 @@
         // The blind level, and the unit everything else can be expressed in.
         if (amt > 0) { hand.bbAmount = amt; lastSeenBB = amt; }
       }
+      hand.playersIn.add(xid);
+      return;
+    }
+
+    if (type === 'postDead') {
+      const xid = nameToXidGuess(cleanName(m[1]));
+      const amt = m[2] ? parseAmount(m[2]) : 0;
+      addContribution(hand, xid, amt);
+      logAction(hand, xid, 'post', amt);
+      // Deliberately no maybeCountVpip / maybeCountLimp: a dead blind is forced
+      // money, not a voluntary decision.
       hand.playersIn.add(xid);
       return;
     }
@@ -2096,10 +2167,17 @@
   function countActionControls() {
     const direct = document.querySelectorAll(SELECTORS.actionButtons);
     if (direct.length) return direct.length;
-    return findActionButtons().length;
+    return findTurnButtons().length;
   }
 
+  // Your turn = a single-action button on screen. Pre-action controls
+  // ("Check / Fold") do NOT count — they are shown while waiting.
   function isHeroTurn() { return countActionControls() > 0; }
+
+  // In the hand but not on action: pre-action controls are showing.
+  function heroCanPreAct() {
+    return findActionButtons().some((b) => b.__tphPreaction);
+  }
 
   function bootstrapTableWatchers() {
     heroXid = findHeroXid();
@@ -2796,10 +2874,42 @@
     return (hand && hand.pot) || 0;
   }
 
+  // The board, read from the DOM.
+  //
+  // `communityCards_` matched ZERO on a live scan while 5 board cards were
+  // face-up — so the board has never once been read from the DOM, and every
+  // postflop equity number came from the log-parsed fallback (or nothing, if a
+  // street line was missed). That is the quietest failure in the file: equity
+  // simply reads as a preflop number and looks plausible.
+  //
+  // Rather than guess another hashed container name, derive it from structure
+  // that IS confirmed: a face-up card is `[class*="front_"] > div[role="img"]`,
+  // and hero's are the ones inside `[class*="hand_"]`. Everything face-up that
+  // is NOT in hero's hand is the board. Done in JS because the exclusion is an
+  // ancestor test, which a single CSS selector can't express portably.
   function readBoardCards() {
-    const els = document.querySelectorAll(SELECTORS.communityCards);
     const cards = [];
-    els.forEach((el) => { const c = parseCardEl(el); if (c) cards.push(c); });
+    const seen = new Set();
+    const push = (el) => {
+      const c = parseCardEl(el);
+      if (!c) return;
+      const key = c.rank + c.suit;
+      if (seen.has(key)) return; // a card can't appear twice on one board
+      seen.add(key);
+      cards.push(c);
+    };
+
+    // Named container first, on the chance some layout does expose one.
+    document.querySelectorAll(SELECTORS.communityCards).forEach(push);
+
+    if (!cards.length) {
+      document.querySelectorAll(SELECTORS.anyFaceUpCard).forEach((el) => {
+        if (el.closest(SELECTORS.heroHand)) return;  // hero's hole cards
+        if (el.closest(SELECTORS.seatContainer)) return; // an opponent's revealed cards
+        push(el);
+      });
+    }
+
     if (cards.length) return cards.slice(0, 5);
     return (currentHand && currentHand.board) || []; // fall back to the log-parsed board
   }
@@ -4338,6 +4448,9 @@
       set lastSeenBB(v) { lastSeenBB = v; },
       STORE_VERSION,
       migrateStore,
+      HUD_VERSION,
+      ACTION_BTN_RE,
+      PREACTION_BTN_RE,
 
       // --- stateful: reads or writes module-level STORE / heroXid ---
       // Exposed as accessors because STORE and heroXid are rebound, not

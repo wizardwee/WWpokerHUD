@@ -94,6 +94,40 @@ const P = (T, name) => T.STORE.players['name:' + name] || T.emptyPlayer('?', '?'
   t.eq('a limper who then calls a raise still counts once', P(T, 'Carol').limpMade, 1);
 }
 
+// --- Dead blinds ------------------------------------------------------------
+
+// "JDWV posted $2,500,000" — no "small"/"big blind", seen unparsed on a live
+// scan. Posted when rejoining after sitting out or missing a blind.
+{
+  const T = fresh();
+
+  // The pattern itself must match, and must not shadow the blind lines.
+  const matches = (line) => T.LOG_PATTERNS.find((p) => p.re.test(T.cleanLogLine(line)));
+  t.eq('a bare post is parsed', matches('JDWV posted $2,500,000').type, 'postDead');
+  t.eq('"posted small blind" still wins', matches('Alice posted small blind $1,250,000').type, 'postSB');
+  t.eq('"posted big blind" still wins', matches('Bob posted big blind $2,500,000').type, 'postBB');
+
+  feed(T, [
+    'Game a77771 started',
+    'Alice posted small blind $1,250,000',
+    'Bob posted big blind $2,500,000',
+    'JDWV posted $2,500,000',
+    'Carol called $2,500,000',
+    'Game a88881 started', // settles the hand, which is what creates records
+  ]);
+
+  t.ok('the dead poster is tracked', !!T.STORE.players['name:JDWV']);
+  // Forced money, so it must not read as a voluntary decision — otherwise
+  // anyone rejoining a table looks loose.
+  t.eq('a dead blind is not VPIP', P(T, 'JDWV').vpip, 0);
+  t.eq('a dead blind is not a limp', P(T, 'JDWV').limpMade, 0);
+  // But a voluntary call in the same hand still is.
+  t.ok('a real call is still voluntary', P(T, 'Carol').vpip >= 1);
+  // The blind lines must still win over the bare-post pattern.
+  t.eq('the big blind still registered as the blind level', T.lastSeenBB, 2500000);
+  t.eq('the small blind poster is not treated as a dead post', P(T, 'Alice').vpip, 0);
+}
+
 // --- Streets advance --------------------------------------------------------
 
 {
