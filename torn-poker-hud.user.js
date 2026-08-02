@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.18.2
+// @version      0.19.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -14,6 +14,17 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 0.19.0 - Nothing opens itself on load any more. The green "HUD loaded" banner
+ *          is gone entirely — the red gear button already proves the script
+ *          injected, and it doesn't cover the table for 15 seconds to do it.
+ *          (Calibration mode still opens its panel when the setting is on; that
+ *          is the point of it, so switch it off when you're done scanning.)
+ *          Every coach line now names the position, on every street. Postflop
+ *          lines omitted it entirely, so the seat vanished from the advice the
+ *          moment the flop came down — exactly when you most want to check the
+ *          advice against where you're sitting. The tag distinguishes how the
+ *          seat was derived: "CO" read from the seat ring, "CO?" derived from
+ *          the log's action order, "?" not established (with the reason).
  * 0.18.2 - The dark-on-dark text was never specific to the hand history: the
  *          Stats table and the Report <pre> were unreadable too, in the same
  *          panel, which a screenshot of the Stats tab made obvious. Cause:
@@ -237,7 +248,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '0.18.2';
+  const HUD_VERSION = '0.19.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -2000,6 +2011,18 @@
     return hi > vi;
   }
 
+  // Position as it appears in every coach line. Always present, so you can see
+  // at a glance which seat the advice is for — postflop lines used to omit it
+  // entirely, which meant the one number you most need to sanity-check the
+  // advice against was missing exactly when the board mattered most.
+  //   CO   read from the seat ring (exact)
+  //   CO?  derived from the log's action order (less certain)
+  //   ?    not established this hand
+  function positionTag(position, inferred) {
+    if (!position) return '?';
+    return inferred ? `${position}?` : position;
+  }
+
   // Preflop is split by SITUATION first, then by chart. Applying an opening
   // range to a limped pot, or a 3-bet range to a 4-bet decision, gives advice
   // that reads as confident and is answering a different question.
@@ -2010,12 +2033,12 @@
     // Without a known position no chart is meaningful — say so rather than
     // quietly assuming a seat and giving confidently wrong advice.
     if (!position) {
-      return `Baseline: position unknown this hand (${posDiag || 'reason unclear'}) — no preflop chart applied.`;
+      return `Baseline (?): position unknown this hand (${posDiag || 'reason unclear'}) — no preflop chart applied.`;
     }
-    // An inferred seat is read off whose turn it is, not off observed action.
-    // Say so in the label: a misread seat changes the chart, and advice that
-    // looks equally confident either way is the failure mode worth avoiding.
-    const pos = positionInferred ? `${position}?` : position;
+    // A "?" marks a seat derived from the log's action order rather than read
+    // off the seat ring: a misread seat changes the chart, and advice that looks
+    // equally confident either way is the failure mode worth avoiding.
+    const pos = positionTag(position, positionInferred);
     const inRange = (r) => isHandInRange(heroCards[0], heroCards[1], r);
 
     // --- facing a re-raise -------------------------------------------------
@@ -2067,14 +2090,19 @@
   }
 
   function gtoBaselineSuggestion(ctx) {
-    const { street, heroCards, betFacing, pot } = ctx;
+    const { street, heroCards, betFacing, pot, position, positionInferred, posDiag } = ctx;
     if (street === 'preflop' && heroCards) return preflopBaseline(ctx);
+    // Postflop lines carry the position too. They didn't before, so the seat
+    // silently disappeared from the advice the moment the flop came down.
+    const tag = positionTag(position, positionInferred);
+    const why = position ? '' : ` (${posDiag || 'position not established'})`;
     const mdf = minimumDefenseFrequency(betFacing, pot);
     if (mdf != null) {
-      return `Baseline: defend roughly ${fmtPct(mdf * 100)} of your range here (MDF), pot ${fmtMoney(pot)}.`;
+      return `Baseline (${tag}): defend roughly ${fmtPct(mdf * 100)} of your range here (MDF), `
+        + `pot ${fmtMoney(pot)}.${why}`;
     }
-    return 'Baseline: check/bet a balanced portion of your range. (Pot size unknown '
-      + 'this hand — no MDF or pot odds; this happens when the HUD starts mid-hand.)';
+    return `Baseline (${tag}): check/bet a balanced portion of your range. (Pot size unknown `
+      + `this hand — no MDF or pot odds; this happens when the HUD starts mid-hand.)${why}`;
   }
 
   function exploitDeviation(villainXid) {
@@ -2726,11 +2754,6 @@
       padding: 5px 9px; margin: 4px 4px 4px 0; font: 11px -apple-system, sans-serif; cursor: pointer; }
     .tph-calib-out { width: 100%; height: 150px; background: #000; color: #9f9; border: 1px solid #494;
       font: 9px/1.25 monospace; white-space: pre; }
-    .tph-banner { position: fixed; z-index: 100001; top: 8px; left: 8px; right: 8px; background: #1c6b3a;
-      color: #fff; border: 2px solid #4ade80; border-radius: 8px; padding: 10px 12px;
-      font: 13px/1.35 -apple-system, sans-serif; box-shadow: 0 2px 10px rgba(0,0,0,0.5); cursor: pointer; }
-    .tph-banner b { color: #d1fae5; }
-    .tph-banner .tph-banner-x { float: right; padding-left: 10px; opacity: 0.8; }
   `;
 
   // Force every unstyled descendant to take the panel's colour, inline and
@@ -3478,28 +3501,6 @@
     });
   }
 
-  // Shown once on load. Serves two jobs: (1) proves the script actually injected
-  // — if you never see this on the poker page, the script isn't running (URL/
-  // enable/reload issue), not a UI one; (2) gives a big, reliable tap target
-  // into Settings/Calibration without hunting for the small gear.
-  function showLoadBanner() {
-    if (document.querySelector('.tph-banner')) return;
-    const banner = document.createElement('div');
-    banner.className = 'tph-banner';
-    banner.innerHTML =
-      '<span class="tph-banner-x">✕</span>' +
-      '🃏 <b>Torn Poker HUD loaded.</b> Tap here to open Settings &amp; turn on Calibration mode. ' +
-      '(Or tap the red ⚙ HUD button — <b>drag it</b> to move it out of your way.)';
-    banner.addEventListener('click', (e) => {
-      if (e.target.classList.contains('tph-banner-x')) { banner.remove(); return; }
-      settingsOpen = true;
-      renderSettingsPanel();
-      banner.remove();
-    });
-    document.body.appendChild(banner);
-    setTimeout(() => { const b = document.querySelector('.tph-banner'); if (b) b.remove(); }, 15000);
-  }
-
   // ===========================================================================
   // BOOTSTRAP
   // ===========================================================================
@@ -3507,7 +3508,6 @@
   function init() {
     injectStyles();
     renderGear();
-    showLoadBanner();
     bootstrapTableWatchers();
 
     setInterval(renderBadges, 4000);

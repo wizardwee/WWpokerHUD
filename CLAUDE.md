@@ -19,7 +19,7 @@ single hand-edited file. Userscript managers compare `@version` to decide
 whether an update exists, so leaving it stale means a reinstall elsewhere won't
 see new code as newer. Bump it in the same commit as the change.
 
-## Current status (v0.18.0)
+## Current status (v0.19.0)
 
 Selectors and log wording are **calibrated against real scans**. Parsing is
 believed working — action rows no longer appear unmatched — but no stat or
