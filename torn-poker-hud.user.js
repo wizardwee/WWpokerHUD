@@ -1,10 +1,12 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.19.0
+// @version      0.20.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
+// @updateURL    https://raw.githubusercontent.com/wizardwee/WWpokerHUD/main/torn-poker-hud.user.js
+// @downloadURL  https://raw.githubusercontent.com/wizardwee/WWpokerHUD/main/torn-poker-hud.user.js
 // @grant        none
 // ==/UserScript==
 
@@ -14,6 +16,25 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 0.20.0 - P/L was frozen at zero for everyone, and the cause was one truthy
+ *          string. findHeroXid() returns the pseudo-id "name:<username>" when it
+ *          can't find hero's seat, and the 3s retry was guarded by `if
+ *          (!heroXid)` — a pseudo-id is truthy, so the failed bootstrap
+ *          resolution latched in for the whole session. That retry exists
+ *          precisely because seats render after the log container, so it was
+ *          defeating its own reason for being there.
+ *          The damage was silent and total. Hero's own log lines re-run
+ *          nameToXidGuess every time and DO resolve once seats render, so
+ *          contributions/winnings keyed under the real seat XID while heroXid
+ *          still held "name:...". heroWon and heroContributed both read 0,
+ *          heroDelta came out 0, and every plChipsEst got `0 * share`.
+ *          hero.netChips never moved, hero.hands never incremented (dealtInXids
+ *          holds real XIDs), and `xid === heroXid` failed to skip hero — so you
+ *          were tracked as your own opponent and badged on your own seat.
+ *          Retry now tests heroUnresolved() instead. Stored P/L can't be
+ *          rebuilt from partial history, so a one-time store migration (schema
+ *          2) zeroes every plChipsEst, hero.netChips and session.net. Hand
+ *          counts and rate stats were never affected by this and are kept.
  * 0.19.0 - Nothing opens itself on load any more. The green "HUD loaded" banner
  *          is gone entirely — the red gear button already proves the script
  *          injected, and it doesn't cover the table for 15 seconds to do it.
@@ -335,6 +356,9 @@
 
   const STORAGE_KEY = 'tornPokerHUD_v1';
 
+  // Bumped when stored data needs a one-time repair. See migrateStore().
+  const STORE_VERSION = 2;
+
   const DEFAULT_SETTINGS = {
     minHands: 20,
     githubClientId: '',
@@ -358,7 +382,7 @@
 
   function emptyStore(settings) {
     return {
-      version: 1,
+      version: STORE_VERSION,
       players: {},
       hands: [],   // newest-first ring buffer of recent hand records
       hero: { hands: 0, netChips: 0 },
@@ -407,6 +431,7 @@
       parsed.hero = parsed.hero || { hands: 0, netChips: 0 };
       parsed.session = parsed.session || { startedAt: 0, hands: 0, net: 0, lastHandAt: 0 };
       normalizePlayers(parsed);
+      migrateStore(parsed);
       return parsed;
     } catch (e) {
       console.warn('[TornPokerHUD] Corrupt storage, resetting.', e);
@@ -445,6 +470,32 @@
       }
     });
     return p;
+  }
+
+  // One-time repairs to stored data, keyed off `version`. Runs at load and after
+  // an import, on the parsed object BEFORE it becomes STORE.
+  //
+  // Deliberately does NOT call saveStore(): at load time this runs inside
+  // loadStore(), before `saveScheduled` is initialised, so touching it would
+  // throw on the temporal dead zone. Every migration must therefore be
+  // idempotent — if the page closes before the next natural save, it simply runs
+  // again on the following load.
+  //
+  // Schema 2 (v0.20.0): P/L was frozen at zero for any session where heroXid
+  // latched onto a "name:<username>" pseudo-id. heroDelta evaluated to 0, so
+  // every attributed share was `0 * weight` and hero.netChips never moved. There
+  // is no way to rebuild the real figures — STORE.hands is a capped ring buffer
+  // and holds only a slice of what was played — so wipe P/L and let it
+  // reaccumulate. Hand counts, VPIP/PFR and the other rate stats were never
+  // touched by that bug, so they are kept.
+  function migrateStore(store) {
+    if ((store.version || 1) >= STORE_VERSION) return;
+    Object.keys(store.players || {}).forEach((xid) => {
+      if (store.players[xid]) store.players[xid].plChipsEst = 0;
+    });
+    store.hero.netChips = 0;
+    store.session.net = 0;
+    store.version = STORE_VERSION;
   }
 
   // Repair every record once, at load and after an import. getPlayer() also
@@ -494,6 +545,7 @@
     parsed.hero = parsed.hero || { hands: 0, netChips: 0 };
     parsed.session = parsed.session || { startedAt: 0, hands: 0, net: 0, lastHandAt: 0 };
     normalizePlayers(parsed); // imported JSON is hand-editable and often stale
+    migrateStore(parsed);     // a backup taken before 0.20.0 carries frozen P/L
     STORE = parsed;
     saveStore();
   }
@@ -1326,6 +1378,15 @@
   // renderBadges can't tell which seat is yours so it draws a tendency badge on
   // your own seat. Both look like separate bugs and are the same missing
   // setting, so say so where the numbers are read instead of failing silently.
+  // "Resolved" means bound to a real seat XID. A "name:<username>" pseudo-id is
+  // NOT resolved — it is what nameToXidGuess returns when no seat matched — but
+  // it IS a truthy string, which is exactly how it used to defeat the `!heroXid`
+  // retry guard in bootstrapTableWatchers and freeze P/L at zero. Every check
+  // for hero identity goes through here so that can't be reintroduced piecemeal.
+  function heroUnresolved() {
+    return !heroXid || String(heroXid).startsWith('name:');
+  }
+
   function heroProblem() {
     const configured = (STORE.settings.heroName || '').trim();
     if (!configured) return 'Set “Your Torn username” in Settings — until then no profit/loss is attributed to anyone.';
@@ -1699,7 +1760,16 @@
     // without a full page reload, which would otherwise leave the observer
     // watching a detached element forever.
     setInterval(() => {
-      if (!heroXid) heroXid = findHeroXid();
+      // heroUnresolved(), not `!heroXid`: findHeroXid() returns the truthy
+      // pseudo-id "name:<username>" when hero's seat isn't readable yet, so the
+      // old guard latched a failed bootstrap resolution in for the entire
+      // session — defeating the very retry it guarded. Hero's own log lines
+      // meanwhile re-resolve to the real seat XID as soon as seats render, so
+      // contributions and winnings key under one id while heroXid holds another:
+      // heroDelta reads 0, every plChipsEst gets `0 * share`, hero.netChips
+      // never moves, and `xid === heroXid` stops skipping hero as their own
+      // opponent. Keep retrying until it binds to a seat.
+      if (heroUnresolved()) heroXid = findHeroXid();
       attachLogObserver();
       // Cheap, and it repairs "#<xid>" names from earlier versions as soon as
       // that player is seen at a table again.

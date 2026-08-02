@@ -19,12 +19,17 @@ single hand-edited file. Userscript managers compare `@version` to decide
 whether an update exists, so leaving it stale means a reinstall elsewhere won't
 see new code as newer. Bump it in the same commit as the change.
 
-## Current status (v0.19.0)
+## Current status (v0.20.0)
 
-Selectors and log wording are **calibrated against real scans**. Parsing is
-believed working — action rows no longer appear unmatched — but no stat or
-position output has been confirmed correct at a live table yet. Treat behaviour
-as plausible, not verified.
+Selectors and log wording are **calibrated against real scans**. A live deep scan
+at v0.18.2 confirmed the log parser is working: 40 rows read, zero unmatched
+lines, action/blind/raise wording all landing. Positions and stat *values* have
+still not been confirmed correct at a live table.
+
+**P/L produced nothing at all up to v0.19.0**, and the same scan proved it. See
+the hero-identity section below — the cause was a truthy pseudo-id defeating a
+retry guard, not the log parsing. v0.20.0 wipes P/L once (store schema 2) and
+lets it reaccumulate.
 
 **Stats gathered before v0.11.0 are inflated and should be reset.** Log ingestion
 used to read MutationObserver `addedNodes`; the user reported one real hand
@@ -276,6 +281,37 @@ one unset or misspelled username. `heroProblem()` returns the reason, surfaced i
 Settings (with a green confirmation when it resolves) and at the top of the
 players list. Don't let this fail silently again.
 
+### The pseudo-id is not a resolution (v0.20.0)
+
+`findHeroXid` → `nameToXidGuess` returns **`'name:' + username`** when no seat
+matches. That is a truthy string, and it froze P/L at zero for every session up
+to v0.19.0 because the 3s retry read `if (!heroXid) heroXid = findHeroXid()`.
+Bootstrap runs before the seats render, so it always took the pseudo path, and
+the guard then latched that failure in permanently — defeating the exact
+late-render case the retry was written for.
+
+The failure was silent and total, and it presents as several unrelated bugs:
+
+- Hero's *log lines* re-run `nameToXidGuess` unlatched, so they bind to the real
+  seat XID as soon as seats render. `hand.contributions` and `wonByXid` are then
+  keyed under the seat XID while `heroXid` still holds `name:...`, so `heroWon`
+  and `heroContributed` both read 0 and **`heroDelta` is 0**.
+- Every `plChipsEst += heroDelta * share` is therefore `0 * share`. Opponent P/L
+  never moves — from *any* pot, not just the folded ones where it was noticed.
+- `hand.dealtInXids` holds real XIDs, so `STORE.hero.hands` never increments and
+  the Lifetime line reads `0 hands, $0` while History fills up. **That mismatch
+  is the fastest way to spot this.**
+- `xid === heroXid` stops skipping hero, so hero is tracked as their own opponent
+  and badged on their own seat.
+
+Use `heroUnresolved()` for every hero-identity check. `!heroXid` is wrong: null
+and `name:...` are both "not bound to a seat", and only the helper says so.
+
+The reason this survived so long is that the symptom (no P/L) points at the
+attribution maths or the log parser, and both were fine — the deep scan showed
+zero unmatched lines. `heroXid: name:Wonkawee` was printed at the top of that
+same scan. **Read the scan header before theorising about the log patterns.**
+
 ## Money formatting (v0.17.0)
 
 `fmtMoney` / `fmtSignedMoney` are the only places money is rendered. Torn poker
@@ -344,8 +380,13 @@ a seat in the ring, which would shift labels by one.
 
 ## Next task
 
-Confirm at a live table that stats populate and that positions are right now
-that they come from the seat ring rather than the action.
+Confirm at a live table that **P/L now moves at all** (v0.20.0). The check is in
+the players list footer: `Lifetime: N hands, $X` with N tracking History rather
+than sitting at `0 hands, $0`. If it still reads zero, run a deep scan and read
+the `heroXid:` line first — it should show a bare numeric XID, not `name:...`.
+
+Then confirm that stats populate and that positions are right now that they come
+from the seat ring rather than the action.
 
 Still unresolved: **`actionButtons`** (matches nothing, which is why the coach
 can't tell whose turn it is — the cause of the position bug above) and
@@ -392,3 +433,16 @@ is attributed.
 
 `localStorage["tornPokerHUD_v1"]` inside the Torn PDA webview — device-local,
 no server. Optional secret-Gist mirror. Clearing the app's browser data wipes it.
+
+`store.version` (currently `STORE_VERSION = 2`) drives one-time repairs in
+`migrateStore`, run from both `loadStore` and `importJson`. Two rules:
+
+- **Every migration must be idempotent.** It deliberately does not call
+  `saveStore()` — at load it runs inside `loadStore()`, before the `saveScheduled`
+  binding exists, so touching it throws on the temporal dead zone. Persistence
+  therefore waits for the next natural save, and a page closed before then just
+  replays the migration.
+- **Wipe only what the bug corrupted.** Schema 2 zeroes `plChipsEst`,
+  `hero.netChips` and `session.net` and nothing else, because the pseudo-id bug
+  never touched hand counts or rate stats. Wiping those too would have destroyed
+  200 hands of good data for no reason.
