@@ -421,24 +421,87 @@ The log rotation survives only as a fallback, and only when hero's index in it i
 real. Known remaining exposure: a seated player who is sitting out still occupies
 a seat in the ring, which would shift labels by one.
 
+## Adopted from HopesG's HUD (v0.22.0) — and what's unconfirmed
+
+Findings read out of HopesG's *Torn Poker HUD - Player Profiler & Coach* (MIT,
+GreasyFork 569933, ~20k lines). Attribution matters here: several of these
+resolve unknowns this repo had carried for many versions.
+
+| Finding | Was | Now |
+|---|---|---|
+| Hero's seat | `hero_` / `you_`, matched nothing | `[id^="player-"][class*="self_"]` |
+| Action buttons | hashed container class, never matched | matched by button **label** |
+| Dealer button | `dealerButton_`, called a red herring | `dealer_` + `position-<N>___` |
+| Sitting out | undetectable, shifted every label | `state___` text "Sitting out" |
+| Stacks | unread, "~100bb assumed" | read per seat, real SPR |
+| PDA detection | none | `window.flutter_inappwebview` |
+
+**None of the selectors are confirmed on Torn PDA's layout.** They were read out
+of someone else's source, not from a scan of this device, and that script has
+explicit mobile/desktop branches — so the two layouts demonstrably differ. Every
+addition is written to degrade to the previous path rather than replace it, and
+the deep scan has an `IDENTITY / RING MARKERS (unconfirmed on this layout)`
+block that reports on each. **Run one scan and read that block before trusting
+any of it.**
+
+One concrete disagreement already: HopesG reads `playerPositioner-<N>___` and
+notes the index makes direction detection unnecessary. The live PDA scan shows
+`playerPositioner___` with **no index**. The geometric ring in
+`seatRotationFromDom` therefore stays as the primary, and `getDealerXid` returns
+null on that layout rather than guessing.
+
+`classVocabMatching()` exists because of how these were missed: `classVocab`
+sorts by frequency and truncates at 45, and `self___` appears exactly once (your
+seat), `dealer___` once. Both sat below the cutoff for the entire life of the
+project while `opponent___(5)` was visible the whole time. The new probe lists
+rare markers in full.
+
+### The pool average is borrowed, not measured
+
+`POOL_AVG` (VPIP 50.9, PFR 13.4, 3-bet 3.7, fold-to-3-bet 14.9, C-bet 40.3, WTSD
+20.9) comes from that same script. Nothing here has verified it.
+
+It matters because the correction is enormous: Torn's pool plays roughly twice
+the hands of a live low-stakes game and raises less. The old thresholds (nit
+under 15 VPIP, fish over 35) put essentially the whole population in one bucket
+— technically correct, and useless, since a label every seat shares carries no
+information.
+
+Two rules for anything downstream of this:
+
+- **Thresholds are written as multiples of `POOL_AVG`** (`A.tight`, `A.loose`,
+  `A.aggRatio`), never as bare numbers. Correcting the anchor then moves every
+  label with it instead of silently invalidating them.
+- **`observedPoolAverages()` reports what this HUD has actually seen**, and the
+  players list footer shows it beside the assumed figure. If they diverge over a
+  few hundred hands, `POOL_AVG` is what to fix.
+
+### Shrinkage replaced the hard sample gate
+
+`computeShrunkRates` pulls every rate toward `POOL_AVG` with a
+`PRIOR_WEIGHT = 12` pseudo-observation prior; `classifyProvisional` uses it.
+A player seen for two hands who played both used to read as a 100%-VPIP maniac
+on the badge. `computeRates` stays **raw** — the Stats tab must show what was
+observed, and shrinkage is for classification only. AFq is deliberately left
+unshrunk because no published pool figure exists for it.
+
 ## Next task
 
-Confirm at a live table that **P/L now moves at all** (v0.20.0). The check is in
+**One deep scan settles most of the open questions.** Run it at a live table,
+**on your turn** so the action buttons are on screen, and read the new
+`IDENTITY / RING MARKERS` block. It reports, in order: whether `self___` found
+your seat and which XID it resolved to, whether `dealer___` resolved, who is
+sitting out, how many action buttons matched by text and what they say, whether
+stacks were read, and whether the PDA bridge is present. Every v0.22.0 claim
+above is confirmed or refuted by that one block.
+
+Then confirm at a live table that **P/L moves at all** (v0.20.0). The check is in
 the players list footer: `Lifetime: N hands, $X` with N tracking History rather
-than sitting at `0 hands, $0`. If it still reads zero, run a deep scan and read
-the `heroXid:` line first — it should show a bare numeric XID, not `name:...`.
+than sitting at `0 hands, $0`. If it still reads zero, read the `heroXid:` line
+in the scan first — it should show a bare numeric XID, not `name:...`.
 
 Then confirm that stats populate and that positions are right now that they come
 from the seat ring rather than the action.
-
-Still unresolved: **`actionButtons`** (matches nothing, which is why the coach
-can't tell whose turn it is — the cause of the position bug above) and
-**`dealerButton`**.
-
-`dealerButton` remains a red herring: it is declared in `SELECTORS` and
-referenced nowhere else. The seat ring is anchored on the small blind parsed from
-the log, not on the button, so **position depends on the `postSB` line being
-parsed plus seats being readable in the DOM** — not on finding the dealer button.
 
 An unexploited find worth considering: `SPAN[class*="srOnly_"]` carries the full
 sentence in plain text — `"GhostNote420 checked The river: 4 of hearts"` — with

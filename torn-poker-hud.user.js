@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.21.0
+// @version      0.22.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -16,6 +16,37 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 0.22.0 - Adopted findings from HopesG's public Torn poker HUD (MIT, GreasyFork
+ *          569933), read as a reference. Selector work here is UNCONFIRMED on
+ *          Torn PDA's layout — every addition degrades to the old path rather
+ *          than replacing it, and the deep scan now reports on each one.
+ *          - Hero's seat is marked `self___`, not `hero_`/`you_`. findHeroXid
+ *            now reads the DOM marker FIRST, so P/L works with the Settings
+ *            username left blank and the "name:" pseudo-id window closes.
+ *          - Action buttons are matched by LABEL, not by a hashed container
+ *            class that has never matched. isHeroTurn works, and the coach says
+ *            "Your turn" when it is.
+ *          - The dealer button is real: `dealer___` carries `position-<N>___`,
+ *            or `position-self___` when you hold it. getDealerXid reads it.
+ *          - "Sitting out" is detectable via the seat's `state___` text. Those
+ *            seats are dropped from the position ring and the hands
+ *            denominator, closing a documented off-by-one in every label.
+ *          - Stacks are read off the seats, so the coach reports real effective
+ *            stack and SPR instead of leaving commitment unmodelled.
+ *          - PDA is detectable via window.flutter_inappwebview, which also
+ *            exposes a native share handler. Backup can now save a real file
+ *            instead of only filling a textarea.
+ *          Archetypes are recalibrated to the TORN pool (VPIP ~51 / PFR ~13,
+ *          against ~25/18 for live poker). The old thresholds classified almost
+ *          the whole population as "Fish" — accurate and useless. Thresholds
+ *          are now written as multiples of POOL_AVG so correcting the anchor
+ *          moves the labels with it, and rates are shrunk toward the pool
+ *          average with a 12-observation prior before classifying, so two hands
+ *          played out of two no longer reads as a 100% VPIP maniac. Added a
+ *          "Station" archetype for the very loose and very passive.
+ *          POOL_AVG is BORROWED, not measured here — the players list now shows
+ *          your own observed pool average beside it so the assumption can be
+ *          checked as hands accrue.
  * 0.21.0 - Testability seam, and the panel bug it immediately caught.
  *          Opening a player panel while Settings was up made the next gear tap
  *          do nothing. renderPlayerPanel tore down `.tph-panel` — the class
@@ -313,6 +344,51 @@
   // ===========================================================================
   // 1. PDA / BROWSER ADAPTER SHIM
   // ===========================================================================
+
+  // Torn PDA is a Flutter webview, and it exposes that bridge on window. Two
+  // signals rather than one: the HTTP helpers prove the userscript runtime, and
+  // flutter_inappwebview proves the host app even before those are injected.
+  function isPDA() {
+    return typeof window.flutter_inappwebview !== 'undefined'
+      || typeof window.PDA_httpGet === 'function'
+      || typeof window.PDA_httpPost === 'function';
+  }
+
+  // Hand a text file to the user.
+  //
+  // `<a download>` silently does nothing inside PDA's webview, which is why
+  // backup has only ever been copy-a-textarea. PDA exposes a native handler
+  // that opens the system share sheet, so a real file can be saved or sent to
+  // another app. Returns true if the file was handed off, false if the caller
+  // should fall back to the clipboard.
+  function downloadTextFile(text, fileName, mimeType) {
+    if (isPDA() && window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
+      try {
+        // base64 via unescape(encodeURIComponent(...)): btoa throws on any
+        // non-Latin1 character, and player names are free text.
+        const b64 = btoa(unescape(encodeURIComponent(text)));
+        window.flutter_inappwebview.callHandler('shareFile', fileName, b64, mimeType || 'application/json');
+        return true;
+      } catch (e) {
+        console.warn('[TornPokerHUD] PDA shareFile failed, falling back', e);
+        return false;
+      }
+    }
+    try {
+      const blob = new Blob([text], { type: mimeType || 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
 
   /**
    * Torn PDA exposes PDA_httpGet / PDA_httpPost for cross-origin requests
@@ -762,16 +838,56 @@
     seatNameLink: 'a[href*="XID="]',
     seatName: '[class*="name_"]',
     seatFolded: '[class*="folded_"]',
-    heroSeat: '[class*="hero_"], [class*="you_"]',
+    // Torn marks YOUR seat with `self___`, not `hero_`/`you_` — the old guesses
+    // matched nothing, which is why hero identification fell back to typing a
+    // username into Settings. Corroborated by a live scan: 6 seat containers,
+    // `opponent___` on exactly 5 of them. The legacy guesses stay as alternates
+    // in case a layout differs; resolveXidFromSeat needs only the element id.
+    heroSeat: '[id^="player-"][class*="self_"], [class*="hero_"], [class*="you_"]',
     heroCards: '[class*="hand_"] [class*="front_"] > div[role="img"]:not([aria-label="card face down"])',
     communityCards: '[class*="communityCards_"] [class*="front_"] > div[role="img"]:not([aria-label="card face down"])',
     potDisplay: '[class*="totalPotWrap_"], [class*="potsWrapper_"]',
+    // NOT used for turn detection — see findActionButtons(), which matches on
+    // the button's TEXT instead. Torn's action controls carry no stable hashed
+    // container class, so this selector matched nothing for many versions and
+    // took isHeroTurn() down with it. Kept as a calibration probe only.
     actionButtons: '[class*="actionButtons_"] button, [class*="controls_"] button',
-    // UNUSED. Position is derived entirely from the log (blind posts + preflop
-    // action order — see buildRotation), never from the dealer button. Kept only
-    // as a calibration probe; resolving it fixes nothing on its own.
-    dealerButton: '[class*="dealerButton_"], [class*="buttonIcon_"]',
+    // The dealer element carries a `position-<N>___` class naming the seat
+    // index it sits at, or `position-self___` when YOU have the button.
+    dealerButton: '[class*="dealer_"], [class*="dealerButton_"], [class*="buttonIcon_"]',
+    // Per-seat state line. Carries "Sitting out" as text; a seated player who
+    // is sitting out still occupies a seat and would otherwise shift every
+    // position label by one.
+    seatState: '[class*="state_"]',
+    // Seat ring slot. Where it carries an index (`playerPositioner-3___hash`)
+    // it gives the seating order directly, with no geometry needed. A live PDA
+    // scan showed the un-indexed form (`playerPositioner___hash`), so the
+    // geometric fallback in seatRotationFromDom stays.
+    seatPositioner: '[class*="playerPositioner"]',
+    // Chip stack on a seat. Three shapes because the mobile layout nests it in
+    // a detailsItem paragraph rather than exposing a money element directly.
+    seatStack: '[class*="potString_"], [class*="money_"], [class*="detailsItem_"] p',
   };
+
+  // Action controls are matched by their LABEL, not by a hashed container class
+  // — `SELECTORS.actionButtons` has matched nothing on every scan taken so far.
+  // Text matching also survives a Torn redeploy, since the labels are the UI.
+  //
+  // Prefix-anchored rather than whole-string: Torn's call button may carry the
+  // amount ("Call $2,000,000"). The length guard keeps a sentence containing the
+  // word "call" from counting as a button.
+  const ACTION_BTN_RE = /^(fold|check|call|bet|raise|all[\s-]?in)\b/i;
+  const ACTION_BTN_MAX_LEN = 24;
+
+  function findActionButtons() {
+    const out = [];
+    document.querySelectorAll('button, [role="button"]').forEach((b) => {
+      if (b.closest('[class^="tph-"], [class*=" tph-"]')) return; // our own UI
+      const t = (b.textContent || '').trim();
+      if (t && t.length < ACTION_BTN_MAX_LEN && ACTION_BTN_RE.test(t)) out.push(b);
+    });
+    return out;
+  }
 
   const CARD_CLASS_RE = /(clubs|spades|hearts|diamonds)-([0-9TJQKA]+)/i;
 
@@ -894,25 +1010,141 @@
     return null;
   }
 
-  function seatedXids() {
+  // A seated player who is sitting out is dealt no cards, but still occupies a
+  // seat. Counting them shifts every position label by one and inflates the
+  // "hands observed" denominator for everyone at the table.
+  function isSeatSittingOut(seatEl) {
+    if (!seatEl) return false;
+    for (const c of (seatEl.classList || [])) {
+      if (/sitOut|sittingOut|sit-out/i.test(c)) return true;
+    }
+    const state = seatEl.querySelector(SELECTORS.seatState);
+    return !!(state && /sitting\s*out/i.test(state.textContent || ''));
+  }
+
+  // opts.includeSittingOut keeps the old behaviour for callers that want every
+  // occupied seat rather than everyone actually in the hand.
+  function seatedXids(opts) {
+    const includeOut = !!(opts && opts.includeSittingOut);
     const xids = new Set();
     document.querySelectorAll(SELECTORS.seatContainer).forEach((seat) => {
+      if (!includeOut && isSeatSittingOut(seat)) return;
       const xid = resolveSeatKey(seat);
       if (xid) xids.add(xid);
     });
     return xids;
   }
 
-  // Identifying "you" from the DOM is unreliable (this table renders no hero
-  // marker), and with heroXid null NO profit/loss is attributed at all — so a
-  // username typed into Settings takes priority over any DOM guess.
+  // The seat element carrying Torn's own "this is you" marker. Authoritative
+  // when present: it needs no username, resolves to a real numeric XID, and is
+  // available before any log line arrives.
+  function heroSeatEl() {
+    const seats = document.querySelectorAll(SELECTORS.heroSeat);
+    for (const s of seats) { if (resolveXidFromSeat(s)) return s; }
+    return seats[0] || null;
+  }
+
+  // Hero identity, best source first.
+  //
+  // The DOM marker now leads. It used to be the fallback, on the belief that
+  // "this table renders no hero marker" — that was wrong: Torn marks your seat
+  // with `self___`, and the old guesses (`hero_`, `you_`) simply never matched.
+  // Preferring it means P/L works with Settings left blank, and removes the
+  // window where findHeroXid returns the "name:<username>" pseudo-id.
+  //
+  // The configured username stays as the fallback for any layout that doesn't
+  // render the marker, and still wins over a DOM element that can't be resolved
+  // to a numeric XID.
   function findHeroXid() {
+    const seat = heroSeatEl();
+    if (seat) {
+      const xid = resolveXidFromSeat(seat);
+      if (xid) {
+        const name = seatDisplayName(seat);
+        if (name) noteResolvedName(xid, name);
+        return xid;
+      }
+    }
     const configured = (STORE.settings.heroName || '').trim();
     if (configured) return nameToXidGuess(configured);
-    const heroSeat = document.querySelector(SELECTORS.heroSeat);
-    if (heroSeat) {
-      const xid = resolveXidFromSeat(heroSeat);
-      if (xid) return xid;
+    return null;
+  }
+
+  // Chip stack showing on a seat, in chips, or null if it can't be read.
+  //
+  // Seat text runs names and figures together ("RoadKillV$190,866,931$500,000"
+  // — stack then current bet), so this reads the stack ELEMENT rather than
+  // regexing the seat's text: the first figure in that string is the stack, but
+  // only by luck of ordering. Where several candidates match, the largest wins,
+  // since a player's stack is bigger than the amount they've bet this street in
+  // every case except an all-in, where the two are equal.
+  function readSeatStack(seatEl) {
+    if (!seatEl) return null;
+    let best = null;
+    seatEl.querySelectorAll(SELECTORS.seatStack).forEach((el) => {
+      const txt = (el.textContent || '').trim();
+      if (!/^\$/.test(txt)) return; // a `name_` wrapper can match seatStack too
+      const n = parseAmount(txt.replace(/^\$/, ''));
+      if (n > 0 && (best === null || n > best)) best = n;
+    });
+    return best;
+  }
+
+  // xid -> stack, for every seat that reports one.
+  function readAllStacks() {
+    const out = {};
+    document.querySelectorAll(SELECTORS.seatContainer).forEach((seat) => {
+      const xid = resolveSeatKey(seat);
+      if (!xid) return;
+      const stack = readSeatStack(seat);
+      if (stack !== null) out[xid] = stack;
+    });
+    return out;
+  }
+
+  // Smallest stack among players still in the hand — the most anyone can
+  // actually win or lose, and the number SPR should be measured against.
+  // Returns null when fewer than two stacks are readable.
+  function effectiveStack(hand) {
+    const stacks = readAllStacks();
+    const live = hand ? Array.from(hand.playersIn) : Object.keys(stacks);
+    const vals = live.map((x) => stacks[x]).filter((v) => typeof v === 'number' && v > 0);
+    if (vals.length < 2) return null;
+    return Math.min(...vals);
+  }
+
+  // Seat id holding the dealer button, or null.
+  //
+  // The dealer element carries a `position-<N>___` class naming the ring slot it
+  // sits at, or `position-self___` when hero has the button. This was listed as
+  // a red herring for a long time because the old selector (`dealerButton_`)
+  // matched nothing; the real base is just `dealer_`.
+  function getDealerXid() {
+    const el = document.querySelector(SELECTORS.dealerButton);
+    if (!el) return null;
+
+    const classes = Array.from(el.classList || []);
+    if (classes.some((c) => /^position-self[_-]/.test(c))) {
+      const seat = heroSeatEl();
+      return seat ? resolveXidFromSeat(seat) : null;
+    }
+
+    let slot = null;
+    for (const c of classes) {
+      const m = /^position-(\d+)[_-]/.exec(c);
+      if (m) { slot = m[1]; break; }
+    }
+    if (slot === null) return null;
+
+    // Match the dealer's slot number against the seat ring's slot numbers.
+    // Only meaningful where the positioner carries an index; the un-indexed
+    // form seen on PDA yields nothing here and the caller falls back.
+    for (const pos of document.querySelectorAll(SELECTORS.seatPositioner)) {
+      const has = Array.from(pos.classList || [])
+        .some((c) => new RegExp('^playerPositioner-' + slot + '[_-]').test(c));
+      if (!has) continue;
+      const seat = pos.querySelector(SELECTORS.seatContainer);
+      return seat ? resolveXidFromSeat(seat) : null;
     }
     return null;
   }
@@ -1405,16 +1637,22 @@
   }
 
   function heroProblem() {
+    if (!heroUnresolved()) return null; // bound to a seat — nothing to report
+
     const configured = (STORE.settings.heroName || '').trim();
-    if (!configured) return 'Set “Your Torn username” in Settings — until then no profit/loss is attributed to anyone.';
-    if (!heroXid) {
-      return `No seat matches the username “${configured}”. Check the spelling against your seat — `
-        + 'until it matches, no profit/loss is attributed to anyone.';
-    }
     if (String(heroXid).startsWith('name:')) {
       return `“${configured}” matched by name but not to a seat ID yet — sit at a table for this to resolve.`;
     }
-    return null;
+    // Since 0.22.0 your seat is read straight from the DOM, so the username is
+    // only needed on a layout that doesn't render the marker. Say that rather
+    // than demanding a setting that may not be the actual problem.
+    if (!configured) {
+      return 'Not seated yet, or your seat could not be identified. Sit at a table — '
+        + 'if this persists, set “Your Torn username” below as a fallback. '
+        + 'Until it resolves, no profit/loss is attributed to anyone.';
+    }
+    return `No seat matches the username “${configured}”, and no seat is marked as yours. `
+      + 'Check the spelling against your seat — until it matches, no profit/loss is attributed to anyone.';
   }
 
   function playerDisplayName(xid) {
@@ -1746,21 +1984,13 @@
     }
   }
 
-  const ACTION_WORD_RE = /^(fold|check|call|bet|raise|all[\s-]?in)\b/i;
-
-  // The configured selector matched nothing on the real table, which left the
-  // coach permanently hidden. Fall back to finding clickable elements whose
-  // label is an action word.
+  // Text matching is the primary path now, not a fallback — see
+  // findActionButtons(). The hashed selector is still tried first on the chance
+  // some layout does expose a stable container, but it has never matched.
   function countActionControls() {
     const direct = document.querySelectorAll(SELECTORS.actionButtons);
     if (direct.length) return direct.length;
-    let n = 0;
-    document.querySelectorAll('button, [role="button"]').forEach((el) => {
-      if (el.closest('[class^="tph-"], [class*=" tph-"]')) return;
-      const t = (el.textContent || '').trim();
-      if (t && t.length < 24 && ACTION_WORD_RE.test(t)) n++;
-    });
-    return n;
+    return findActionButtons().length;
   }
 
   function isHeroTurn() { return countActionControls() > 0; }
@@ -1883,12 +2113,111 @@
   // 6. ARCHETYPE CLASSIFIER
   // ===========================================================================
 
+  // Average tendencies of the TORN poker pool, in percent.
+  //
+  // PROVENANCE, and it matters: these are the figures published in HopesG's
+  // "Torn Poker HUD - Player Profiler & Coach" userscript (MIT, GreasyFork
+  // 569933). They were NOT measured by this HUD, and no independent
+  // confirmation exists. They are used because the alternative — standard live
+  // poker norms — is demonstrably wrong here, not because they are certain.
+  //
+  // The correction is large. Torn's pool plays roughly 51% of hands and raises
+  // 13%, where a live low-stakes game is nearer 25% / 18%. Thresholds written
+  // for normal poker therefore classified almost the entire Torn population as
+  // "Fish", which is accurate on paper and useless in practice: a label that
+  // every seat shares carries no information.
+  //
+  // observedPoolAverages() below reports what THIS HUD has actually seen, and
+  // the players list shows both, so the two can be compared as data accrues.
+  const POOL_AVG = {
+    vpip: 50.9,
+    pfr: 13.4,
+    threeBet: 3.7,
+    foldTo3Bet: 14.9,
+    cbet: 40.3,
+    wtsd: 20.9,
+  };
+
+  // Strength of the prior, in pseudo-observations.
+  //
+  // A rate over few hands is mostly noise: 3 hands played out of 3 is not a
+  // 100% VPIP. Shrinking toward the pool average pulls small samples back
+  // toward "typical" and leaves large samples essentially untouched — at 12,
+  // a 6-hand read is roughly two-thirds prior, a 100-hand read about 10%.
+  //
+  // This replaces hiding a player behind "Unrated" entirely: an estimate that
+  // says "probably around average, we've barely seen them" beats no estimate,
+  // and it degrades continuously instead of flipping at a threshold.
+  const PRIOR_WEIGHT = 12;
+
+  function shrunkPct(made, opps, poolPct) {
+    const n = opps || 0;
+    if (n <= 0 && !PRIOR_WEIGHT) return null;
+    return (100 * (made + PRIOR_WEIGHT * (poolPct / 100))) / (n + PRIOR_WEIGHT);
+  }
+
+  // Same shape as computeRates, with every rate shrunk toward POOL_AVG.
+  // computeRates stays raw: the Stats tab should show what was actually
+  // observed. Classification uses these.
+  function computeShrunkRates(p) {
+    const raw = computeRates(p);
+    return {
+      vpip: shrunkPct(p.vpip, p.hands, POOL_AVG.vpip),
+      pfr: shrunkPct(p.pfr, p.hands, POOL_AVG.pfr),
+      threeBet: shrunkPct(p.threeBetMade, p.hands, POOL_AVG.threeBet),
+      foldTo3Bet: shrunkPct(p.foldTo3BetMade, p.foldTo3BetOpp, POOL_AVG.foldTo3Bet),
+      cbet: shrunkPct(p.cbetMade, p.cbetOpp, POOL_AVG.cbet),
+      wtsd: shrunkPct(p.wtsd, p.hands, POOL_AVG.wtsd),
+      // Aggression frequency has no published pool figure, so it is left raw
+      // rather than shrunk toward a number that was never measured.
+      afq: raw.afq,
+      avgBetPct: raw.avgBetPct,
+    };
+  }
+
+  // What this HUD has actually observed, for players with a real sample.
+  // Returned so the UI can show it next to POOL_AVG — if the two diverge over a
+  // few hundred hands, POOL_AVG is the thing to correct.
+  const POOL_OBS_MIN_HANDS = 25;
+  function observedPoolAverages() {
+    const ps = Object.keys(STORE.players)
+      // Hero's own record is not part of the opponent pool, and including it
+      // would bias the average toward your own style.
+      .filter((xid) => heroUnresolved() || String(xid) !== String(heroXid))
+      .map((xid) => STORE.players[xid])
+      .filter((p) => p && p.hands >= POOL_OBS_MIN_HANDS);
+    if (ps.length < 3) return null; // too few to mean anything
+    const mean = (f) => {
+      const vals = ps.map(f).filter((v) => v != null && !isNaN(v));
+      return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+    };
+    return {
+      players: ps.length,
+      vpip: mean((p) => pct(p.vpip, p.hands)),
+      pfr: mean((p) => pct(p.pfr, p.hands)),
+    };
+  }
+
+  // Thresholds are POOL-RELATIVE, not absolute. Each is written as a multiple
+  // of, or distance from, POOL_AVG so that correcting POOL_AVG later moves the
+  // labels with it rather than silently invalidating them.
+  //
+  // Pool anchors: VPIP 50.9, PFR 13.4, PFR/VPIP 0.26.
+  const A = {
+    tight: POOL_AVG.vpip * 0.55,   // ~28 — well below pool, "tight" for Torn
+    loose: POOL_AVG.vpip * 1.15,   // ~59 — meaningfully looser than pool
+    aggRatio: 0.45,                // PFR/VPIP; pool sits at 0.26
+    passiveRatio: 0.20,            // clearly below pool: raises almost nothing
+  };
+
+  // Order matters — first match wins.
   const ARCHETYPE_RULES = [
-    { name: 'Nit', test: (r) => r.vpip != null && r.vpip < 15 },
-    { name: 'Maniac', test: (r) => r.afq != null && r.afq > 60 && r.vpip > 40 },
-    { name: 'LAG', test: (r) => r.vpip > 28 && r.pfr != null && r.pfr / r.vpip > 0.5 },
-    { name: 'Fish', test: (r) => r.vpip > 35 && (r.pfr == null || r.pfr / r.vpip < 0.3) },
-    { name: 'TAG', test: (r) => r.vpip >= 15 && r.vpip <= 24 && r.pfr != null && r.pfr / r.vpip > 0.66 },
+    { name: 'Nit', test: (r) => r.vpip != null && r.vpip < A.tight && (r.pfr == null || r.pfr / r.vpip < A.aggRatio) },
+    { name: 'TAG', test: (r) => r.vpip != null && r.vpip < A.tight && r.pfr != null && r.pfr / r.vpip >= A.aggRatio },
+    { name: 'Maniac', test: (r) => r.afq != null && r.afq > 60 && r.vpip != null && r.vpip > A.loose },
+    { name: 'LAG', test: (r) => r.vpip != null && r.vpip > A.loose && r.pfr != null && r.pfr / r.vpip >= A.aggRatio },
+    { name: 'Station', test: (r) => r.vpip != null && r.vpip > A.loose && (r.pfr == null || r.pfr / r.vpip < A.passiveRatio) },
+    { name: 'Fish', test: (r) => r.vpip != null && r.vpip > POOL_AVG.vpip && (r.pfr == null || r.pfr / r.vpip < A.aggRatio) },
   ];
 
   function classify(player) {
@@ -1900,8 +2229,12 @@
   // you have only just met still gets a readable type rather than the word
   // "Unrated", which is the least useful thing a HUD can put on the felt. The
   // caller is responsible for marking it as provisional.
+  //
+  // Shrunk rates, not raw: without them a player seen for two hands who happened
+  // to play both reads as a 100%-VPIP maniac. With them they read as roughly
+  // pool-average until there is evidence otherwise.
   function classifyProvisional(player) {
-    const r = computeRates(player);
+    const r = computeShrunkRates(player);
     for (const rule of ARCHETYPE_RULES) {
       if (rule.test(r)) return rule.name;
     }
@@ -2512,6 +2845,10 @@
     if (!hand.sbXid) return null;
     const seats = [];
     document.querySelectorAll(SELECTORS.seatContainer).forEach((el) => {
+      // A player sitting out holds a seat but is dealt no cards. Leaving them
+      // in the ring shifts every label past them by one — the documented
+      // remaining exposure in this function, now closed.
+      if (isSeatSittingOut(el)) return;
       const xid = resolveSeatKey(el);
       if (!xid) return;
       const r = el.getBoundingClientRect();
@@ -2621,10 +2958,12 @@
     // is written to history.
     if (heroCards.length === 2) hand.heroCards = heroCards;
 
-    // Prefer real turn detection, but this table exposes no recognisable action
-    // buttons; rather than never showing advice, fall back to "your hole cards
-    // are visible", which means you're in a live hand.
-    if (!isHeroTurn() && heroCards.length !== 2) return null;
+    // Turn detection is by button LABEL now (findActionButtons), not by a
+    // hashed container class that never matched. The hole-cards fallback stays,
+    // because it is the only signal between your turns — but the two are no
+    // longer equivalent, and the panel says which one is live.
+    const heroTurn = isHeroTurn();
+    if (!heroTurn && heroCards.length !== 2) return null;
     const board = readBoardCards();
     const villainXid = hand.lastAggressor;
     const betFacing = villainXid ? (hand.streetContributions[villainXid] || 0) : 0;
@@ -2633,6 +2972,23 @@
     // Prefer the table's own pot over our running log sum — see readDomPot.
     const pot = effectivePot(hand);
     const out = [];
+
+    if (heroTurn) out.push('<b>▶ Your turn.</b>');
+
+    // Effective stack and SPR, read from the seats rather than assumed.
+    // The preflop charts still assume ~100bb — that caveat stands and the
+    // footnote still says so — but postflop commitment is driven by SPR, and
+    // stating it beats leaving it unmodelled. Only shown when at least two
+    // stacks are readable, since "effective" is meaningless from one.
+    const eff = effectiveStack(hand);
+    if (eff != null && pot > 0) {
+      const spr = eff / pot;
+      const read = spr < 1 ? 'committed — plan to get it in with any real equity'
+        : spr < 3 ? 'low — top pair is already a stack-off candidate'
+          : spr < 7 ? 'medium — one pair plays for one or two streets, not three'
+            : 'deep — implied odds matter, one pair is thin';
+      out.push(`Effective stack <b>${fmtMoney(eff)}</b> · SPR <b>${spr.toFixed(1)}</b> — ${read}.`);
+    }
 
     out.push(gtoBaselineSuggestion({
       street: hand.street,
@@ -3026,8 +3382,9 @@
         + '<span>Coach</span><span class="tph-coach-hide">Hide</span></div>'
         + '<div class="tph-coach-body"></div>'
         + '<div class="tph-coach-foot">Baselines are reference charts calibrated to '
-        + 'published opening frequencies — not solver output. Equity is vs random '
-        + 'hands, and P/L is an estimate.</div>';
+        + 'published opening frequencies — not solver output, and they assume ~100bb. '
+        + 'Equity is vs random hands, SPR is read from the visible stacks, and P/L '
+        + 'is an estimate.</div>';
       document.body.appendChild(el);
 
       const head = el.querySelector('.tph-coach-head');
@@ -3145,6 +3502,18 @@
   let playersListOpen = false;
   let playersFilter = '';
 
+  // Archetype thresholds hang off POOL_AVG, and POOL_AVG came from a third-party
+  // script rather than from anything this HUD measured. Showing both side by
+  // side is how that assumption gets checked: if these drift apart over a few
+  // hundred hands, POOL_AVG is what needs correcting, and every label with it.
+  function poolComparisonLine() {
+    const obs = observedPoolAverages();
+    if (!obs) return '';
+    return `<br><b>Pool:</b> yours ${fmtPct(obs.vpip)}/${fmtPct(obs.pfr)} VPIP/PFR `
+      + `over ${obs.players} tracked &nbsp;|&nbsp; assumed `
+      + `${POOL_AVG.vpip.toFixed(0)}%/${POOL_AVG.pfr.toFixed(0)}%`;
+  }
+
   function renderPlayersList() {
     const all = !playersListOpen ? [] : Object.keys(STORE.players)
       .map((xid) => ({ xid, p: STORE.players[xid] }))
@@ -3184,6 +3553,7 @@
         ${STORE.session.startedAt ? ' (since ' + new Date(STORE.session.startedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + ')' : ''}<br>
         <b>Lifetime:</b> ${STORE.hero.hands} hands, ${fmtSignedMoney(STORE.hero.netChips)}
         &nbsp;|&nbsp; ${(STORE.hands || []).length} hands in history
+        ${poolComparisonLine()}
       </div>
     `,
       wire: (panel) => {
@@ -3239,6 +3609,7 @@
       <h4>Backup</h4>
       <textarea class="tph-export" readonly></textarea>
       <button class="tph-copy-export">Copy</button>
+      <button class="tph-save-export">${isPDA() ? 'Save / share file' : 'Download file'}</button>
       <textarea class="tph-import" placeholder="Paste JSON to import"></textarea>
       <button class="tph-do-import">Import</button>
       <br><br>
@@ -3310,6 +3681,13 @@
     panel.querySelector('.tph-copy-export').addEventListener('click', () => {
       navigator.clipboard && navigator.clipboard.writeText(exportJson());
     });
+    panel.querySelector('.tph-save-export').addEventListener('click', (e) => {
+      const stamp = new Date().toISOString().slice(0, 10);
+      // exportJson(), not the raw store — it is the single choke point that
+      // strips githubToken and anything else in LOCAL_ONLY_SETTINGS.
+      const ok = downloadTextFile(exportJson(), `torn-poker-hud-${stamp}.json`, 'application/json');
+      e.target.textContent = ok ? 'Sent ✓' : 'Not supported here — use Copy';
+    });
     panel.querySelector('.tph-do-import').addEventListener('click', () => {
       const text = panel.querySelector('.tph-import').value;
       try { importJson(text); renderSettingsPanel(); } catch (e) { alert('Invalid JSON'); }
@@ -3376,6 +3754,27 @@
       .map(([k, v]) => `${k}(${v})`);
   }
 
+  // Class bases matching a pattern, regardless of how rare they are.
+  //
+  // classVocab() sorts by frequency and truncates, which hides exactly the
+  // one-off markers that matter most: `self___` appears once (your seat) and
+  // `dealer___` once, so both fell below the top-45 cutoff and were missed for
+  // many versions while `opponent___(5)` sat in plain sight.
+  function classVocabMatching(re) {
+    const counts = {};
+    document.querySelectorAll('body *').forEach((el) => {
+      const cn = typeof el.className === 'string' ? el.className : '';
+      cn.split(/\s+/).forEach((tok) => {
+        if (!re.test(tok)) return;
+        const m = /^(.*?)[_-]{1,3}[A-Za-z0-9]*$/.exec(tok);
+        const base = m ? m[1] : tok;
+        counts[base] = (counts[base] || 0) + 1;
+      });
+    });
+    return Object.entries(counts).sort((a, b) => b[1] - a[1])
+      .map(([k, v]) => `${k}(${v})`);
+  }
+
   // Deepest elements containing a string, so we get the actual text node's
   // element rather than some huge outer wrapper.
   function findByText(needle, limit) {
@@ -3426,6 +3825,34 @@
 
     L.push('--- CSS MODULE CLASS BASES (most common) ---');
     L.push(classVocab(45).join(' '));
+    L.push('');
+
+    // Everything below was derived by reading a public reference script rather
+    // than from a scan of THIS device. Each line either confirms it holds on
+    // Torn PDA's layout or shows what to use instead. Rare markers are listed
+    // in full because the frequency-sorted vocabulary above truncates them away.
+    L.push('--- IDENTITY / RING MARKERS (unconfirmed on this layout) ---');
+    L.push('self/opponent/dealer/position/positioner bases:');
+    L.push('  ' + (classVocabMatching(/^(self|opponent|dealer|position|playerPositioner|state|sit)/i).join(' ') || '(none)'));
+    const hSeat = heroSeatEl();
+    L.push('heroSeat: ' + (hSeat ? elSig(hSeat) : 'NO MATCH')
+      + ' -> xid ' + (hSeat ? (resolveXidFromSeat(hSeat) || 'UNRESOLVED') : '—'));
+    L.push('dealerXid: ' + (getDealerXid() || 'NOT RESOLVED')
+      + '  (dealer el: ' + (document.querySelector(SELECTORS.dealerButton) ? elSig(document.querySelector(SELECTORS.dealerButton)) : 'NO MATCH') + ')');
+    const outNow = Array.from(document.querySelectorAll(SELECTORS.seatContainer))
+      .filter(isSeatSittingOut).map((s) => s.id);
+    L.push('sittingOut: ' + (outNow.length ? outNow.join(', ') : 'none right now'));
+    L.push('seatedXids: ' + Array.from(seatedXids()).join(',')
+      + '  (incl. sitting out: ' + Array.from(seatedXids({ includeSittingOut: true })).join(',') + ')');
+    const btns = findActionButtons();
+    L.push('actionButtons by TEXT: ' + btns.length
+      + (btns.length ? ' -> ' + btns.map((b) => JSON.stringify(squish(b.textContent, 20))).join(' ') : '')
+      + (btns.length ? '' : '  <-- run this scan again ON YOUR TURN'));
+    L.push('isHeroTurn: ' + isHeroTurn());
+    const stacks = readAllStacks();
+    L.push('stacks read: ' + Object.keys(stacks).length + ' -> '
+      + (Object.keys(stacks).map((x) => x + '=' + fmtMoney(stacks[x])).join(' ') || '(none)'));
+    L.push('isPDA: ' + isPDA() + '  (flutter bridge: ' + (typeof window.flutter_inappwebview !== 'undefined') + ')');
     L.push('');
 
     L.push('--- SEATS ---');
@@ -3667,8 +4094,16 @@
       rotateToBlinds,
       seatLabel,
       computeRates,
+      computeShrunkRates,
+      shrunkPct,
+      POOL_AVG,
+      PRIOR_WEIGHT,
+      ARCHETYPE_RULES,
       classify,
       classifyProvisional,
+      observedPoolAverages,
+      ACTION_BTN_RE,
+      isPDA,
       fmtMoney,
       fmtSignedMoney,
       STORE_VERSION,
