@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.26.0
+// @version      0.26.1
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -16,6 +16,22 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 0.26.1 - Hard-to-miss "it's your turn" cues: a pulsing border around the
+ *          viewport, the gear button turning green, and the coach header with
+ *          it. On a phone the action buttons are small and easy to miss,
+ *          especially with the coach collapsed.
+ *          The overlay is pointer-events:none, and that is not optional — it
+ *          covers the whole viewport, and one tap swallowed on a fold or call
+ *          would be far worse than any cue is good. The HUD stays advisory: it
+ *          must never come between you and the table.
+ *          Driven by findTurnButtons(), not findActionButtons(). Torn shows
+ *          pre-action controls while you are WAITING, so cueing on those would
+ *          leave the screen glowing for most of the hand — the same as no cue.
+ *          Polled at 400ms rather than on the coach's 1.5s tick: a cue that
+ *          arrives late has already eaten part of the decision clock. Optional
+ *          single buzz on the rising edge, off by default. Honours
+ *          prefers-reduced-motion by holding the highlight static rather than
+ *          dropping it, since it is load-bearing.
  * 0.26.0 - Four features adopted from HopesG's HUD, plus the guard that makes
  *          one of them safe.
  *          RANGE TAB — what a player has actually SHOWN DOWN, split by whether
@@ -446,7 +462,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '0.26.0';
+  const HUD_VERSION = '0.26.1';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -602,6 +618,8 @@
     // everything is the read that matters, and a lifetime figure hides it.
     badgeMode: 'session',
     sessionWindow: 15,
+    turnCues: true,     // pulsing border + green gear when it's your turn
+    turnVibrate: false, // opt-in: a short buzz on the rising edge only
     heroName: '',      // YOUR Torn username. Without it P/L and position can't be attributed.
     equityIters: 1200, // Monte Carlo samples per equity estimate
     tableMax: 9,       // seats at a full table — the baseline equity is always
@@ -3884,6 +3902,29 @@
       box-shadow: 0 2px 8px rgba(0,0,0,0.5); cursor: grab;
       touch-action: none; user-select: none; -webkit-user-select: none; }
     .tph-gear.tph-dragging { cursor: grabbing; opacity: 0.85; }
+
+    /* ── "It's your turn" cues ───────────────────────────────────────────────
+       Non-negotiable: pointer-events NONE on the overlay. This sits over the
+       whole viewport, and a single missed tap on a fold or call button because
+       the HUD swallowed it would be far worse than any cue is good. The HUD is
+       advisory; it must never come between you and the table. */
+    .tph-turn-glow { position: fixed; inset: 0; z-index: 99998; pointer-events: none;
+                     box-shadow: inset 0 0 0 3px #35d07f, inset 0 0 26px rgba(53,208,127,.45);
+                     animation: tph-turn-pulse 1.25s ease-in-out infinite; }
+    @keyframes tph-turn-pulse {
+      0%, 100% { opacity: .35; }
+      50%      { opacity: 1; }
+    }
+    /* The gear is the one element always on screen, so it doubles as the cue
+       for anyone who has the coach panel collapsed. */
+    .tph-gear.tph-turn { background: #1e7d51; animation: tph-turn-pulse 1.25s ease-in-out infinite; }
+    .tph-coach-head.tph-turn { background: #1e7d51 !important; }
+    .tph-turn-flag { color: #d6ffe9 !important; font-weight: bold; }
+    /* Respect a user who has asked the OS for less motion — the pulse stays as
+       a static highlight rather than disappearing, since it is load-bearing. */
+    @media (prefers-reduced-motion: reduce) {
+      .tph-turn-glow, .tph-gear.tph-turn { animation: none; opacity: 1; }
+    }
     /* Width is capped rather than left/right-anchored so the panel keeps a
        sensible size once dragging switches it to left/top positioning. */
     .tph-coach { position: fixed; z-index: 99998; bottom: 150px; right: 12px;
@@ -4002,6 +4043,43 @@
 
   // Below this the session window is too thin to prefer over lifetime.
   const SESSION_BADGE_MIN = 6;
+
+  // --- "It's your turn" cues -------------------------------------------------
+  //
+  // On a phone the table is small and the action buttons are easy to miss,
+  // especially with the coach panel collapsed. Three cues, all passive:
+  // a pulsing border around the viewport, the gear turning green, and the coach
+  // header doing the same.
+  //
+  // Turn detection is findTurnButtons(), NOT findActionButtons(): Torn shows
+  // pre-action controls ("Check / Fold", "Call Any / Check") while you are
+  // WAITING, and cueing on those would leave the screen glowing for most of the
+  // hand — which is the same as no cue at all.
+  let turnCueActive = false;
+
+  function renderTurnCue() {
+    const on = !!STORE.settings.turnCues && isHeroTurn();
+    const existing = document.querySelector('.tph-turn-glow');
+
+    if (on && !existing) {
+      const el = document.createElement('div');
+      el.className = 'tph-turn-glow';
+      document.body.appendChild(el);
+    } else if (!on && existing) {
+      existing.remove();
+    }
+
+    const gear = document.querySelector('.tph-gear');
+    if (gear) gear.classList.toggle('tph-turn', on);
+    const head = document.querySelector('.tph-coach-head');
+    if (head) head.classList.toggle('tph-turn', on);
+
+    // Fire once on the rising edge only. A buzz every poll would be unusable.
+    if (on && !turnCueActive && STORE.settings.turnVibrate && navigator.vibrate) {
+      try { navigator.vibrate(120); } catch (e) { /* not supported here */ }
+    }
+    turnCueActive = on;
+  }
 
   function renderBadges() {
     document.querySelectorAll('.tph-badge').forEach((el) => el.remove());
@@ -4475,6 +4553,11 @@
       <div style="opacity:.7;margin:2px 0 10px">Recent form shows how they are playing NOW and falls back to lifetime
         until enough hands are seen. 🔥 marks a player running ${TILT_VPIP_JUMP}+ points looser than their own norm.</div>
       <div style="opacity:.7;margin:2px 0 10px">Small line under each seat: archetype and VPIP/PFR/AFq. Tap one for full stats. Turn off to leave the table completely clear.</div>
+      <h4>Your turn</h4>
+      <label><input type="checkbox" class="tph-turncue-toggle" ${STORE.settings.turnCues ? 'checked' : ''}> Highlight the screen when it's your turn</label><br>
+      <label><input type="checkbox" class="tph-turnvib-toggle" ${STORE.settings.turnVibrate ? 'checked' : ''}> Also buzz once</label>
+      <div style="opacity:.7;margin:2px 0 10px">A pulsing border plus a green button. It never covers the table's
+        controls — the overlay ignores taps entirely. Pre-action buttons ("Check / Fold") don't count as your turn.</div>
       <h4>GTO coach</h4>
       <label><input type="checkbox" class="tph-coach-toggle" ${STORE.settings.coachHidden ? '' : 'checked'}> Show coach panel</label><br>
       <label>Full table size: <input type="number" class="tph-table-max" min="2" max="10" value="${STORE.settings.tableMax}" style="width:60px"></label>
@@ -4530,6 +4613,15 @@
       e.target.value = STORE.settings.sessionWindow;
       saveStore();
       renderBadges();
+    });
+    panel.querySelector('.tph-turncue-toggle').addEventListener('change', (e) => {
+      STORE.settings.turnCues = e.target.checked;
+      saveStore();
+      renderTurnCue(); // clears the glow immediately rather than after the tick
+    });
+    panel.querySelector('.tph-turnvib-toggle').addEventListener('change', (e) => {
+      STORE.settings.turnVibrate = e.target.checked;
+      saveStore();
     });
     panel.querySelector('.tph-badge-toggle').addEventListener('change', (e) => {
       STORE.settings.showBadges = e.target.checked;
@@ -5067,6 +5159,9 @@
 
     setInterval(renderBadges, 4000);
     setInterval(renderCoachPanel, 1500);
+    // Faster than the coach panel: a turn cue that arrives 1.5s late has missed
+    // a meaningful slice of the decision clock. Cheap — one button sweep.
+    setInterval(renderTurnCue, 400);
     if (STORE.settings.calibrationMode) setInterval(renderCalibrationPanel, 3000);
 
     // Badges are anchored to seat positions via getBoundingClientRect(), which
