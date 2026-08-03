@@ -400,13 +400,33 @@ The raw material was already being captured and discarded — `hand.shown` held
 the revealed cards and nothing ever read them. Before adding a data source,
 check whether it is already in the store; that is now twice this has happened.
 
-Two things to preserve:
+**The seats are the primary source, not the log (v0.35.0).** This layout carries
+no reliable `reveals` line — revealed hands were visible on the table while both
+the Range and History tabs stayed empty, after the log path had already been
+fixed twice. `harvestShownCards()` polls the seats every second and records any
+opponent showing two face-up cards.
 
-- **Bank at settlement, not at the reveal line.** When `shows` fires,
-  `hand.winners` is still empty (the `wins` lines come after), so recording
-  there scores every showdown as a loss.
+It **has** to poll: the cards are cleared by the next deal, so reading at
+settlement finds nothing. First sighting wins, so the log path still works where
+it does and the two sources can't double-count — `hand.countedShowdown` guards
+WTSD for the same reason.
+
+Three things to preserve:
+
+- **Bank at settlement, not at the reveal.** `hand.winners` is still empty when
+  a showdown is first seen, so recording the result there scores every showdown
+  as a loss. Capture early, score late.
 - **Split by preflop action.** "What they raise with" and "what they call with"
   are different ranges; averaging them describes neither.
+- **Exclude hero.** Your own cards are face up all hand, so harvesting them
+  would record a showdown every single hand.
+
+Card text arrives in two spellings and both must parse: `9♥` in the visual log,
+`9 of clubs` in aria-labels. `parseCardsFromText` handles both and is bounded on
+**both sides** — an earlier unbounded, case-insensitive version read letters
+inside ordinary words, turning `"9 of hearts, 7 of spades"` into `ATo`. A
+confidently wrong holding is worse than none, and Torn's own hand descriptions
+("Two Pairs: Aces and Eights") are full of those traps.
 
 The UI must keep saying showdowns are a **floor** on a range, never the whole of
 it — a pot that ends in a fold reveals nothing.

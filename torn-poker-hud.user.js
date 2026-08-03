@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.34.0
+// @version      0.35.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -16,6 +16,27 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 0.35.0 - Showdowns are read off the SEATS, not the log. Revealed hands were
+ *          plainly visible on the table while both the Range tab and the
+ *          History tab stayed empty — and the log path had already been fixed
+ *          twice, which was the clue: this layout carries no reliable "reveals"
+ *          line at all, so the cards flipping face up is the only evidence
+ *          there is.
+ *          harvestShownCards() polls the seats every second and records any
+ *          opponent showing two face-up cards. It has to poll: the cards are
+ *          cleared by the next deal, so a read at settlement finds nothing.
+ *          First sighting wins, so the log path still works where it does and
+ *          neither source can double-count. It also fills `shown`, which is
+ *          what the History tab reads and why that was blank too, and credits
+ *          WTSD — previously counted only off the reveal line, so on this
+ *          layout nobody was ever recorded as reaching showdown.
+ *          Found while testing: parseCardEl's aria-label branch accepted only
+ *          spelled-out ranks ("nine of clubs"), but Torn writes DIGITS — the
+ *          live scan shows `aria-label: 9 of clubs`. Every numeric card failed
+ *          there and resolved only when the class name happened to carry it. It
+ *          now defers to parseCardsFromText, which understands both.
+ *          The deep scan reports face-up cards per seat and what has been
+ *          captured this hand, so the two sources can be told apart.
  * 0.34.0 - Your own seat gets a badge, under your name and chips like everyone
  *          else's. There was never a good reason not to: the skip was a
  *          leftover from when heroXid was broken and hero was being tracked as
@@ -631,7 +652,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '0.34.0';
+  const HUD_VERSION = '0.35.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -1480,6 +1501,9 @@
       threeBettorXid: null,
       countedVpip: new Set(),
       countedLimp: new Set(),
+      // WTSD is counted once per player per hand, from whichever source sees
+      // the showdown first — the log's reveal line or the seats flipping over.
+      countedShowdown: new Set(),
       // Blind level for THIS hand, read off the postSB/postBB lines. The only
       // point at which it is known — P/L in big blinds cannot be recovered
       // afterwards from the chip figure, so it is converted at settlement.
@@ -1595,6 +1619,54 @@
       if (n > 0 && (best === null || n > best)) best = n;
     });
     return best;
+  }
+
+  // Face-up cards showing at a seat right now, as [{rank,suit}].
+  //
+  // At showdown Torn flips the seat's cards over. That may be the ONLY place a
+  // reveal appears — the log does not reliably carry a "reveals" line, which is
+  // why range tracking that depended on one stayed empty while revealed hands
+  // were plainly visible on the table.
+  function readSeatFaceUpCards(seatEl) {
+    if (!seatEl || !seatEl.querySelectorAll) return [];
+    const out = [];
+    seatEl.querySelectorAll(SELECTORS.anyFaceUpCard).forEach((el) => {
+      const c = parseCardEl(el);
+      if (c) out.push(c);
+    });
+    return out.slice(0, 2);
+  }
+
+  // Watch the seats for revealed hands and record them on the live hand.
+  //
+  // Runs on the poll rather than at settlement: by the time the next hand's
+  // marker arrives the cards have been cleared, so a read at settlement finds
+  // nothing. First sighting wins, so a hand already captured from the log (or
+  // from an earlier tick) is not overwritten.
+  function harvestShownCards() {
+    if (!currentHand) return;
+    let found = false;
+    document.querySelectorAll(SELECTORS.seatContainer).forEach((seat) => {
+      const xid = resolveSeatKey(seat);
+      if (!xid || isHeroRecord(xid)) return;      // your own cards are always up
+      if (currentHand.shownCards[xid]) return;    // already have this one
+      const cards = readSeatFaceUpCards(seat);
+      if (cards.length !== 2) return;
+      currentHand.shownCards[xid] = cards;
+      // Mirror into `shown` so the History tab shows it too — that path only
+      // ever had log text, which is why History was blank as well.
+      if (!currentHand.shown[xid]) {
+        currentHand.shown[xid] = cards.map((c) => c.rank + c.suit.toUpperCase()).join(' ');
+      }
+      // WTSD is otherwise only counted off the log's reveal line, so a table
+      // that never writes one recorded nobody as having gone to showdown.
+      if (!currentHand.countedShowdown.has(xid)) {
+        currentHand.countedShowdown.add(xid);
+        getPlayer(xid).wtsd += 1;
+      }
+      found = true;
+    });
+    if (found) saveStore();
   }
 
   // xid -> stack, for every seat that reports one.
@@ -1956,8 +2028,12 @@
 
     if (type === 'shows') {
       const xid = nameToXidGuess(cleanName(m[1]));
-      const p = getPlayer(xid);
-      p.wtsd += 1;
+      // Guarded so the log and the seat-watcher can't both count the same
+      // showdown — harvestShownCards may already have seen the cards flip.
+      if (!hand.countedShowdown.has(xid)) {
+        hand.countedShowdown.add(xid);
+        getPlayer(xid).wtsd += 1;
+      }
       hand.shown[xid] = squish(m[2], 40);
       // Parsed cards kept separately and banked at SETTLEMENT, not here: at this
       // point hand.winners is still empty (the "wins" lines come after the
@@ -2761,6 +2837,11 @@
     // rendering path the observer doesn't see (a canvas-ish re-layout, a
     // mutation type we don't subscribe to, an observer detached by an SPA swap).
     setInterval(scanLogRows, 1000);
+
+    // Showdown cards live on the table for only a few seconds before the next
+    // deal clears them, so this has to poll rather than read at settlement.
+    // Same 1s cadence as the log scan, and idempotent — first sighting wins.
+    setInterval(harvestShownCards, 1000);
   }
 
   // ===========================================================================
@@ -3593,14 +3674,20 @@
   }
 
   // Cards can come from a class name, an aria-label, or plain log text — try all.
+  //
+  // The aria-label branch used to accept only spelled-out ranks ("nine of
+  // clubs"), but a live scan shows Torn writes DIGITS — `aria-label: 9 of
+  // clubs`. Every numeric card therefore failed here and only resolved when the
+  // class name happened to carry it. parseCardsFromText understands both
+  // spellings, so defer to it rather than keeping a second, weaker parser.
   function parseCardEl(el) {
     const cn = typeof el.className === 'string' ? el.className : '';
     const m = CARD_CLASS_RE.exec(cn);
     if (m) return { suit: m[1][0].toLowerCase(), rank: normRank(m[2]) };
-    const al = (el.getAttribute('aria-label') || '').toLowerCase();
-    const am = /(ace|king|queen|jack|ten|nine|eight|seven|six|five|four|three|two)\s+of\s+(spades|hearts|diamonds|clubs)/.exec(al);
-    if (am) return { suit: am[2][0], rank: RANK_WORDS[am[1]] };
-    return null;
+    const al = el.getAttribute ? (el.getAttribute('aria-label') || '') : '';
+    if (!al || /face down/i.test(al)) return null;
+    const cards = parseCardsFromText(al);
+    return cards.length ? cards[0] : null;
   }
 
   const SUIT_SYMBOLS = { '♠': 's', '♥': 'h', '♦': 'd', '♣': 'c' };
@@ -5651,6 +5738,21 @@
     // the unmatched list, and the Range tab just stays empty. Print the raw
     // reveal rows so the wording and the card shape can both be checked.
     const revealRows = (readLogRows() || []).filter((r) => /reveal|shows?\b|turns?\s+over/i.test(r));
+    // Two independent sources for a showdown. If the log carries no reveal
+    // line, the seats are the only evidence — run this scan WHILE cards are
+    // face up at showdown to see whether they are readable there.
+    const faceUp = [];
+    document.querySelectorAll(SELECTORS.seatContainer).forEach((seat) => {
+      const xid = resolveSeatKey(seat);
+      const cards = readSeatFaceUpCards(seat);
+      if (cards.length) {
+        faceUp.push((xid || '?') + (isHeroRecord(xid) ? '(you)' : '') + '='
+          + cards.map((c) => c.rank + c.suit).join(''));
+      }
+    });
+    L.push('seats showing face-up cards: ' + (faceUp.join(' ') || 'none right now'));
+    L.push('shownCards captured this hand: '
+      + (currentHand ? Object.keys(currentHand.shownCards).join(',') || 'none' : 'no live hand'));
     L.push('reveal rows in log: ' + revealRows.length);
     revealRows.slice(0, 4).forEach((r) => {
       const line = cleanLogLine(r);
@@ -5944,10 +6046,15 @@
       set foldArmedAt(v) { foldArmedAt = v; },
       handClassFromCards,
       noteShowdown,
+      harvestShownCards,
+      readSeatFaceUpCards,
+      get currentHand() { return currentHand; },
+      set currentHand(h) { currentHand = h; },
       shownRange,
       buildRangeHtml,
       exploitDeviation,
       parseCardsFromText,
+      parseCardEl,
       classify,
       classifyProvisional,
       shortType,
