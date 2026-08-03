@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.29.0
+// @version      0.30.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -16,6 +16,27 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 0.30.0 - Coach panel cut down. It is read mid-decision on a phone, so every
+ *          line has to earn its place; it had grown to nine.
+ *          Removed outright:
+ *            - The standing footnote. Four lines of disclaimer read once and
+ *              ignored forever. The honesty it carried now rides inline where
+ *              it applies and costs a word: "Baseline" (never "GTO") on chart
+ *              lines, "Eq vs random" on equity, and the ⚠ short-stack note when
+ *              the ~100bb assumption is actually broken — the only time that
+ *              caveat changes anything.
+ *            - "▶ Your turn". The green border says it, louder.
+ *            - The table name. It never changes a decision; it is in Settings.
+ *          Compressed:
+ *            - Stack line is now "18bb eff · SPR 2.4 low" — the cash figure
+ *              added nothing that bb does not.
+ *            - Equity drops from three quotes to two. Live is what the decision
+ *              turns on, full-ring is the stable reference; the heads-up
+ *              ceiling was a third number for a spot you are usually not in.
+ *              Pot odds folded onto the same line: "need 33% ✓ +EV call".
+ *            - Self-tilt and the exploit line are one short sentence each, and
+ *              the exploit now leads with fold-to-c-bet, which is the most
+ *              directly actionable number the HUD has.
  * 0.29.0 - Tilt watches YOU too, gets a big-loss trigger, and stops borrowing
  *          the fire emoji.
  *          - 🤮 is now tilt. 🔥 is a separate, new read: RUNNING HOT, someone
@@ -534,7 +555,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '0.29.0';
+  const HUD_VERSION = '0.30.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -3385,14 +3406,26 @@
     if (!p || p.hands < STORE.settings.minHands) return null;
     const r = computeRates(p);
 
-    if (r.foldTo3Bet != null && r.foldTo3Bet > 70) {
-      return `This villain folds to 3-bets ${fmtPct(r.foldTo3Bet)} (${p.foldTo3BetOpp} samples) — 3-betting light is likely +EV.`;
+    // One line, and only the single strongest read — a stack of exploits is a
+    // paragraph nobody finishes mid-decision. Ordered by how much the
+    // adjustment is worth, most actionable first.
+    const who = playerDisplayName(villainXid);
+
+    // Fold-to-c-bet is the most directly actionable postflop number there is:
+    // it says whether c-betting them prints. It was collected for versions
+    // before anything read it.
+    if (r.foldToCbet != null && p.foldToCbetOpp >= 8) {
+      if (r.foldToCbet > 60) return `⚡ ${who} folds to c-bets ${fmtPct(r.foldToCbet)} — fire the flop.`;
+      if (r.foldToCbet < 30) return `⚡ ${who} won't fold flops (${fmtPct(r.foldToCbet)}) — value only, no bluffs.`;
     }
-    if (r.cbet != null && r.vpip != null && r.vpip > 40 && r.pfr != null && r.pfr / (r.vpip || 1) < 0.3) {
-      return `This villain is a calling station (VPIP ${fmtPct(r.vpip)}, rarely raises) — skip balanced bluffs, bet for value only.`;
+    if (r.foldTo3Bet != null && r.foldTo3Bet > 70) {
+      return `⚡ ${who} folds to 3-bets ${fmtPct(r.foldTo3Bet)} — 3-bet light.`;
+    }
+    if (r.vpip != null && r.vpip > 40 && r.pfr != null && r.pfr / (r.vpip || 1) < 0.3) {
+      return `⚡ ${who} is a station (VPIP ${fmtPct(r.vpip)}) — value bet, don't bluff.`;
     }
     if (r.afq != null && r.afq > 55) {
-      return `This villain is very aggressive (AFq ${fmtPct(r.afq)}) — consider calling down lighter and letting them bluff.`;
+      return `⚡ ${who} is very aggressive (AFq ${fmtPct(r.afq)}) — call down lighter.`;
     }
     return null;
   }
@@ -3859,64 +3892,52 @@
     const pot = effectivePot(hand);
     const out = [];
 
-    if (heroTurn) out.push('<b>▶ Your turn.</b>');
+    // The panel is read mid-decision on a phone, so every line has to earn its
+    // place. Things deliberately NOT here any more:
+    //   "▶ Your turn"  — the green border already says it, louder.
+    //   Table name     — never changes a decision; it is in Settings.
+    //   The footnote   — replaced by short inline markers ("vs random", "est").
+    // Kept short rather than dropped: stack depth, because it decides whether
+    // the baseline below is even the right chart.
 
     // Hero gets the same read as everyone else. Badges deliberately skip your
     // own seat, so without this the one player the HUD can never warn about is
-    // you — and that is the case where the warning is worth most.
-    //
-    // Hero's own record accumulates normally (dealtInXids includes hero), so
-    // the same tiltRead/heatRead run against it unchanged.
+    // you — the case where it is worth most.
     const self = !heroUnresolved() ? STORE.players[heroXid] : null;
     if (self) {
       const selfTilt = tiltRead(self);
       const selfHeat = heatRead(self);
       if (selfTilt) {
-        out.push(`<span class="tph-self-tilt">🤮 <b>You are playing ${selfTilt.jump.toFixed(0)}pp `
-          + `looser than your own norm</b> over the last ${selfTilt.hands} hands`
-          + (selfTilt.sinceBigLoss != null
-            ? `, after losing a big pot ${selfTilt.sinceBigLoss === 0 ? 'just now' : selfTilt.sinceBigLoss + ' hands ago'}`
-            : '')
-          + '. Worth a break, or at least a tighter next orbit.</span>');
+        out.push(`<span class="tph-self-tilt">🤮 <b>You're ${selfTilt.jump.toFixed(0)}pp looser `
+          + `than your norm</b> (last ${selfTilt.hands}) — tighten up.</span>`);
       } else if (selfHeat) {
-        out.push(`<span class="tph-self-heat">🔥 You have won ${selfHeat.won} of your last `
-          + `${selfHeat.hands} hands. Running hot is not a reason to widen.</span>`);
+        out.push(`<span class="tph-self-heat">🔥 Won ${selfHeat.won}/${selfHeat.hands} recent — `
+          + 'not a reason to widen.</span>');
       }
     }
 
-    // Effective stack and SPR, read from the seats rather than assumed.
-    // The preflop charts still assume ~100bb — that caveat stands and the
-    // footnote still says so — but postflop commitment is driven by SPR, and
-    // stating it beats leaving it unmodelled. Only shown when at least two
-    // stacks are readable, since "effective" is meaningless from one.
+    // Stack depth, in one line. bb is what matters, so the cash figure is gone.
     const eff = effectiveStack(hand);
     const rawBB2 = hand.bbAmount || lastSeenBB;
     const bb = plausibleBB(rawBB2) ? rawBB2 : 0;
-    const table = tableLabel(bb);
-    if (table) out.push(`<span style="opacity:.7">${escapeHtml(table)}</span>`);
     if (eff != null) {
       const effBB = bb > 0 ? eff / bb : null;
-      const depth = effBB != null ? ` (<b>${effBB.toFixed(0)}bb</b>)` : '';
+      const bits = [];
+      if (effBB != null) bits.push(`<b>${effBB.toFixed(0)}bb</b> eff`);
+      else bits.push(`<b>${fmtMoney(eff)}</b> eff`);
       if (pot > 0) {
         const spr = eff / pot;
-        const read = spr < 1 ? 'committed — plan to get it in with any real equity'
-          : spr < 3 ? 'low — top pair is already a stack-off candidate'
-            : spr < 7 ? 'medium — one pair plays for one or two streets, not three'
-              : 'deep — implied odds matter, one pair is thin';
-        out.push(`Effective stack <b>${fmtMoney(eff)}</b>${depth} · SPR <b>${spr.toFixed(1)}</b> — ${read}.`);
-      } else {
-        out.push(`Effective stack <b>${fmtMoney(eff)}</b>${depth}.`);
+        bits.push(`SPR <b>${spr.toFixed(1)}</b> ${spr < 1 ? 'committed' : spr < 3 ? 'low' : spr < 7 ? 'medium' : 'deep'}`);
       }
-
-      // The preflop charts are 100bb charts. Saying so only in a footnote was
-      // fine while stack depth was unknown; now that it is readable, applying
-      // them silently at 15bb would be a confidently wrong answer.
+      // The baselines are ~100bb charts. Now that depth is readable, applying
+      // them silently at 15bb would be a confidently wrong answer — so this
+      // stays, just short.
       if (effBB != null && effBB < 40) {
-        out.push(`<b>⚠ ${effBB.toFixed(0)}bb effective.</b> The baselines below are ~100bb charts — `
-          + (effBB < 20
-            ? 'at this depth the real decision is push-or-fold, and these ranges do not model it.'
-            : 'play tighter from early seats and prefer raising over calling; the charts overstate how much you can call.'));
+        bits.push(effBB < 20
+          ? '<b>⚠ push/fold depth — charts don\'t model it</b>'
+          : '<b>⚠ short — charts overstate calling</b>');
       }
+      out.push(bits.join(' · '));
     }
 
     out.push(gtoBaselineSuggestion({
@@ -3959,8 +3980,12 @@
       // strong. Add the live count and the heads-up ceiling around it, so you can
       // see how much the hand gains as the field thins. Duplicates are dropped:
       // at a 3-handed pot "vs 2" and "vs 2" twice reads as a bug.
+      // Two quotes, not three. The LIVE count is what the decision turns on;
+      // the full-ring figure is the stable reference that means the same thing
+      // every hand. The heads-up ceiling was a third number to read for a
+      // situation you are usually not in — dropped unless it IS the live count.
       const wanted = [];
-      [[full, `${full + 1}-max`], [live, 'live'], [1, 'heads-up']].forEach(([n, label]) => {
+      [[live, 'live'], [full, `${full + 1}max`]].forEach(([n, label]) => {
         if (!wanted.some((w) => w.n === n)) wanted.push({ n, label });
       });
 
@@ -3969,21 +3994,19 @@
         .filter((w) => w.eq != null);
 
       if (quotes.length) {
-        out.push('Equity (random hands): '
-          + quotes.map((w) => `<b>${fmtEquity(w.eq)}</b> vs ${w.n} (${w.label})`).join(' · '));
-
-        // Pot odds compare against the players actually still contesting the
-        // pot — using the full-ring baseline here would tell you to fold
-        // profitable calls in a short-handed pot.
+        // Pot odds folded into the same line rather than its own. "vs random"
+        // stays as the honesty marker now that the footnote is gone.
+        const parts = ['Eq vs random ' + quotes.map((w) => `<b>${fmtEquity(w.eq)}</b> ${w.label}`).join(' · ')];
         const liveEq = quotes.find((w) => w.n === live);
         if (betFacing > 0 && liveEq) {
           const need = (100 * betFacing) / (pot + betFacing);
-          out.push(`Pot odds: need ${need.toFixed(0)}% to call — ${liveEq.eq >= need ? 'calling is +EV on raw equity' : 'folding is likely correct'}.`);
+          parts.push(`need <b>${need.toFixed(0)}%</b> ${liveEq.eq >= need ? '✓ +EV call' : '✗ fold'}`);
         }
+        out.push(parts.join(' · '));
       }
     } else if (betFacing > 0) {
       const need = (100 * betFacing) / (hand.pot + betFacing);
-      out.push(`Pot odds: need ~${need.toFixed(0)}% equity to continue.`);
+      out.push(`Need <b>~${need.toFixed(0)}%</b> to continue.`);
     }
 
     const deviation = exploitDeviation(villainXid);
@@ -4252,8 +4275,6 @@
     .tph-coach.tph-dragging .tph-coach-head { cursor: grabbing; }
     .tph-coach-body { padding: 8px; }
     .tph-coach-body b { color: #fff; }
-    .tph-coach-foot { padding: 0 8px 7px; font-size: 10px; line-height: 1.35;
-      opacity: 0.5; border-top: 1px solid #334; padding-top: 6px; margin-top: 2px; }
     /* touch-action:none so dragging the pill moves it instead of scrolling the
        table underneath — without it the pointermove handler never gets to run. */
     .tph-coach-pill { position: fixed; z-index: 99998; bottom: 150px; right: 12px;
@@ -4677,13 +4698,15 @@
       // baseline" throughout for the same reason it exists: these are reference
       // charts calibrated to published opening frequencies, not solver output,
       // and the old wording claimed the authority of an equilibrium solution.
+      // No footnote. It was four lines of standing disclaimer read once and
+      // ignored forever, on a panel that has to be scanned mid-decision. The
+      // honesty it carried now rides inline where it applies and costs a word:
+      // "Baseline" (never "GTO") on the chart lines, "Eq vs random" on equity,
+      // and the ⚠ short-stack note when the ~100bb assumption is actually
+      // broken — which is the only time that caveat changes anything.
       el.innerHTML = '<div class="tph-coach-head"><span class="tph-grip">⠿</span>'
         + '<span>Coach</span><span class="tph-coach-hide">Hide</span></div>'
-        + '<div class="tph-coach-body"></div>'
-        + '<div class="tph-coach-foot">Baselines are reference charts calibrated to '
-        + 'published opening frequencies — not solver output, and they assume ~100bb. '
-        + 'Equity is vs random hands, SPR is read from the visible stacks, and P/L '
-        + 'is an estimate.</div>';
+        + '<div class="tph-coach-body"></div>';
       document.body.appendChild(el);
 
       const head = el.querySelector('.tph-coach-head');
@@ -5645,6 +5668,7 @@
       noteShowdown,
       shownRange,
       buildRangeHtml,
+      exploitDeviation,
       parseCardsFromText,
       classify,
       classifyProvisional,
