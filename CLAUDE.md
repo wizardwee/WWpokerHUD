@@ -683,6 +683,14 @@ is attributed.
   in `LOCAL_ONLY_SETTINGS`.
 - **The coach is advisory only.** It must never click, auto-act, or play. Keep
   it text-only.
+- **Never come between the user and the table.** The turn-cue overlay covers the
+  whole viewport and is `pointer-events: none` — one tap swallowed on a fold or
+  call button is worse than any cue is good. The fold guard is the single
+  exception that touches game controls, and it earns it by never acting for the
+  user (no synthetic clicks — the confirming tap is theirs), failing open on any
+  error, and intercepting nothing but Fold. Any future feature near the game's
+  controls has to meet the same three rules, and `test/fold-guard.test.js` is
+  the shape of the evidence required.
 - **Say when a number is an estimate.** Multiway P/L is modelled, not exact, and
   equity is vs random hands rather than real ranges. The UI says so; keep it
   that way.

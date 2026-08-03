@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.26.1
+// @version      0.27.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -16,6 +16,29 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 0.27.0 - Fold misclick guard, and a chime to go with the buzz.
+ *          FOLD GUARD (on by default) — tap Fold once to arm, again to confirm.
+ *          This is the only code in the HUD that touches the game's own
+ *          controls, so it is built to three rules, all covered by tests:
+ *            1. It NEVER folds for you. There is no synthetic click anywhere in
+ *               it; the second tap is your real tap, passed through untouched.
+ *            2. It FAILS OPEN. Any error, any unrecognised element, and the
+ *               click goes through — a guard that swallowed a genuine fold
+ *               would be worse than no guard.
+ *            3. It only ever intercepts Fold. Call, Raise and Check are never
+ *               delayed, and neither are the HUD's own buttons.
+ *          A second tap within 250ms is treated as a fat-finger double-fire and
+ *          swallowed rather than accepted as confirmation. Missing the 4s
+ *          window costs nothing: Torn folds you on timeout anyway, so hesitating
+ *          produces the outcome you were choosing regardless. "Check / Fold" is
+ *          guarded too — a misclicked pre-action fold still folds the hand.
+ *          TURN CHIME — synthesised with Web Audio, so there is no asset to host
+ *          and nothing for the webview to block. Phones refuse audio until the
+ *          page has been tapped, so the context is primed on the first tap
+ *          anywhere; without that the first chime of a session is silently
+ *          dropped and the setting looks broken. Settings has a Test button
+ *          because webview audio is unreliable enough to need one.
+ *          (Vibrate already shipped in 0.26.1 — same section.)
  * 0.26.1 - Hard-to-miss "it's your turn" cues: a pulsing border around the
  *          viewport, the gear button turning green, and the coach header with
  *          it. On a phone the action buttons are small and easy to miss,
@@ -462,7 +485,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '0.26.1';
+  const HUD_VERSION = '0.27.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -620,6 +643,8 @@
     sessionWindow: 15,
     turnCues: true,     // pulsing border + green gear when it's your turn
     turnVibrate: false, // opt-in: a short buzz on the rising edge only
+    turnSound: false,   // opt-in: a synthesised two-note chime
+    foldGuard: true,    // tap Fold twice to confirm — see foldGuardHandler
     heroName: '',      // YOUR Torn username. Without it P/L and position can't be attributed.
     equityIters: 1200, // Monte Carlo samples per equity estimate
     tableMax: 9,       // seats at a full table — the baseline equity is always
@@ -3920,6 +3945,19 @@
     .tph-gear.tph-turn { background: #1e7d51; animation: tph-turn-pulse 1.25s ease-in-out infinite; }
     .tph-coach-head.tph-turn { background: #1e7d51 !important; }
     .tph-turn-flag { color: #d6ffe9 !important; font-weight: bold; }
+
+    /* Fold misclick guard prompt. Bottom-centre and above everything, but
+       pointer-events:none so it can never sit between you and the button you
+       are trying to tap a second time. */
+    .tph-fold-prompt { position: fixed; z-index: 100001; left: 50%; bottom: 18%;
+                       transform: translateX(-50%); pointer-events: none;
+                       background: #7a2f12; border: 1px solid #c9762f; border-radius: 8px;
+                       padding: 9px 14px; max-width: 84vw; text-align: center;
+                       box-shadow: 0 3px 14px rgba(0,0,0,.55);
+                       font: 13px/1.35 -apple-system, sans-serif; color: #ffe6c9 !important; }
+    .tph-fold-prompt b { color: #fff3e3 !important; display: block; }
+    .tph-fold-prompt .tph-fold-sub { color: #e0b48a !important; font-size: 11px;
+                                     display: block; margin-top: 2px; }
     /* Respect a user who has asked the OS for less motion — the pulse stays as
        a static highlight rather than disappearing, since it is load-bearing. */
     @media (prefers-reduced-motion: reduce) {
@@ -4057,6 +4095,138 @@
   // hand — which is the same as no cue at all.
   let turnCueActive = false;
 
+  // A short chime, synthesised rather than loaded. No asset to host, nothing to
+  // fetch, and nothing for Torn PDA's webview to block.
+  //
+  // Browsers refuse to start audio until the user has interacted with the page,
+  // so the context is created lazily and primed on the first tap anywhere —
+  // see primeAudio(). Without that the first chime of a session is silently
+  // dropped, which reads as "the setting doesn't work".
+  let audioCtx = null;
+
+  function ensureAudio() {
+    if (audioCtx) return audioCtx;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return null;
+    try { audioCtx = new AC(); } catch (e) { return null; }
+    return audioCtx;
+  }
+
+  function playTurnChime() {
+    const ctx = ensureAudio();
+    if (!ctx) return false;
+    if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+    const now = ctx.currentTime;
+    // Two short rising notes — distinct from Torn's own sounds, and quiet
+    // enough not to be startling if the phone is by your ear.
+    [[880, 0], [1320, 0.11]].forEach(([freq, at]) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      // Ramps rather than steps: an instant gain change clicks audibly.
+      gain.gain.setValueAtTime(0.0001, now + at);
+      gain.gain.exponentialRampToValueAtTime(0.22, now + at + 0.012);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + at + 0.10);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(now + at);
+      osc.stop(now + at + 0.12);
+    });
+    return true;
+  }
+
+  // Satisfy the autoplay policy using a tap the user was making anyway.
+  function primeAudio() {
+    const ctx = ensureAudio();
+    if (ctx && ctx.state === 'suspended') ctx.resume().catch(() => {});
+  }
+
+  // --- Fold misclick guard ---------------------------------------------------
+  //
+  // The one place friction is worth adding: folding is irreversible, the button
+  // sits next to Call, and a phone screen is small. Tap once to arm, tap again
+  // to fold.
+  //
+  // Deliberate design limits, because this is the only code in the HUD that
+  // touches the game's own controls:
+  //
+  // - It NEVER folds for you. There is no synthetic click anywhere here; the
+  //   second tap is your real tap, passed through untouched. The HUD stays
+  //   advisory.
+  // - It fails OPEN. Any error, any unrecognised button, and the click goes
+  //   through as normal. A guard that swallowed a fold would be far worse than
+  //   no guard.
+  // - Missing the window costs nothing. Torn folds you on timeout anyway, so
+  //   the worst case of hesitating is the outcome you were choosing regardless.
+  const FOLD_ARM_MS = 4000;      // how long the confirm stays live
+  const FOLD_MIN_GAP_MS = 250;   // a second tap sooner than this is a double-fire
+
+  let foldArmedAt = 0;
+
+  function isFoldControl(el) {
+    if (!el || el.closest('[class^="tph-"], [class*=" tph-"]')) return false; // our own UI
+    const btn = el.closest('button, [role="button"]');
+    if (!btn) return null; // not a control at all
+    const text = (btn.textContent || '').trim();
+    if (!text || text.length >= ACTION_BTN_MAX_LEN) return false;
+    // Matches "Fold" and also "Check / Fold" — a misclicked pre-action fold
+    // still folds the hand, just later.
+    return /\bfold\b/i.test(text) ? btn : false;
+  }
+
+  function foldGuardHandler(e) {
+    try {
+      if (!STORE.settings.foldGuard) return;
+      const btn = isFoldControl(e.target);
+      if (!btn) return;
+
+      const now = Date.now();
+      const elapsed = now - foldArmedAt;
+
+      // Armed, and this is a deliberate second tap — let the real click through.
+      if (foldArmedAt && elapsed >= FOLD_MIN_GAP_MS && elapsed <= FOLD_ARM_MS) {
+        foldArmedAt = 0;
+        hideFoldPrompt();
+        return;
+      }
+      // A second tap inside FOLD_MIN_GAP_MS is a fat-finger double-fire, not a
+      // confirmation. Swallow it and keep the window open.
+      if (foldArmedAt && elapsed < FOLD_MIN_GAP_MS) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+
+      // First tap: block it and arm.
+      e.preventDefault();
+      e.stopPropagation();
+      foldArmedAt = now;
+      showFoldPrompt(btn);
+      setTimeout(() => {
+        if (Date.now() - foldArmedAt >= FOLD_ARM_MS) { foldArmedAt = 0; hideFoldPrompt(); }
+      }, FOLD_ARM_MS + 50);
+    } catch (err) {
+      // Fail open, always.
+      foldArmedAt = 0;
+      console.warn('[TornPokerHUD] fold guard error, passing the click through', err);
+    }
+  }
+
+  function showFoldPrompt(btn) {
+    hideFoldPrompt();
+    const el = document.createElement('div');
+    el.className = 'tph-fold-prompt';
+    const label = (btn.textContent || 'fold').trim();
+    el.innerHTML = `<b>Tap “${escapeHtml(label)}” again to confirm</b>`
+      + `<span class="tph-fold-sub">misclick guard · expires in ${FOLD_ARM_MS / 1000}s</span>`;
+    document.body.appendChild(el);
+    pinTextColor(el);
+  }
+
+  function hideFoldPrompt() {
+    document.querySelectorAll('.tph-fold-prompt').forEach((el) => el.remove());
+  }
+
   function renderTurnCue() {
     const on = !!STORE.settings.turnCues && isHeroTurn();
     const existing = document.querySelector('.tph-turn-glow');
@@ -4074,9 +4244,13 @@
     const head = document.querySelector('.tph-coach-head');
     if (head) head.classList.toggle('tph-turn', on);
 
-    // Fire once on the rising edge only. A buzz every poll would be unusable.
-    if (on && !turnCueActive && STORE.settings.turnVibrate && navigator.vibrate) {
-      try { navigator.vibrate(120); } catch (e) { /* not supported here */ }
+    // Fire once on the rising edge only. A buzz or chime every poll would be
+    // unusable, and the poll runs at 400ms.
+    if (on && !turnCueActive) {
+      if (STORE.settings.turnVibrate && navigator.vibrate) {
+        try { navigator.vibrate(120); } catch (e) { /* not supported here */ }
+      }
+      if (STORE.settings.turnSound) playTurnChime();
     }
     turnCueActive = on;
   }
@@ -4555,9 +4729,17 @@
       <div style="opacity:.7;margin:2px 0 10px">Small line under each seat: archetype and VPIP/PFR/AFq. Tap one for full stats. Turn off to leave the table completely clear.</div>
       <h4>Your turn</h4>
       <label><input type="checkbox" class="tph-turncue-toggle" ${STORE.settings.turnCues ? 'checked' : ''}> Highlight the screen when it's your turn</label><br>
-      <label><input type="checkbox" class="tph-turnvib-toggle" ${STORE.settings.turnVibrate ? 'checked' : ''}> Also buzz once</label>
+      <label><input type="checkbox" class="tph-turnvib-toggle" ${STORE.settings.turnVibrate ? 'checked' : ''}> Also buzz once</label><br>
+      <label><input type="checkbox" class="tph-turnsound-toggle" ${STORE.settings.turnSound ? 'checked' : ''}> Also play a chime</label>
+      <button class="tph-test-chime">Test</button>
       <div style="opacity:.7;margin:2px 0 10px">A pulsing border plus a green button. It never covers the table's
-        controls — the overlay ignores taps entirely. Pre-action buttons ("Check / Fold") don't count as your turn.</div>
+        controls — the overlay ignores taps entirely. Pre-action buttons ("Check / Fold") don't count as your turn.
+        Phones block audio until you've tapped the page, so use Test to check the chime actually plays here.</div>
+      <h4>Fold guard</h4>
+      <label><input type="checkbox" class="tph-foldguard-toggle" ${STORE.settings.foldGuard ? 'checked' : ''}> Tap Fold twice to confirm</label>
+      <div style="opacity:.7;margin:2px 0 10px">Guards against misclicking Fold next to Call. It never folds for you —
+        the second tap is your own. If anything goes wrong the tap passes straight through, and missing the
+        ${FOLD_ARM_MS / 1000}s window costs nothing, since Torn folds you on timeout anyway.</div>
       <h4>GTO coach</h4>
       <label><input type="checkbox" class="tph-coach-toggle" ${STORE.settings.coachHidden ? '' : 'checked'}> Show coach panel</label><br>
       <label>Full table size: <input type="number" class="tph-table-max" min="2" max="10" value="${STORE.settings.tableMax}" style="width:60px"></label>
@@ -4622,6 +4804,20 @@
     panel.querySelector('.tph-turnvib-toggle').addEventListener('change', (e) => {
       STORE.settings.turnVibrate = e.target.checked;
       saveStore();
+    });
+    panel.querySelector('.tph-turnsound-toggle').addEventListener('change', (e) => {
+      STORE.settings.turnSound = e.target.checked;
+      saveStore();
+      if (e.target.checked) playTurnChime(); // confirm it works at the moment you ask for it
+    });
+    panel.querySelector('.tph-test-chime').addEventListener('click', (e) => {
+      const ok = playTurnChime();
+      e.target.textContent = ok ? 'Played' : 'No audio here';
+    });
+    panel.querySelector('.tph-foldguard-toggle').addEventListener('change', (e) => {
+      STORE.settings.foldGuard = e.target.checked;
+      saveStore();
+      if (!e.target.checked) { foldArmedAt = 0; hideFoldPrompt(); }
     });
     panel.querySelector('.tph-badge-toggle').addEventListener('change', (e) => {
       STORE.settings.showBadges = e.target.checked;
@@ -5105,6 +5301,12 @@
       tiltRead,
       RECENT_MAX,
       TILT_VPIP_JUMP,
+      isFoldControl,
+      foldGuardHandler,
+      FOLD_ARM_MS,
+      FOLD_MIN_GAP_MS,
+      get foldArmedAt() { return foldArmedAt; },
+      set foldArmedAt(v) { foldArmedAt = v; },
       handClassFromCards,
       noteShowdown,
       shownRange,
@@ -5169,6 +5371,15 @@
     // recompute on those events (frame-coalesced) instead of waiting.
     window.addEventListener('scroll', scheduleBadgeRender, { passive: true });
     window.addEventListener('resize', scheduleBadgeRender);
+
+    // Capture phase, so the guard sees the tap before Torn's own React handler
+    // does and can stop it reaching the game. Everything it does is gated on
+    // the setting and wrapped in try/catch — see foldGuardHandler.
+    document.addEventListener('click', foldGuardHandler, true);
+    // Any tap satisfies the browser's autoplay policy, so the first chime of a
+    // session isn't silently dropped. Passive and non-capturing: this must
+    // never influence a click.
+    document.addEventListener('pointerdown', primeAudio, { passive: true, capture: false });
 
     if (STORE.settings.githubToken && STORE.settings.gistId) {
       GistSync.status = 'connected';
