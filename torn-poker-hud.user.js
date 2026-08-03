@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.33.0
+// @version      0.34.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -16,6 +16,18 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 0.34.0 - Your own seat gets a badge, under your name and chips like everyone
+ *          else's. There was never a good reason not to: the skip was a
+ *          leftover from when heroXid was broken and hero was being tracked as
+ *          their own opponent, so the badge would have been wrong. With
+ *          identity resolved it is the most useful badge on the table — your
+ *          own V/P/A and archetype, plus 🤮/🔥, where you are already looking.
+ *          Tinted green so it reads as yours at a glance, and tapping it opens
+ *          your stats. Toggleable separately from the others.
+ *          The coach drops its self-HEAT line, now duplicated by 🔥 on the
+ *          badge. The self-TILT line stays: an emoji has no room to say why,
+ *          and a touchscreen has no tooltip — tilt is the one that should
+ *          change what you do, so it earns the second mention.
  * 0.33.0 - Your own stats were reachable but not findable, and lied when found.
  *          Hero has always accumulated stats like anyone else (dealtInXids
  *          includes hero), so the record was sitting in the players list under
@@ -619,7 +631,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '0.33.0';
+  const HUD_VERSION = '0.34.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -775,6 +787,7 @@
     // everything is the read that matters, and a lifetime figure hides it.
     badgeMode: 'session',
     sessionWindow: 15,
+    showSelfBadge: true, // badge your own seat too — see renderBadges
     turnCues: true,       // pulsing border + green gear when it's your turn
     nextToActCue: true,   // quieter amber border when you're one seat away
     turnVibrate: false, // opt-in: a short buzz on the rising edge only
@@ -4072,16 +4085,17 @@
     // Hero gets the same read as everyone else. Badges deliberately skip your
     // own seat, so without this the one player the HUD can never warn about is
     // you — the case where it is worth most.
+    // Only TILT, not heat. Both markers are now on your own seat badge, so the
+    // coach would be repeating itself — but an emoji on a badge has no room to
+    // say WHY, and on a touchscreen there is no tooltip to hover. Tilt earns
+    // the second mention because it is the one that should change what you do;
+    // running hot is information, and 🔥 on the badge covers it.
     const self = !heroUnresolved() ? STORE.players[heroXid] : null;
     if (self) {
       const selfTilt = tiltRead(self);
-      const selfHeat = heatRead(self);
       if (selfTilt) {
         out.push(`<span class="tph-self-tilt">🤮 <b>You're ${selfTilt.jump.toFixed(0)}pp looser `
           + `than your norm</b> (last ${selfTilt.hands}) — tighten up.</span>`);
-      } else if (selfHeat) {
-        out.push(`<span class="tph-self-heat">🔥 Won ${selfHeat.won}/${selfHeat.hands} recent — `
-          + 'not a reason to widen.</span>');
       }
     }
 
@@ -4267,6 +4281,11 @@
       letter-spacing: 0.2px; white-space: nowrap; cursor: pointer; pointer-events: auto;
       max-width: 140px; overflow: hidden; }
     .tph-badge b { color: #ffc94d !important; font-weight: 700; }
+    /* Your own seat, tinted so it reads as "this one is me" at a glance rather
+       than needing to be located by position. */
+    .tph-badge-self { background: rgba(14,42,32,0.88) !important;
+                      box-shadow: inset 0 0 0 1px rgba(53,208,127,.55); }
+    .tph-badge-self b { color: #7ee0a6 !important; }
     .tph-badge .tph-badge-dim { color: #9fb0bf !important; }
     .tph-badge .tph-badge-tilt, .tph-badge .tph-badge-heat { margin-right: 2px; }
     .tph-state-note { color: #ffd9a0 !important; font-size: 11px; line-height: 1.35;
@@ -4759,12 +4778,19 @@
     const seats = document.querySelectorAll(SELECTORS.seatContainer);
     seats.forEach((seat) => {
       const xid = resolveSeatKey(seat);
-      if (!xid || xid === heroXid) return;
+      if (!xid) return;
+      // Hero's own seat is badged too. It used to be skipped, which made sense
+      // only while heroXid was broken and hero was being tracked as their own
+      // opponent — the badge would have been wrong. With identity resolved it
+      // is the most useful badge on the table: your own V/P/A, your archetype,
+      // and 🤮/🔥 where you are already looking, rather than only in the coach.
+      const isSelf = isHeroRecord(xid);
+      if (isSelf && !STORE.settings.showSelfBadge) return;
       const player = STORE.players[xid];
       const rect = seat.getBoundingClientRect();
       if (!rect.width && !rect.height) return; // seat not laid out (empty/hidden)
       const badge = document.createElement('div');
-      badge.className = 'tph-badge';
+      badge.className = 'tph-badge' + (isSelf ? ' tph-badge-self' : '');
       // Below the seat — i.e. under the name and chip stack — rather than over
       // the top of it. Clamped so a bottom-row seat doesn't push it off screen.
       const maxTop = Math.max(0, window.innerHeight - BADGE_HEIGHT_PX);
@@ -4807,7 +4833,7 @@
           + `${heat ? '<span class="tph-badge-heat">🔥</span>' : ''}<b>${type}</b> `
           + `<span class="tph-badge-dim">${useSession ? sess.hands + 'h ' : ''}`
           + `V${fmtNum(shown.vpip)} P${fmtNum(shown.pfr)} A${fmtNum(r.afq)}</span>`;
-      badge.title = `${playerDisplayName(xid)} — ${hands} hand(s) seen. `
+      badge.title = `${isSelf ? 'You' : playerDisplayName(xid)} — ${hands} hand(s) seen. `
         + 'V = VPIP (hands played), P = PFR (raised preflop), A = AFq (postflop aggression). '
         + (useSession
           ? `V and P cover the last ${sess.hands} hands; A is lifetime. `
@@ -5276,7 +5302,8 @@
         + 'rather than being written wrong.</div>' : ''}
       ${plausibleBB(lastSeenBB) ? `<div style="opacity:.7;margin:2px 0 8px">Table: ${escapeHtml(tableLabel(lastSeenBB))}</div>` : ''}
       <h4>Seat labels</h4>
-      <label><input type="checkbox" class="tph-badge-toggle" ${STORE.settings.showBadges ? 'checked' : ''}> Show tendency labels on seats</label>
+      <label><input type="checkbox" class="tph-badge-toggle" ${STORE.settings.showBadges ? 'checked' : ''}> Show tendency labels on seats</label><br>
+      <label><input type="checkbox" class="tph-selfbadge-toggle" ${STORE.settings.showSelfBadge ? 'checked' : ''}> Include your own seat (green)</label>
       <div style="margin:6px 0">
         <label><input type="radio" name="tph-bm" class="tph-bm" value="session" ${STORE.settings.badgeMode === 'session' ? 'checked' : ''}> Recent form</label>
         &nbsp;<label><input type="radio" name="tph-bm" class="tph-bm" value="lifetime" ${STORE.settings.badgeMode !== 'session' ? 'checked' : ''}> Lifetime</label>
@@ -5392,6 +5419,11 @@
       STORE.settings.foldGuard = e.target.checked;
       saveStore();
       if (!e.target.checked) { foldArmedAt = 0; hideFoldPrompt(); }
+    });
+    panel.querySelector('.tph-selfbadge-toggle').addEventListener('change', (e) => {
+      STORE.settings.showSelfBadge = e.target.checked;
+      saveStore();
+      renderBadges();
     });
     panel.querySelector('.tph-badge-toggle').addEventListener('change', (e) => {
       STORE.settings.showBadges = e.target.checked;
