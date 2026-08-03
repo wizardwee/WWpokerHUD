@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.32.0
+// @version      0.33.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -16,6 +16,21 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 0.33.0 - Your own stats were reachable but not findable, and lied when found.
+ *          Hero has always accumulated stats like anyone else (dealtInXids
+ *          includes hero), so the record was sitting in the players list under
+ *          your username — with nothing marking it as yours, and a P/L column
+ *          reading $0.
+ *          That zero was the worst part: plChipsEst is never written for hero
+ *          because it would mean your P/L against yourself, so the column read
+ *          "flat" when it meant "not applicable". It now says "see Lifetime",
+ *          and opening your own panel replaces the "Your P/L vs them" block
+ *          with your actual lifetime bb/chips, bb/100 win rate and session
+ *          figures.
+ *          Added Settings → "📊 Your own stats", because hunting for your own
+ *          name in a list sorted by hand count is not a route. Disabled with a
+ *          reason until hero resolves to a seat.
+ *          Your row in the players list is now tagged "you".
  * 0.32.0 - Showdowns weren't reaching the Range tab. Three causes, all in the
  *          card parsing rather than the storage — the pipeline from log line to
  *          shownHands was fine.
@@ -604,7 +619,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '0.32.0';
+  const HUD_VERSION = '0.33.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -4322,6 +4337,8 @@
     .tph-stat-legend { color: #8d959c !important; font-size: 10px; line-height: 1.35;
                        border-bottom: none !important; padding-top: 7px !important; }
     .tph-pool-row td { color: #8d959c !important; font-size: 11px; border-bottom: 1px solid #444; }
+    .tph-you { color: #9bd !important; font-size: 9px; margin-left: 4px; border: 1px solid #567;
+               border-radius: 3px; padding: 0 3px; vertical-align: middle; }
     .tph-stat-head td { padding-top: 10px !important; color: #c3cad1 !important;
                         border-bottom: 1px solid #444 !important; }
     /* Secondary P/L unit under the primary one. Muted and inheriting the row's
@@ -5037,6 +5054,27 @@
           ${POSTFLOP_STREETS.map((st) => `<tr><td class="tph-stat-l">${st[0].toUpperCase() + st.slice(1)}</td>`
             + `<td class="tph-stat-v">${fmtPct(r.byStreet[st].afq)} / ${fmtPct(r.byStreet[st].foldPct)}</td>`
             + `<td class="tph-stat-n"><span class="tph-stat-norm">${r.byStreet[st].actions} acts</span></td></tr>`).join('')}
+          ${isHeroRecord(openPlayerXid) ? `
+          <tr class="tph-stat-head"><td colspan="3"><b>Your results</b></td></tr>
+          <tr>
+            <td class="tph-stat-l">Lifetime</td>
+            <td class="tph-stat-v" style="color:${STORE.hero.netChips >= 0 ? '#7ed957' : '#ff6b6b'} !important">
+              <b>${fmtBB(STORE.hero.netBB)}</b></td>
+            <td class="tph-stat-n" style="color:${STORE.hero.netChips >= 0 ? '#7ed957' : '#ff6b6b'} !important">${fmtSignedMoney(STORE.hero.netChips)}</td>
+          </tr>
+          <tr>
+            <td class="tph-stat-l">Win rate</td>
+            <td class="tph-stat-v" colspan="2"><b>${fmtBB100(STORE.hero.netBB, STORE.hero.bbHands)}</b></td>
+          </tr>
+          <tr>
+            <td class="tph-stat-l">Session</td>
+            <td class="tph-stat-v" style="color:${STORE.session.net >= 0 ? '#7ed957' : '#ff6b6b'} !important">
+              <b>${fmtSignedMoney(STORE.session.net)}</b></td>
+            <td class="tph-stat-n"><span class="tph-stat-norm">${STORE.session.hands} hands</span></td>
+          </tr>
+          <tr><td colspan="3" class="tph-stat-legend">The P/L column elsewhere means "your result against
+            that player", so it has no meaning here — these are your own totals.</td></tr>
+          ` : `
           <tr class="tph-stat-head"><td colspan="3"><b>Your P/L vs them</b></td></tr>
           <tr>
             <td class="tph-stat-l">Result</td>
@@ -5046,6 +5084,7 @@
           </tr>
           ${!p.plBBEst && p.plChipsEst ? '<tr><td colspan="3" class="tph-stat-legend">'
             + 'bb only tracked since v0.23.0.</td></tr>' : ''}
+          `}
         </table>
       `;
     } else if (openPlayerTab === 'range') {
@@ -5105,6 +5144,13 @@
   // P/L and a zero bb figure, and colouring off bb would show them as flat.
   function pl0(p) { return p.plChipsEst || 0; }
 
+  // Is this record hero's own? Hero accumulates stats exactly like anyone else
+  // (dealtInXids includes hero), so the record exists and belongs in the list —
+  // it is only the P/L column that means something different for it.
+  function isHeroRecord(xid) {
+    return !heroUnresolved() && String(xid) === String(heroXid);
+  }
+
   // Both units, stacked: big blinds lead because they are comparable across
   // stakes, chips underneath because that is what is actually sitting in front
   // of you and what the table shows.
@@ -5149,11 +5195,15 @@
         const tilt = tiltRead(p);
         const heat = heatRead(p);
         return `<tr data-xid="${escapeHtml(xid)}" class="tph-prow">
-            <td><b>${escapeHtml(p.name)}</b>${tilt ? ' 🤮' : ''}${heat ? ' 🔥' : ''}</td>
+            <td><b>${escapeHtml(p.name)}</b>${isHeroRecord(xid) ? '<span class="tph-you">you</span>' : ''}${tilt ? ' 🤮' : ''}${heat ? ' 🔥' : ''}</td>
             <td>${shortType(classify(p))}</td>
             <td>${p.hands}</td>
             <td>${cell(r.vpip, s.vpip, 'vpip')}/${cell(r.pfr, s.pfr, 'pfr')}</td>
-            <td style="color:${pl0(p) >= 0 ? '#7ed957' : '#ff6b6b'}">${plShort(p)}</td>
+            <td style="color:${isHeroRecord(xid) ? '#9fb2c4' : (pl0(p) >= 0 ? '#7ed957' : '#ff6b6b')}">${
+              // plChipsEst is never written for hero — it would mean your P/L
+              // against yourself. Printing the resulting 0 reads as "flat",
+              // which is wrong; your real result is the Lifetime line below.
+              isHeroRecord(xid) ? '<span class="tph-stat-norm">see Lifetime</span>' : plShort(p)}</td>
           </tr>`;
       }).join('')
       : `<tr><td colspan="5"><i>No players tracked yet.</i></td></tr>`;
@@ -5215,6 +5265,7 @@
       html: !settingsOpen ? '' : `
       <span class="tph-close">✕</span>
       <h3>Settings</h3>
+      <button class="tph-open-self" style="width:100%;padding:9px;margin-bottom:6px"${heroUnresolved() ? ' disabled' : ''}>📊 Your own stats${heroUnresolved() ? ' (sit at a table first)' : ''}</button>
       <button class="tph-open-players" style="width:100%;padding:9px;margin-bottom:10px">👥 View tracked players &amp; hand history</button>
       <label><b>Your Torn username:</b> <input type="text" class="tph-hero-name" value="${escapeHtml(STORE.settings.heroName)}" placeholder="required for P/L" style="width:55%"></label><br>
       <div style="opacity:.7;margin:2px 0 6px">Needed to attribute profit/loss and work out your position.</div>
@@ -5279,6 +5330,12 @@
     // names — can't break out of the textarea.
     panel.querySelector('.tph-export').value = exportJson();
 
+    panel.querySelector('.tph-open-self').addEventListener('click', () => {
+      if (heroUnresolved()) return;
+      settingsOpen = false;
+      renderSettingsPanel();
+      openPlayerPanel(heroXid);
+    });
     panel.querySelector('.tph-open-players').addEventListener('click', () => {
       settingsOpen = false;
       renderSettingsPanel();
@@ -5823,6 +5880,7 @@
       deviation,
       statRow,
       plShort,
+      isHeroRecord,
       TORN_STAKES,
       MIN_PLAUSIBLE_BB,
       plausibleBB,

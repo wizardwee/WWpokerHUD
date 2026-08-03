@@ -162,6 +162,45 @@ t.ok('a raiser limps a far smaller share of their VPIP',
   t.ok('a rounding-error bb figure is not shown', !tiny.includes('bb'));
 }
 
+// --- Hero's own record ------------------------------------------------------
+
+// Hero accumulates stats exactly like anyone else (dealtInXids includes hero),
+// so the record exists and belongs in the players list. Only the P/L column
+// means something different for it: plChipsEst is never written for hero,
+// because it would be your P/L against yourself, and printing the resulting 0
+// reads as "flat" rather than "not applicable".
+{
+  const H = load();
+  H.STORE = H.emptyStore();
+  H.heroXid = '311421';
+  t.eq('hero\'s own record is recognised', H.isHeroRecord('311421'), true);
+  t.eq('an opponent is not', H.isHeroRecord('999'), false);
+  // A pseudo-id is not bound to a seat, so nothing should be labelled "you".
+  H.heroXid = 'name:Wonkawee';
+  t.eq('an unresolved hero labels nothing', H.isHeroRecord('name:Wonkawee'), false);
+  H.heroXid = null;
+  t.eq('no hero labels nothing', H.isHeroRecord('311421'), false);
+}
+
+// The real figures live on STORE.hero, not on hero's player record.
+{
+  const H = load();
+  H.STORE = H.emptyStore();
+  H.heroXid = 'H';
+  H.applyHandResults({
+    gameId: null, street: 'preflop', pot: 3000000, bbAmount: 1000000,
+    contributions: { H: 500000, V: 1000000 },
+    dealtInXids: new Set(['H', 'V']),
+    winners: [{ xid: 'V', amount: 1500000 }],
+    actions: [{ x: 'H', a: 'fold', amt: 0, s: 'preflop' }], shown: {}, shownCards: {},
+  });
+  t.eq('hero gets a player record', !!H.STORE.players.H, true);
+  t.eq('with hands counted', H.STORE.players.H.hands, 1);
+  t.eq('but no P/L against themself', H.STORE.players.H.plChipsEst, 0);
+  t.eq('the real result is on STORE.hero', H.STORE.hero.netChips, -500000);
+  t.near('in big blinds too', H.STORE.hero.netBB, -0.5);
+}
+
 // --- The WTSD anchor is gone ------------------------------------------------
 
 // It was mapped from the source's `wwsf` (won when saw flop), a different stat.
