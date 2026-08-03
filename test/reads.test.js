@@ -168,12 +168,12 @@ t.eq('the hand description is ignored',
 
   const html = R.buildRangeHtml(p);
   t.ok('the range renders', html.includes('AKo'));
-  t.ok('it splits by preflop action', html.includes('When they raised preflop'));
+  t.ok('it splits by preflop action', html.includes('Raised preflop'));
   t.ok('it says showdowns are a floor, not the whole range', html.includes('floor on their range'));
-  t.ok('a thin sample says so', html.includes('too few to read as a range yet'));
+  t.ok('a thin sample says so', html.includes('thin sample'));
 }
 
 t.ok('no showdowns explains itself rather than showing an empty box',
-  T.buildRangeHtml(T.emptyPlayer('n', 'New')).includes('No showdowns seen yet'));
+  T.buildRangeHtml(T.emptyPlayer('n', 'New')).includes('No showdowns yet'));
 
 process.exit(t.report());

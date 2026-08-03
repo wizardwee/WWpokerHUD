@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.27.0
+// @version      0.28.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -16,6 +16,28 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 0.28.0 - Stats panel fits the screen, and the turn cue knows whose turn it is.
+ *          WIDTH — the Stats table now uses table-layout:fixed with explicit
+ *          column widths, so a long label or a wide number can no longer push
+ *          it past 100%; without it the browser sizes columns to min-content
+ *          and a phone scrolls sideways. Bars are a FIXED 46px rather than a
+ *          percentage of the cell — the proportional bar was the main culprit.
+ *          Labels shortened (Fold v 3B, Fold v CB, Limp), and the disclaimer
+ *          cut from five lines to one. Outlier rows now carry a tinted
+ *          background as well as a coloured value, since colour on one number
+ *          is easy to miss at arm's length.
+ *          TURN DETECTION — was: "any single-action button is on screen". The
+ *          live scan showed why that is wrong: "Call Any / Check", "Check" and
+ *          "Check / Fold" were all present WHILE WAITING, and the bare "Check"
+ *          survives the pre-action filter and reads exactly like a turn button.
+ *          The screen was glowing for most of the hand.
+ *          Seats carry `active___` marking who is on action (confirmed in the
+ *          same scan). isHeroTurn now compares that against hero's seat and
+ *          falls back to buttons only when no active seat can be read.
+ *          Added a second, quieter state: an amber STATIC border when you are
+ *          the next player to act, walking the seat ring from the active seat
+ *          and skipping anyone folded or sitting out. Static on purpose — two
+ *          pulsing states compete, and this one is a heads-up, not an alarm.
  * 0.27.0 - Fold misclick guard, and a chime to go with the buzz.
  *          FOLD GUARD (on by default) — tap Fold once to arm, again to confirm.
  *          This is the only code in the HUD that touches the game's own
@@ -485,7 +507,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '0.27.0';
+  const HUD_VERSION = '0.28.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -641,7 +663,8 @@
     // everything is the read that matters, and a lifetime figure hides it.
     badgeMode: 'session',
     sessionWindow: 15,
-    turnCues: true,     // pulsing border + green gear when it's your turn
+    turnCues: true,       // pulsing border + green gear when it's your turn
+    nextToActCue: true,   // quieter amber border when you're one seat away
     turnVibrate: false, // opt-in: a short buzz on the rising edge only
     turnSound: false,   // opt-in: a synthesised two-note chime
     foldGuard: true,    // tap Fold twice to confirm — see foldGuardHandler
@@ -1049,6 +1072,12 @@
     seatNameLink: 'a[href*="XID="]',
     seatName: '[class*="name_"]',
     seatFolded: '[class*="folded_"]',
+    // Torn marks the seat currently ON ACTION with `active___`. Confirmed by a
+    // live scan (`DIV#player-4034124.opponent___QQnNM.active___Xxj4V`), and it
+    // is a far better turn signal than the action buttons: buttons cannot tell
+    // a real turn from a queued pre-action.
+    // Scoped to seats so it can't collide with `iconActive___` elsewhere.
+    seatActive: '[id^="player-"][class*="active_"]',
     // Torn marks YOUR seat with `self___`, not `hero_`/`you_` — the old guesses
     // matched nothing, which is why hero identification fell back to typing a
     // username into Settings. Corroborated by a live scan: 6 seat containers,
@@ -2408,9 +2437,85 @@
     return findTurnButtons().length;
   }
 
-  // Your turn = a single-action button on screen. Pre-action controls
-  // ("Check / Fold") do NOT count — they are shown while waiting.
-  function isHeroTurn() { return countActionControls() > 0; }
+  // The seat currently on action, or null.
+  function activeSeatXid() {
+    const el = document.querySelector(SELECTORS.seatActive);
+    return el ? resolveSeatKey(el) : null;
+  }
+
+  // Is it hero's turn?
+  //
+  // The seat's own `active___` marker is authoritative and is tried first.
+  // Button labels are only a fallback, because they cannot distinguish a real
+  // turn from a queued pre-action: a live scan found "Call Any / Check",
+  // "Check" and "Check / Fold" all on screen at once, and the bare "Check"
+  // among them is a pre-action control that reads exactly like a turn button.
+  // Cueing off that left the screen glowing while waiting.
+  function isHeroTurn() {
+    if (heroUnresolved()) return countActionControls() > 0; // no seat to compare
+    const active = activeSeatXid();
+    if (active) return active === heroXid;
+    return countActionControls() > 0;
+  }
+
+  // Is hero the NEXT player to act — i.e. one seat after whoever is on action,
+  // skipping anyone folded or sitting out?
+  //
+  // Worth its own state: the useful moment to look up from your phone is
+  // slightly before it is your turn, not at the instant the clock starts.
+  // Returns null when the ring can't be read, so the caller can stay quiet
+  // rather than guess.
+  function isHeroNextToAct() {
+    if (heroUnresolved()) return null;
+    const active = activeSeatXid();
+    if (!active || active === heroXid) return false;
+
+    const ring = seatRingXids();
+    if (!ring || ring.length < 2) return null;
+    const i = ring.indexOf(active);
+    if (i < 0) return null;
+
+    for (let step = 1; step < ring.length; step++) {
+      const xid = ring[(i + step) % ring.length];
+      if (xid === active) break;
+      if (seatIsOutOfHand(xid)) continue; // folded or sitting out — skipped
+      return xid === heroXid;
+    }
+    return false;
+  }
+
+  // Seating order as XIDs. Prefers Torn's own positioner index, which a live
+  // scan confirmed exists (`playerPositioner-1___` … `-8___`); falls back to the
+  // geometric ring used for position labels.
+  function seatRingXids() {
+    const indexed = [];
+    document.querySelectorAll(SELECTORS.seatPositioner).forEach((pos) => {
+      let slot = null;
+      for (const c of (pos.classList || [])) {
+        const m = /^playerPositioner-(\d+)[_-]/.exec(c);
+        if (m) { slot = parseInt(m[1], 10); break; }
+      }
+      if (slot === null) return;
+      const seat = pos.querySelector(SELECTORS.seatContainer);
+      const xid = seat ? resolveSeatKey(seat) : null;
+      if (xid) indexed.push({ slot, xid });
+    });
+    if (indexed.length >= 2) {
+      indexed.sort((a, b) => a.slot - b.slot);
+      return indexed.map((e) => e.xid);
+    }
+    const geo = currentHand ? seatRotationFromDom(currentHand) : null;
+    return geo && geo.length >= 2 ? geo : null;
+  }
+
+  function seatIsOutOfHand(xid) {
+    const seat = Array.from(document.querySelectorAll(SELECTORS.seatContainer))
+      .find((s) => resolveSeatKey(s) === xid);
+    if (!seat) return true;
+    if (isSeatSittingOut(seat)) return true;
+    return !!seat.querySelector(SELECTORS.seatFolded)
+      || Array.from(seat.classList || []).some((c) => /^folded[_-]/.test(c));
+  }
 
   // In the hand but not on action: pre-action controls are showing.
   function heroCanPreAct() {
@@ -3841,35 +3946,51 @@
        "bad", it is loose, and a good/bad palette would assert a judgement the
        HUD is in no position to make. Grey = typical, amber = notable,
        orange-red = extreme; direction comes from the arrow, not the colour. */
-    .tph-stats { width: 100%; border-collapse: collapse; font-size: 12px; }
+    /* table-layout:fixed is what guarantees the panel never scrolls sideways:
+       column widths come from these percentages, not from content, so a long
+       label or a wide number can no longer force the table past 100%. Without
+       it the browser sizes columns to min-content and a phone overflows. */
+    .tph-stats { width: 100%; max-width: 100%; table-layout: fixed;
+                 border-collapse: collapse; font-size: 12px; }
     .tph-stats th { text-align: left; opacity: .55; font-weight: normal;
-                    border-bottom: 1px solid #444; padding: 3px 4px; }
-    .tph-stats td { padding: 5px 4px; border-bottom: 1px solid #2a2a2e; vertical-align: top; }
-    .tph-stats td:first-child { white-space: nowrap; }
+                    border-bottom: 1px solid #444; padding: 3px 3px; }
+    .tph-stats td { padding: 4px 3px; border-bottom: 1px solid #2a2a2e;
+                    vertical-align: middle; overflow-wrap: anywhere; }
+    /* Explicit widths for all three columns; they must total 100%. */
+    .tph-stat-l { width: 33%; color: #dfe5ea !important; }
     /* Explicit colours, not inherited. pinTextColor deliberately SKIPS anything
        carrying a tph- class, so a tph- cell with no colour of its own is left
        for Torn's bare td rule to darken — the v0.18.2 bug, reintroduced. Any
        new tph- element that holds text needs a colour declared right here.
        Declared BEFORE the .tph-dev-* rules so those win on equal specificity.
        (No backticks in this block: the whole stylesheet is a template literal.) */
-    .tph-stat-v { white-space: nowrap; width: 27%; color: #f2f4f6 !important; }
-    .tph-stat-n { width: 42%; font-size: 11px; color: #aeb6bd !important; }
-    .tph-dev-n { font-size: 10px; opacity: .8; margin-left: 3px; }
-    .tph-dev-typical { color: #c3cad1 !important; }
-    .tph-dev-notable { color: #ffc457 !important; }
-    .tph-dev-extreme { color: #ff8a5b !important; }
-    /* Bar track. position:relative so the norm tick can be absolutely placed
-       at its own percentage along the same 0-100 scale as the fill. */
-    .tph-bar { position: relative; height: 6px; margin-top: 4px; border-radius: 3px;
+    .tph-stat-v { width: 27%; white-space: nowrap; color: #f2f4f6 !important; }
+    .tph-stat-n { width: 40%; white-space: nowrap; font-size: 11px; color: #aeb6bd !important; }
+    .tph-stat-norm { color: #8d959c !important; font-size: 10px; }
+    .tph-dev-n { font-size: 10px; opacity: .85; margin-left: 2px; }
+    .tph-dev-typical { color: #9fb2c4 !important; }
+    .tph-dev-notable { color: #ffc046 !important; }
+    .tph-dev-extreme { color: #ff7a4d !important; }
+    /* A tinted row makes an outlier findable while scrolling; the value colour
+       alone is easy to miss on a phone at arm's length. */
+    .tph-row-notable td { background: rgba(255,192,70,.09); }
+    .tph-row-extreme td { background: rgba(255,122,77,.14); }
+    /* Bar track. FIXED width, not a percentage of the cell — a proportional bar
+       is what pushed this table past the screen. 46px is enough to read a
+       position against the tick and small enough to sit inline with the number.
+       position:relative so the tick can be placed at its own percentage along
+       the same 0-100 scale as the fill. */
+    .tph-bar { position: relative; display: inline-block; vertical-align: middle;
+               width: 46px; height: 7px; margin-right: 5px; border-radius: 3px;
                background: #2f3338; overflow: visible; }
     .tph-bar-fill { display: block; height: 100%; border-radius: 3px; background: #6b7784; }
-    .tph-bar-fill.tph-dev-typical { background: #6b7784; }
-    .tph-bar-fill.tph-dev-notable { background: #ffc457; }
-    .tph-bar-fill.tph-dev-extreme { background: #ff8a5b; }
-    .tph-bar-tick { position: absolute; top: -2px; width: 2px; height: 10px;
-                    background: #f2f4f6; opacity: .85; margin-left: -1px; }
-    .tph-stat-legend { color: #8d959c !important; font-size: 10px; line-height: 1.4;
-                       border-bottom: none !important; padding-top: 8px !important; }
+    .tph-bar-fill.tph-dev-typical { background: #7d8b99; }
+    .tph-bar-fill.tph-dev-notable { background: #ffc046; }
+    .tph-bar-fill.tph-dev-extreme { background: #ff7a4d; }
+    .tph-bar-tick { position: absolute; top: -2px; width: 2px; height: 11px;
+                    background: #fff; opacity: .9; margin-left: -1px; }
+    .tph-stat-legend { color: #8d959c !important; font-size: 10px; line-height: 1.35;
+                       border-bottom: none !important; padding-top: 7px !important; }
     .tph-pool-row td { color: #8d959c !important; font-size: 11px; border-bottom: 1px solid #444; }
     .tph-stat-head td { padding-top: 10px !important; color: #c3cad1 !important;
                         border-bottom: 1px solid #444 !important; }
@@ -3933,9 +4054,13 @@
        whole viewport, and a single missed tap on a fold or call button because
        the HUD swallowed it would be far worse than any cue is good. The HUD is
        advisory; it must never come between you and the table. */
-    .tph-turn-glow { position: fixed; inset: 0; z-index: 99998; pointer-events: none;
-                     box-shadow: inset 0 0 0 3px #35d07f, inset 0 0 26px rgba(53,208,127,.45);
+    .tph-turn-glow { position: fixed; inset: 0; z-index: 99998; pointer-events: none; }
+    /* Your turn: green and pulsing — act now. */
+    .tph-glow-turn { box-shadow: inset 0 0 0 3px #35d07f, inset 0 0 26px rgba(53,208,127,.45);
                      animation: tph-turn-pulse 1.25s ease-in-out infinite; }
+    /* Next to act: amber, thinner, and deliberately STATIC. Two pulsing states
+       would compete for attention, and this one is a heads-up, not an alarm. */
+    .tph-glow-next { box-shadow: inset 0 0 0 2px rgba(255,192,70,.75); }
     @keyframes tph-turn-pulse {
       0%, 100% { opacity: .35; }
       50%      { opacity: 1; }
@@ -3943,6 +4068,7 @@
     /* The gear is the one element always on screen, so it doubles as the cue
        for anyone who has the coach panel collapsed. */
     .tph-gear.tph-turn { background: #1e7d51; animation: tph-turn-pulse 1.25s ease-in-out infinite; }
+    .tph-gear.tph-next { background: #7a5a12; }
     .tph-coach-head.tph-turn { background: #1e7d51 !important; }
     .tph-turn-flag { color: #d6ffe9 !important; font-weight: bold; }
 
@@ -4228,19 +4354,32 @@
   }
 
   function renderTurnCue() {
-    const on = !!STORE.settings.turnCues && isHeroTurn();
-    const existing = document.querySelector('.tph-turn-glow');
+    // Two states, deliberately different in strength:
+    //   'turn' — green, pulsing. Act now.
+    //   'next' — amber, static. You are one seat away; look up.
+    // A static "next" cue matters: two pulsing states would compete, and the
+    // point of the second one is a heads-up, not an alarm.
+    let state = null;
+    if (STORE.settings.turnCues) {
+      if (isHeroTurn()) state = 'turn';
+      else if (STORE.settings.nextToActCue && isHeroNextToAct()) state = 'next';
+    }
 
-    if (on && !existing) {
-      const el = document.createElement('div');
-      el.className = 'tph-turn-glow';
-      document.body.appendChild(el);
-    } else if (!on && existing) {
+    const existing = document.querySelector('.tph-turn-glow');
+    if (state) {
+      const el = existing || document.createElement('div');
+      el.className = 'tph-turn-glow tph-glow-' + state;
+      if (!existing) document.body.appendChild(el);
+    } else if (existing) {
       existing.remove();
     }
 
+    const on = state === 'turn';
     const gear = document.querySelector('.tph-gear');
-    if (gear) gear.classList.toggle('tph-turn', on);
+    if (gear) {
+      gear.classList.toggle('tph-turn', on);
+      gear.classList.toggle('tph-next', state === 'next');
+    }
     const head = document.querySelector('.tph-coach-head');
     if (head) head.classList.toggle('tph-turn', on);
 
@@ -4432,10 +4571,10 @@
         ${norm != null ? `<i class="tph-bar-tick" style="left:${clamp(norm)}%"></i>` : ''}
       </div>`;
 
-    return `<tr>
-      <td>${escapeHtml(label)}</td>
+    return `<tr class="${cls ? 'tph-row-' + dev.level : ''}">
+      <td class="tph-stat-l">${escapeHtml(label)}</td>
       <td class="tph-stat-v ${cls}"><b>${fmtPct(rawValue)}</b>${arrow}${delta}</td>
-      <td class="tph-stat-n">${norm != null ? norm.toFixed(0) + '%' : '—'}${bar}</td>
+      <td class="tph-stat-n">${bar}<span class="tph-stat-norm">${norm != null ? norm.toFixed(0) + '%' : '—'}</span></td>
     </tr>`;
   }
 
@@ -4451,8 +4590,7 @@
   function buildRangeHtml(p) {
     const all = shownRange(p, 'all');
     if (!all.length) {
-      return '<i>No showdowns seen yet. This fills in when they reveal at showdown — '
-        + 'hands that end in a fold tell you nothing about what they held.</i>';
+      return '<i>No showdowns yet. Fills in when they reveal at showdown.</i>';
     }
     const total = all.reduce((s, e) => s + e.n, 0);
 
@@ -4466,12 +4604,11 @@
         + '</div></div>';
     };
 
-    return `<div class="tph-range-total">${total} showdown${total === 1 ? '' : 's'} recorded`
-      + `${total < 8 ? ' — too few to read as a range yet, but each one is real evidence.' : '.'}</div>`
-      + group('raised', 'When they raised preflop', '')
-      + group('called', 'When they called or limped', '')
-      + `<div class="tph-stat-legend">Only hands shown at showdown appear here. A pot that ends in a `
-      + `fold reveals nothing, so this is a floor on their range, never the whole of it.</div>`;
+    return `<div class="tph-range-total">${total} showdown${total === 1 ? '' : 's'}`
+      + `${total < 8 ? ' — thin sample' : ''}</div>`
+      + group('raised', 'Raised preflop', '')
+      + group('called', 'Called / limped', '')
+      + `<div class="tph-stat-legend">Showdowns only — a floor on their range, not all of it.</div>`;
   }
 
   function renderPlayerPanel() {
@@ -4511,36 +4648,31 @@
       body.innerHTML = `
         <table class="tph-stats">
           <tr><th>Stat</th><th>Them</th><th>Pool</th></tr>
-          <tr><td>Hands</td><td><b>${p.hands}</b></td><td class="tph-stat-n">${p.hands < STORE.settings.minHands ? 'low sample' : ''}</td></tr>
+          <tr><td class="tph-stat-l">Hands</td><td class="tph-stat-v"><b>${p.hands}</b></td><td class="tph-stat-n">${p.hands < STORE.settings.minHands ? '<span class="tph-stat-norm">low</span>' : ''}</td></tr>
           ${statRow('VPIP', r.vpip, s.vpip, 'vpip')}
           ${statRow('PFR', r.pfr, s.pfr, 'pfr')}
           ${statRow('3-Bet', r.threeBet, s.threeBet, 'threeBet')}
-          ${statRow('Fold to 3-Bet', r.foldTo3Bet, s.foldTo3Bet, 'foldTo3Bet')}
+          ${statRow('Fold v 3B', r.foldTo3Bet, s.foldTo3Bet, 'foldTo3Bet')}
           ${statRow('C-Bet', r.cbet, s.cbet, 'cbet')}
-          ${statRow('Fold to C-Bet', r.foldToCbet, s.foldToCbet, 'foldToCbet')}
-          ${statRow('Limp (of VPIP)', r.limpShareOfVpip, s.limpShareOfVpip, 'limpShareOfVpip')}
-          ${statRow('AFq (postflop)', r.afq, r.afq, null)}
+          ${statRow('Fold v CB', r.foldToCbet, s.foldToCbet, 'foldToCbet')}
+          ${statRow('Limp', r.limpShareOfVpip, s.limpShareOfVpip, 'limpShareOfVpip')}
+          ${statRow('AFq', r.afq, r.afq, null)}
           ${statRow('WTSD', r.wtsd, r.wtsd, null)}
-          <tr><td>Avg bet size</td><td><b>${r.avgBetPct != null ? r.avgBetPct.toFixed(0) + '%' : '—'}</b></td><td class="tph-stat-n">of pot</td></tr>
-          <tr><td colspan="3" class="tph-stat-legend">Bar is them; the tick is the pool average.
-            ▲▼ marks a deviation worth acting on. Colour uses a sample-adjusted
-            figure, so a handful of hands won't read as extreme. Pool figures are
-            borrowed, not measured here — check them against your own in the
-            players list.</td></tr>
-          <tr class="tph-stat-head"><td colspan="3"><b>By street</b> — aggression / fold</td></tr>
-          ${POSTFLOP_STREETS.map((s) => `<tr><td>${s[0].toUpperCase() + s.slice(1)}</td>`
-            + `<td class="tph-stat-v">${fmtPct(r.byStreet[s].afq)} / ${fmtPct(r.byStreet[s].foldPct)}</td>`
-            + `<td class="tph-stat-n">${r.byStreet[s].actions} actions</td></tr>`).join('')}
-          <tr class="tph-stat-head"><td colspan="3"><b>Your results vs them</b></td></tr>
+          <tr><td class="tph-stat-l">Bet size</td><td class="tph-stat-v"><b>${r.avgBetPct != null ? r.avgBetPct.toFixed(0) + '%' : '—'}</b></td><td class="tph-stat-n"><span class="tph-stat-norm">of pot</span></td></tr>
+          <tr><td colspan="3" class="tph-stat-legend">Tick = pool average (reference figures, not measured here).</td></tr>
+          <tr class="tph-stat-head"><td colspan="3"><b>By street</b> — aggr / fold</td></tr>
+          ${POSTFLOP_STREETS.map((st) => `<tr><td class="tph-stat-l">${st[0].toUpperCase() + st.slice(1)}</td>`
+            + `<td class="tph-stat-v">${fmtPct(r.byStreet[st].afq)} / ${fmtPct(r.byStreet[st].foldPct)}</td>`
+            + `<td class="tph-stat-n"><span class="tph-stat-norm">${r.byStreet[st].actions} acts</span></td></tr>`).join('')}
+          <tr class="tph-stat-head"><td colspan="3"><b>Your P/L vs them</b></td></tr>
           <tr>
-            <td>P/L</td>
+            <td class="tph-stat-l">Result</td>
             <td class="tph-stat-v" style="color:${pl0(p) >= 0 ? '#7ed957' : '#ff6b6b'} !important">
               <b>${fmtBB(p.plBBEst)}</b></td>
-            <td class="tph-stat-n">${fmtSignedMoney(p.plChipsEst)}</td>
+            <td class="tph-stat-n" style="color:${pl0(p) >= 0 ? '#7ed957' : '#ff6b6b'} !important">${fmtSignedMoney(p.plChipsEst)}</td>
           </tr>
           ${!p.plBBEst && p.plChipsEst ? '<tr><td colspan="3" class="tph-stat-legend">'
-            + 'Big blinds only started accruing in v0.23.0, so the bb figure lags the '
-            + 'chip figure for a player tracked before then.</td></tr>' : ''}
+            + 'bb only tracked since v0.23.0.</td></tr>' : ''}
         </table>
       `;
     } else if (openPlayerTab === 'range') {
@@ -4729,6 +4861,7 @@
       <div style="opacity:.7;margin:2px 0 10px">Small line under each seat: archetype and VPIP/PFR/AFq. Tap one for full stats. Turn off to leave the table completely clear.</div>
       <h4>Your turn</h4>
       <label><input type="checkbox" class="tph-turncue-toggle" ${STORE.settings.turnCues ? 'checked' : ''}> Highlight the screen when it's your turn</label><br>
+      <label><input type="checkbox" class="tph-nextcue-toggle" ${STORE.settings.nextToActCue ? 'checked' : ''}> Amber warning when you're next to act</label><br>
       <label><input type="checkbox" class="tph-turnvib-toggle" ${STORE.settings.turnVibrate ? 'checked' : ''}> Also buzz once</label><br>
       <label><input type="checkbox" class="tph-turnsound-toggle" ${STORE.settings.turnSound ? 'checked' : ''}> Also play a chime</label>
       <button class="tph-test-chime">Test</button>
@@ -4800,6 +4933,11 @@
       STORE.settings.turnCues = e.target.checked;
       saveStore();
       renderTurnCue(); // clears the glow immediately rather than after the tick
+    });
+    panel.querySelector('.tph-nextcue-toggle').addEventListener('change', (e) => {
+      STORE.settings.nextToActCue = e.target.checked;
+      saveStore();
+      renderTurnCue();
     });
     panel.querySelector('.tph-turnvib-toggle').addEventListener('change', (e) => {
       STORE.settings.turnVibrate = e.target.checked;
@@ -5029,7 +5167,9 @@
     L.push('actionButtons by TEXT: ' + btns.length
       + (btns.length ? ' -> ' + btns.map((b) => JSON.stringify(squish(b.textContent, 20))).join(' ') : '')
       + (btns.length ? '' : '  <-- run this scan again ON YOUR TURN'));
-    L.push('isHeroTurn: ' + isHeroTurn());
+    L.push('activeSeat: ' + (activeSeatXid() || 'NO MATCH for ' + SELECTORS.seatActive));
+    L.push('seatRing: ' + ((seatRingXids() || []).join(',') || 'UNREADABLE'));
+    L.push('isHeroTurn: ' + isHeroTurn() + '  isHeroNextToAct: ' + isHeroNextToAct());
     const stacks = readAllStacks();
     L.push('stacks read: ' + Object.keys(stacks).length + ' -> '
       + (Object.keys(stacks).map((x) => x + '=' + fmtMoney(stacks[x])).join(' ') || '(none)'));
@@ -5330,6 +5470,8 @@
       HUD_VERSION,
       ACTION_BTN_RE,
       PREACTION_BTN_RE,
+      findActionButtons,
+      findTurnButtons,
 
       // --- stateful: reads or writes module-level STORE / heroXid ---
       // Exposed as accessors because STORE and heroXid are rebound, not

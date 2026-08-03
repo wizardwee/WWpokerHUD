@@ -56,4 +56,19 @@ const isPre = (s) => T.PREACTION_BTN_RE.test(s);
   t.ok(`"${label}" is not an action control`, !isAction(label));
 });
 
+// --- Why buttons alone can't decide whose turn it is -----------------------
+//
+// A live scan found all three of these on screen at once, while waiting:
+//   "Call Any / Check"  "Check"  "Check / Fold"
+// Two are filtered as pre-action by the "/" and "any" rule. The bare "Check"
+// is NOT, and it reads exactly like a real turn button — which is why the
+// screen glowed while waiting, and why isHeroTurn now prefers the seat's own
+// active___ marker and treats buttons as a fallback only.
+{
+  const observed = ['Call Any / Check', 'Check', 'Check / Fold'];
+  const surviving = observed.filter((l) => isAction(l) && !isPre(l));
+  t.eq('the pre-action filter alone leaves a false positive', surviving.length, 1);
+  t.eq('and it is the bare Check', surviving[0], 'Check');
+}
+
 process.exit(t.report());

@@ -97,7 +97,7 @@ t.eq('WTSD has no pool figure', POOL_AVG.wtsd, undefined);
 {
   const html = T.statRow('AFq', 55, 55, null);
   t.ok('unjudged row has no tick', !html.includes('tph-bar-tick'));
-  t.ok('unjudged row shows an em dash for the norm', html.includes('tph-stat-n">—'));
+  t.ok('unjudged row shows an em dash for the norm', html.includes('tph-stat-norm">—'));
   t.ok('unjudged row still draws a bar', html.includes('tph-bar-fill'));
   t.ok('unjudged row has no arrow', !html.includes('▲') && !html.includes('▼'));
 }
