@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.25.1
+// @version      0.26.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -16,6 +16,42 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 0.26.0 - Four features adopted from HopesG's HUD, plus the guard that makes
+ *          one of them safe.
+ *          RANGE TAB — what a player has actually SHOWN DOWN, split by whether
+ *            they raised or called preflop. This is the only direct evidence of
+ *            anyone's range in the HUD; everything else infers one from
+ *            frequencies. The raw material was already being captured and
+ *            thrown away: hand.shown held the revealed cards and nothing ever
+ *            read it. Showdowns are banked at SETTLEMENT, not when the reveal
+ *            line lands — at that point hand.winners is still empty, so every
+ *            showdown would have scored as a loss.
+ *          RECENT FORM — badges now read the last N hands (default 15) rather
+ *            than lifetime, falling back to lifetime while the window is thin.
+ *            A nit who has just started playing every hand is the read that
+ *            matters, and a lifetime average hides it. Stored as one digit per
+ *            hand per player, not hand records — the store already grows
+ *            unboundedly.
+ *          TILT — 🔥 on a player whose recent VPIP is 20+ points above THEIR OWN
+ *            baseline. Tilt is behavioural, not financial: a player stuck three
+ *            buy-ins who keeps playing their game is not tilting, and a station
+ *            who always plays 70% is not either. The baseline excludes the
+ *            recent window, so a long tilt stretch can't quietly raise the very
+ *            number it is measured against.
+ *          STAKES LADDER — blind level identifies the table, so the coach names
+ *            it and the tier. Two levels are corroborated by scans from this
+ *            device: $1M River Wizard and $2.5M Cat's Chance. Since you play
+ *            both, lastSeenBB now notices a table switch instead of carrying a
+ *            stale blind across.
+ *          The ladder also gates a real hazard it revealed. Torn can render
+ *            amounts as "181.00 BB" rather than "$181,000,000", and in that mode
+ *            every figure parses six orders of magnitude too small with nothing
+ *            looking broken. A blind under $10 is refused: P/L is withheld for
+ *            that session rather than written wrong, and Settings and the deep
+ *            scan say so.
+ *          applyHandResults now reads its sets defensively. A throw there loses
+ *            the entire hand including the P/L, so dropping one stat is by far
+ *            the better failure.
  * 0.25.1 - P/L shows both units everywhere. The players list column leads with
  *          big blinds and carries the chip figure underneath; the Stats tab has
  *          one P/L row with bb in the value column and chips in the pool column.
@@ -410,7 +446,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '0.25.1';
+  const HUD_VERSION = '0.26.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -560,6 +596,12 @@
     coachHidden: false,  // collapsed to a pill so it stops covering the table
     showBadges: true,    // per-seat tendency labels; off = table completely clear
     historyLimit: 200, // how many recent hands to keep for the History tab
+    // 'session' reads the last `sessionWindow` hands; 'lifetime' reads
+    // everything. Session is the default because how someone is playing NOW
+    // beats their long-run average — a nit who has just started 3-betting
+    // everything is the read that matters, and a lifetime figure hides it.
+    badgeMode: 'session',
+    sessionWindow: 15,
     heroName: '',      // YOUR Torn username. Without it P/L and position can't be attributed.
     equityIters: 1200, // Monte Carlo samples per equity estimate
     tableMax: 9,       // seats at a full table — the baseline equity is always
@@ -602,6 +644,18 @@
       // voluntary money, a habitual limper is the most exploitable seat here and
       // was previously indistinguishable from a caller.
       limpMade: 0,
+      // Hand class -> { seen, raised, won }. What they have actually turned up
+      // with at showdown, which is the only direct evidence of anyone's range.
+      // Showdowns are rare, so this stays small even over thousands of hands.
+      shownHands: {},
+      // Rolling window of the most recent hands, newest LAST. One small integer
+      // per hand: 0 = folded preflop, 1 = played, 2 = played and raised.
+      //
+      // Deliberately not a list of hand records — this is stored for every
+      // player forever, and the store already grows unboundedly (open finding
+      // #2). Three states in one digit is enough to recompute a session VPIP
+      // and PFR, which is all the session badge and tilt detection need.
+      recent: [],
       plChipsEst: 0,
       // Same estimate as plChipsEst, in big blinds. Accumulated at hand time
       // because that is the only point the blind level is known — it cannot be
@@ -1099,6 +1153,87 @@
   // a different stake.
   let lastSeenBB = 0;
 
+  // Torn's poker tables, by big blind. Blind levels are fixed per table, so the
+  // blind read off the log identifies which table you are sitting at.
+  //
+  // Taken from HopesG's HUD (MIT, GreasyFork 569933), which carries the ladder
+  // as data. Not independently verified, but two levels are corroborated by
+  // scans from this device: $1,000,000 (River Wizard) and $2,500,000 (Cat's
+  // Chance). An unknown level is reported rather than treated as an error —
+  // Torn adds tables, and this list will go stale before the code does.
+  const TORN_STAKES = {
+    10: 'Newbie Corner', 25: 'Hobo Holdem', 50: 'Broke Jokes', 100: '8-bit',
+    250: 'Sprinkles', 500: 'E-asy Street', 1000: 'Gatling Gun', 2500: 'Quickdraw',
+    5000: 'Tight Knit', 10000: 'Six of the Best', 25000: 'Ballsy',
+    50000: 'Boom or Bust', 100000: "Old 'n Slow", 250000: 'Pound It',
+    500000: 'Old Folks Home', 1000000: 'River Wizard', 2500000: "Cat's Chance",
+    10000000: 'High Rollers', 25000000: 'Fire Pit', 100000000: 'Oligarch',
+  };
+
+  // The smallest real blind on Torn. Anything below this is not a stake.
+  //
+  // This is the guard against Torn's BB DISPLAY MODE, which renders amounts as
+  // "181.00 BB" rather than "$181,000,000". In that mode every amount parses to
+  // a number six or more orders of magnitude too small, and nothing looks
+  // broken — the figures are simply tiny. Refusing an implausible blind stops a
+  // whole session of corrupted P/L from being written, at the cost of showing
+  // no P/L for that session, which is the right trade.
+  const MIN_PLAUSIBLE_BB = 10;
+
+  // Record the blind level for a hand, and notice when it changes.
+  //
+  // lastSeenBB exists to price a hand whose blind line was missed. It is only
+  // safe while you stay at one table — the scans from this device show play at
+  // two different stakes, so a table switch is a real event, not a theoretical
+  // one. Carrying $2.5M forward onto a $1M table would misprice every hand
+  // until the next blind line landed.
+  function noteBlindLevel(hand, amt) {
+    if (!plausibleBB(amt)) {
+      // Too small to be a real Torn stake. Don't store it, don't carry it, and
+      // don't let it price anything.
+      bbDisplayModeSuspected = true;
+      return;
+    }
+    bbDisplayModeSuspected = false;
+    if (lastSeenBB && amt !== lastSeenBB) currentTableBB = null; // switched tables
+    hand.bbAmount = amt;
+    lastSeenBB = amt;
+    currentTableBB = amt;
+  }
+
+  let currentTableBB = null;
+
+  function tableNameForBB(bb) { return TORN_STAKES[bb] || null; }
+
+  // "Cat's Chance ($2.5M/hand · Mid)" — or an honest label for a level that
+  // isn't in the ladder, since Torn adds tables.
+  function tableLabel(bb) {
+    if (!plausibleBB(bb)) return null;
+    const name = tableNameForBB(bb);
+    const tier = stakeTierForBB(bb);
+    return `${name || 'Unknown table'} · ${fmtMoney(bb)} BB${tier ? ' · ' + tier : ''}`;
+  }
+
+  function stakeTierForBB(bb) {
+    if (!bb) return null;
+    if (bb <= 500) return 'Nano';
+    if (bb <= 50000) return 'Low';
+    if (bb <= 999999) return 'Mid';
+    if (bb <= 9999999) return 'High';
+    return 'Elite';
+  }
+
+  // Is this a blind level we can believe? Used before anything is stored in
+  // big blinds, so a display-mode session can't poison the win rate.
+  function plausibleBB(bb) {
+    return typeof bb === 'number' && isFinite(bb) && bb >= MIN_PLAUSIBLE_BB;
+  }
+
+  // Set when a parsed blind is too small to be real, i.e. almost certainly BB
+  // display mode. Surfaced in Settings and the deep scan rather than silently
+  // dropping data.
+  let bbDisplayModeSuspected = false;
+
   // Torn game ids opened this session, newest last. Bounded because only ids
   // still visible in the log can ever be re-read, and the log holds a handful of
   // hands at most.
@@ -1117,7 +1252,8 @@
       playersIn: new Set(dealtIn), // mutable — shrinks as players fold, used for opportunity counts
       winners: [],             // {xid, amount}[] — supports split pots, applied at hand end
       actions: [],             // {x,a,amt,s}[] — replayable action log for the History tab
-      shown: {},               // xid -> cards revealed at showdown
+      shown: {},               // xid -> cards revealed at showdown, as display text
+      shownCards: {},          // xid -> parsed [{rank,suit},{rank,suit}] for range tracking
       sbXid: null,
       bbXid: null,
       actionOrder: [],         // first-to-act order preflop, used to derive positions
@@ -1472,7 +1608,7 @@
       } else {
         hand.bbXid = xid;
         // The blind level, and the unit everything else can be expressed in.
-        if (amt > 0) { hand.bbAmount = amt; lastSeenBB = amt; }
+        if (amt > 0) noteBlindLevel(hand, amt);
       }
       hand.playersIn.add(xid);
       return;
@@ -1584,6 +1720,11 @@
       const p = getPlayer(xid);
       p.wtsd += 1;
       hand.shown[xid] = squish(m[2], 40);
+      // Parsed cards kept separately and banked at SETTLEMENT, not here: at this
+      // point hand.winners is still empty (the "wins" lines come after the
+      // reveals), so recording now would score every showdown as a loss.
+      const revealed = parseCardsFromText(m[2]).slice(0, 2);
+      if (revealed.length === 2) hand.shownCards[xid] = revealed;
       logAction(hand, xid, 'shows', 0);
       saveStore();
       return;
@@ -1720,7 +1861,17 @@
     // "Hands observed" denominator uses who was dealt in at hand start, not just
     // who ended up contributing chips — someone who folds preflop with no money
     // in yet still counts as a hand where they didn't VPIP.
-    hand.dealtInXids.forEach((xid) => { getPlayer(xid).hands += 1; });
+    // Defensive reads: a throw anywhere in applyHandResults loses the whole
+    // hand, including the P/L. A hand from freshHandState always has these, but
+    // a replayed or hand-edited record may not, and dropping a stat is a far
+    // better failure than dropping the settlement.
+    const inSet = (s, x) => !!(s && typeof s.has === 'function' && s.has(x));
+
+    hand.dealtInXids.forEach((xid) => {
+      const p = getPlayer(xid);
+      p.hands += 1;
+      pushRecent(p, inSet(hand.countedPfr, xid) ? 2 : inSet(hand.countedVpip, xid) ? 1 : 0);
+    });
     if (heroXid && hand.dealtInXids.has(heroXid)) STORE.hero.hands += 1;
     touchSession(0, heroXid && hand.dealtInXids.has(heroXid));
 
@@ -1748,7 +1899,11 @@
         // whether you are beating the game, and a chip figure cannot be
         // converted afterwards because the blind level isn't stored per hand in
         // older records. Convert now, or not at all.
-        const bb = hand.bbAmount || lastSeenBB;
+        // plausibleBB gates this: in BB display mode every amount parses tiny,
+        // and pricing a hand off a bogus blind writes a permanently wrong
+        // win rate. Better to record chips only.
+        const rawBB = hand.bbAmount || lastSeenBB;
+        const bb = plausibleBB(rawBB) ? rawBB : 0;
         const heroDeltaBB = bb > 0 ? heroDelta / bb : 0;
         if (bb > 0) {
           STORE.hero.netBB += heroDeltaBB;
@@ -1790,6 +1945,12 @@
         }
       }
     }
+
+    // Banked here, after winners are known, so `won` is right and so a hand
+    // that never reached settlement doesn't pollute the range.
+    Object.keys(hand.shownCards || {}).forEach((xid) => {
+      noteShowdown(xid, hand.shownCards[xid], hand);
+    });
 
     recordHandHistory(hand);
     saveStore();
@@ -2375,6 +2536,116 @@
       avgBetPct: p.betSizeCount ? (p.betSizePctSum / p.betSizeCount) : null,
       byStreet,
     };
+  }
+
+  // Two cards -> the canonical hand class used everywhere else in this file:
+  // "AA", "AKs", "AKo". Higher rank first, so AK and KA are one class.
+  //
+  // This is what turns a showdown into a data point. Torn writes revealed cards
+  // as "reveals [9♥, 7♠] (Two Pairs: Nines and Sevens)"; parseCardsFromText
+  // already handles the unicode suits, and everything after the bracket is
+  // Torn's own hand description, which is ignored — it describes the made hand,
+  // not the holding.
+  function handClassFromCards(cards) {
+    if (!cards || cards.length < 2) return null;
+    const [a, b] = cards;
+    const ia = RANKS.indexOf(a.rank);
+    const ib = RANKS.indexOf(b.rank);
+    if (ia < 0 || ib < 0) return null;
+    const hi = ia >= ib ? a : b;
+    const lo = ia >= ib ? b : a;
+    if (hi.rank === lo.rank) return hi.rank + lo.rank;
+    return hi.rank + lo.rank + (hi.suit === lo.suit ? 's' : 'o');
+  }
+
+  // Record one showdown against a player.
+  //
+  // `raised` splits the range by what they did preflop, which is the whole
+  // point: "what do they turn up with when they RAISE" and "when they just
+  // call" are two different ranges, and averaging them describes neither.
+  function noteShowdown(xid, cards, hand) {
+    const cls = handClassFromCards(cards);
+    if (!cls) return;
+    const p = getPlayer(xid);
+    if (!p.shownHands || typeof p.shownHands !== 'object') p.shownHands = {};
+    const e = p.shownHands[cls] || (p.shownHands[cls] = { seen: 0, raised: 0, won: 0 });
+    e.seen += 1;
+    if (hand && hand.countedPfr && typeof hand.countedPfr.has === 'function'
+        && hand.countedPfr.has(xid)) e.raised += 1;
+    if (hand && Array.isArray(hand.winners) && hand.winners.some((w) => w.xid === xid)) e.won += 1;
+  }
+
+  // Everything a player has shown down, newest counts first. Optionally split
+  // by preflop action so the caller can ask "what do they raise with".
+  function shownRange(p, mode) {
+    const src = (p && p.shownHands) || {};
+    const out = [];
+    Object.keys(src).forEach((cls) => {
+      const e = src[cls] || {};
+      const n = mode === 'raised' ? (e.raised || 0)
+        : mode === 'called' ? Math.max(0, (e.seen || 0) - (e.raised || 0))
+          : (e.seen || 0);
+      if (n > 0) out.push({ cls, n, won: e.won || 0, seen: e.seen || 0 });
+    });
+    out.sort((a, b) => b.n - a.n || a.cls.localeCompare(b.cls));
+    return out;
+  }
+
+  // The window is capped above the largest sensible sessionWindow so the
+  // setting can be raised without the stored history being too short to serve
+  // it. Nothing reads more than sessionWindow entries.
+  const RECENT_MAX = 40;
+
+  function pushRecent(p, code) {
+    if (!Array.isArray(p.recent)) p.recent = [];
+    p.recent.push(code);
+    if (p.recent.length > RECENT_MAX) p.recent.splice(0, p.recent.length - RECENT_MAX);
+  }
+
+  // VPIP/PFR over the last `n` hands only. Null when the window is too thin to
+  // say anything — the caller falls back to lifetime rather than showing a
+  // number built from three hands.
+  function sessionRates(p, n) {
+    const win = (Array.isArray(p.recent) ? p.recent : []).slice(-Math.max(1, n));
+    if (!win.length) return null;
+    const played = win.filter((c) => c >= 1).length;
+    const raised = win.filter((c) => c >= 2).length;
+    return {
+      hands: win.length,
+      vpip: (100 * played) / win.length,
+      pfr: (100 * raised) / win.length,
+    };
+  }
+
+  // Tilt is BEHAVIOURAL: a player is tilting when they start playing differently
+  // from how they normally play. It is not "they are losing" — losing money is
+  // not tilt, and a player can be stuck three buy-ins and still play their game.
+  // Measuring the loss would flag the wrong people.
+  //
+  // So this compares a player's recent window against THEIR OWN lifetime
+  // baseline, not against the pool. A nit who opens up to 45% VPIP is tilting;
+  // a station sitting at 70% forever is not, that is simply who they are.
+  const TILT_MIN_RECENT = 10;    // below this the window is noise
+  const TILT_MIN_LIFETIME = 30;  // below this there is no baseline to deviate from
+  const TILT_VPIP_JUMP = 20;     // percentage points above their own norm
+
+  // Returns { jump, recent, baseline } or null.
+  function tiltRead(p) {
+    if (!p || p.hands < TILT_MIN_LIFETIME) return null;
+    const win = sessionRates(p, STORE.settings.sessionWindow || 15);
+    if (!win || win.hands < TILT_MIN_RECENT) return null;
+
+    // The baseline excludes the recent window, so a long tilt stretch can't
+    // quietly raise the very number it is being measured against.
+    const priorHands = p.hands - win.hands;
+    const priorVpip = priorHands > 0
+      ? (100 * (p.vpip - (win.vpip / 100) * win.hands)) / priorHands
+      : null;
+    if (priorVpip == null || priorVpip < 0) return null;
+
+    const jump = win.vpip - priorVpip;
+    if (jump < TILT_VPIP_JUMP) return null;
+    return { jump, recent: win.vpip, baseline: priorVpip, hands: win.hands };
   }
 
   // ===========================================================================
@@ -3328,7 +3599,10 @@
     // stating it beats leaving it unmodelled. Only shown when at least two
     // stacks are readable, since "effective" is meaningless from one.
     const eff = effectiveStack(hand);
-    const bb = hand.bbAmount || lastSeenBB;
+    const rawBB2 = hand.bbAmount || lastSeenBB;
+    const bb = plausibleBB(rawBB2) ? rawBB2 : 0;
+    const table = tableLabel(bb);
+    if (table) out.push(`<span style="opacity:.7">${escapeHtml(table)}</span>`);
     if (eff != null) {
       const effBB = bb > 0 ? eff / bb : null;
       const depth = effBB != null ? ` (<b>${effBB.toFixed(0)}bb</b>)` : '';
@@ -3505,6 +3779,7 @@
       max-width: 140px; overflow: hidden; }
     .tph-badge b { color: #ffc94d !important; font-weight: 700; }
     .tph-badge .tph-badge-dim { color: #9fb0bf !important; }
+    .tph-badge .tph-badge-tilt { margin-right: 2px; }
     /* background/color pinned: we inject into Torn's page, so an inherited or
        lower-specificity colour can be overridden by their stylesheet and leave
        dark text on a dark panel. */
@@ -3560,6 +3835,17 @@
        same colour, just quieter. */
     .tph-pl-sub { font-size: 10px; opacity: .7; margin-top: 1px; white-space: nowrap;
                   color: inherit !important; }
+    /* Range tab. Every element here declares its own colour — pinTextColor
+       skips tph- classes, so anything left unstyled gets darkened by Torn. */
+    .tph-range-total { color: #f2f4f6 !important; margin-bottom: 8px; }
+    .tph-range-group { margin-bottom: 10px; }
+    .tph-range-group b { color: #f2f4f6 !important; }
+    .tph-range-note { color: #8d959c !important; font-size: 11px; }
+    .tph-range-list { margin-top: 5px; display: flex; flex-wrap: wrap; gap: 4px; }
+    .tph-range-hand { color: #cfe3ff !important; background: #26303a; border: 1px solid #3b4956;
+                      border-radius: 3px; padding: 2px 5px; font-size: 12px;
+                      font-family: ui-monospace, Menlo, monospace; }
+    .tph-range-hand sub { color: #8fa6bd !important; font-size: 9px; margin-left: 1px; }
     .tph-ptable { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12px; }
     .tph-ptable th { text-align: left; opacity: 0.6; font-weight: normal; border-bottom: 1px solid #444; padding: 3px 4px; }
     .tph-ptable td { padding: 6px 4px; border-bottom: 1px solid #2a2a2e; }
@@ -3714,6 +4000,9 @@
   // seat sits right at the bottom edge.
   const BADGE_HEIGHT_PX = 14;
 
+  // Below this the session window is too thin to prefer over lifetime.
+  const SESSION_BADGE_MIN = 6;
+
   function renderBadges() {
     document.querySelectorAll('.tph-badge').forEach((el) => el.remove());
     if (!STORE.settings.showBadges) return;
@@ -3732,7 +4021,16 @@
       badge.style.top = Math.min(Math.max(0, rect.bottom + 1), maxTop) + 'px';
       badge.style.left = Math.max(0, rect.left) + 'px';
       const label = player ? classify(player) : 'Unrated';
+      // In session mode the badge shows the last `sessionWindow` hands, which is
+      // how they are playing NOW. It falls back to lifetime whenever the window
+      // is too thin to mean anything, so a player you have just sat down with
+      // still reads off everything you know about them.
+      const sess = player && STORE.settings.badgeMode === 'session'
+        ? sessionRates(player, STORE.settings.sessionWindow || 15) : null;
+      const useSession = !!(sess && sess.hands >= SESSION_BADGE_MIN);
       const r = player ? computeRates(player) : {};
+      const shown = useSession ? sess : r;
+      const tilt = player ? tiltRead(player) : null;
       // Always show a TYPE, never just a hand count. Below minHands `classify`
       // returns "Unrated", which told you nothing about the player — the read is
       // the point of the badge. Show the provisional archetype with a "?" so it
@@ -3742,9 +4040,15 @@
         : (label === 'Unrated' ? classifyProvisional(player) + '?' : label);
       badge.innerHTML = hands === 0
         ? `<b>new</b>`
-        : `<b>${type}</b> <span class="tph-badge-dim">${fmtNum(r.vpip)}/${fmtNum(r.pfr)}/${fmtNum(r.afq)}</span>`;
-      badge.title = `${playerDisplayName(xid)} — ${hands} hand(s) seen. VPIP/PFR/AFq.`
+        : `${tilt ? '<span class="tph-badge-tilt">🔥</span>' : ''}<b>${type}</b> `
+          + `<span class="tph-badge-dim">${useSession ? 'L' + sess.hands + ' ' : ''}`
+          + `${fmtNum(shown.vpip)}/${fmtNum(shown.pfr)}${useSession ? '' : '/' + fmtNum(r.afq)}</span>`;
+      badge.title = `${playerDisplayName(xid)} — ${hands} hand(s) seen. `
+        + (useSession
+          ? `Showing the last ${sess.hands} hands (VPIP/PFR). Lifetime: ${fmtNum(r.vpip)}/${fmtNum(r.pfr)}/${fmtNum(r.afq)}.`
+          : 'VPIP/PFR/AFq over everything seen.')
         + (label === 'Unrated' && hands > 0 ? ` "?" = provisional, under the ${STORE.settings.minHands}-hand minimum.` : '')
+        + (tilt ? ` 🔥 Playing ${tilt.jump.toFixed(0)}pp looser than their own norm over the last ${tilt.hands} hands.` : '')
         + ' Tap for full stats.';
       badge.addEventListener('click', () => openPlayerPanel(xid));
       document.body.appendChild(badge);
@@ -3883,6 +4187,41 @@
     </tr>`;
   }
 
+  // What this player has actually turned up with at showdown.
+  //
+  // This is the only DIRECT evidence of anyone's range in the whole HUD —
+  // everything else infers a range from frequencies. It is also the sparsest:
+  // showdowns are rare, so this stays honest about sample size rather than
+  // drawing a confident-looking grid from four hands.
+  //
+  // Split by preflop action because "what they raise with" and "what they call
+  // with" are different ranges, and averaging them describes neither.
+  function buildRangeHtml(p) {
+    const all = shownRange(p, 'all');
+    if (!all.length) {
+      return '<i>No showdowns seen yet. This fills in when they reveal at showdown — '
+        + 'hands that end in a fold tell you nothing about what they held.</i>';
+    }
+    const total = all.reduce((s, e) => s + e.n, 0);
+
+    const group = (mode, title, note) => {
+      const rows = shownRange(p, mode);
+      if (!rows.length) return '';
+      const n = rows.reduce((s, e) => s + e.n, 0);
+      return `<div class="tph-range-group"><b>${title}</b> <span class="tph-range-note">${n} showdown${n === 1 ? '' : 's'}${note}</span><div class="tph-range-list">`
+        + rows.map((e) => `<span class="tph-range-hand" title="${escapeHtml(e.cls)}: shown ${e.n}×, won ${e.won} of ${e.seen}">`
+          + `${escapeHtml(e.cls)}${e.n > 1 ? `<sub>${e.n}</sub>` : ''}</span>`).join('')
+        + '</div></div>';
+    };
+
+    return `<div class="tph-range-total">${total} showdown${total === 1 ? '' : 's'} recorded`
+      + `${total < 8 ? ' — too few to read as a range yet, but each one is real evidence.' : '.'}</div>`
+      + group('raised', 'When they raised preflop', '')
+      + group('called', 'When they called or limped', '')
+      + `<div class="tph-stat-legend">Only hands shown at showdown appear here. A pot that ends in a `
+      + `fold reveals nothing, so this is a floor on their range, never the whole of it.</div>`;
+  }
+
   function renderPlayerPanel() {
     const p = openPlayerXid ? getPlayer(openPlayerXid) : null;
     const r = p ? computeRates(p) : null;          // raw — what was observed
@@ -3896,6 +4235,7 @@
       <h3>${escapeHtml(p.name)} — ${classify(p)}</h3>
       <div class="tph-tabs">
         <div class="tph-tab ${openPlayerTab === 'stats' ? 'active' : ''}" data-tab="stats">Stats</div>
+        <div class="tph-tab ${openPlayerTab === 'range' ? 'active' : ''}" data-tab="range">Range</div>
         <div class="tph-tab ${openPlayerTab === 'report' ? 'active' : ''}" data-tab="report">Report</div>
         <div class="tph-tab ${openPlayerTab === 'history' ? 'active' : ''}" data-tab="history">History</div>
         <div class="tph-tab ${openPlayerTab === 'notes' ? 'active' : ''}" data-tab="notes">Notes</div>
@@ -3951,6 +4291,8 @@
             + 'chip figure for a player tracked before then.</td></tr>' : ''}
         </table>
       `;
+    } else if (openPlayerTab === 'range') {
+      body.innerHTML = buildRangeHtml(p);
     } else if (openPlayerTab === 'report') {
       const text = buildReport(openPlayerXid);
       body.innerHTML = `<pre style="white-space:pre-wrap;color:#f2f4f6 !important;background:transparent !important">`
@@ -4119,8 +4461,19 @@
       <div style="opacity:.7;margin:2px 0 6px">Needed to attribute profit/loss and work out your position.</div>
       ${heroProblem() ? `<div class="tph-warn">⚠ ${escapeHtml(heroProblem())}</div>` : '<div class="tph-ok">✓ Matched to your seat — profit/loss is being attributed.</div>'}
       <label>Min hands before rating: <input type="number" class="tph-min-hands" value="${STORE.settings.minHands}" style="width:60px"></label><br><br>
+      ${bbDisplayModeSuspected ? '<div class="tph-warn">⚠ The blind level read from the log is too small to be a real Torn stake. '
+        + 'Torn is probably set to show amounts in big blinds rather than cash — switch it back to cash, or P/L stays unrecorded '
+        + 'rather than being written wrong.</div>' : ''}
+      ${plausibleBB(lastSeenBB) ? `<div style="opacity:.7;margin:2px 0 8px">Table: ${escapeHtml(tableLabel(lastSeenBB))}</div>` : ''}
       <h4>Seat labels</h4>
       <label><input type="checkbox" class="tph-badge-toggle" ${STORE.settings.showBadges ? 'checked' : ''}> Show tendency labels on seats</label>
+      <div style="margin:6px 0">
+        <label><input type="radio" name="tph-bm" class="tph-bm" value="session" ${STORE.settings.badgeMode === 'session' ? 'checked' : ''}> Recent form</label>
+        &nbsp;<label><input type="radio" name="tph-bm" class="tph-bm" value="lifetime" ${STORE.settings.badgeMode !== 'session' ? 'checked' : ''}> Lifetime</label>
+        &nbsp;<label>over <input type="number" class="tph-sw" min="5" max="40" value="${STORE.settings.sessionWindow}" style="width:48px"> hands</label>
+      </div>
+      <div style="opacity:.7;margin:2px 0 10px">Recent form shows how they are playing NOW and falls back to lifetime
+        until enough hands are seen. 🔥 marks a player running ${TILT_VPIP_JUMP}+ points looser than their own norm.</div>
       <div style="opacity:.7;margin:2px 0 10px">Small line under each seat: archetype and VPIP/PFR/AFq. Tap one for full stats. Turn off to leave the table completely clear.</div>
       <h4>GTO coach</h4>
       <label><input type="checkbox" class="tph-coach-toggle" ${STORE.settings.coachHidden ? '' : 'checked'}> Show coach panel</label><br>
@@ -4163,6 +4516,20 @@
     panel.querySelector('.tph-min-hands').addEventListener('change', (e) => {
       STORE.settings.minHands = parseInt(e.target.value, 10) || 20;
       saveStore();
+    });
+    panel.querySelectorAll('.tph-bm').forEach((el) => {
+      el.addEventListener('change', (e) => {
+        STORE.settings.badgeMode = e.target.value === 'session' ? 'session' : 'lifetime';
+        saveStore();
+        renderBadges();
+      });
+    });
+    panel.querySelector('.tph-sw').addEventListener('change', (e) => {
+      const n = parseInt(e.target.value, 10);
+      STORE.settings.sessionWindow = Math.min(RECENT_MAX, Math.max(5, isNaN(n) ? 15 : n));
+      e.target.value = STORE.settings.sessionWindow;
+      saveStore();
+      renderBadges();
     });
     panel.querySelector('.tph-badge-toggle').addEventListener('change', (e) => {
       STORE.settings.showBadges = e.target.checked;
@@ -4379,6 +4746,12 @@
     L.push('stacks read: ' + Object.keys(stacks).length + ' -> '
       + (Object.keys(stacks).map((x) => x + '=' + fmtMoney(stacks[x])).join(' ') || '(none)'));
     L.push('isPDA: ' + isPDA() + '  (flutter bridge: ' + (typeof window.flutter_inappwebview !== 'undefined') + ')');
+    L.push('table: ' + (tableLabel(lastSeenBB) || 'blind level not read yet')
+      + (bbDisplayModeSuspected ? '  <-- BB DISPLAY MODE SUSPECTED, P/L is being withheld' : ''));
+    const withShowdowns = Object.keys(STORE.players)
+      .filter((x) => STORE.players[x] && Object.keys(STORE.players[x].shownHands || {}).length).length;
+    L.push('showdown ranges: ' + withShowdowns + ' player(s) with at least one shown hand');
+    L.push('badgeMode: ' + STORE.settings.badgeMode + ' over ' + STORE.settings.sessionWindow + ' hands');
     L.push('');
 
     L.push('--- SEATS ---');
@@ -4629,6 +5002,22 @@
       deviation,
       statRow,
       plShort,
+      TORN_STAKES,
+      MIN_PLAUSIBLE_BB,
+      plausibleBB,
+      tableNameForBB,
+      stakeTierForBB,
+      tableLabel,
+      pushRecent,
+      sessionRates,
+      tiltRead,
+      RECENT_MAX,
+      TILT_VPIP_JUMP,
+      handClassFromCards,
+      noteShowdown,
+      shownRange,
+      buildRangeHtml,
+      parseCardsFromText,
       classify,
       classifyProvisional,
       observedPoolAverages,

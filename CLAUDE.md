@@ -355,6 +355,62 @@ attribution maths or the log parser, and both were fine — the deep scan showed
 zero unmatched lines. `heroXid: name:Wonkawee` was printed at the top of that
 same scan. **Read the scan header before theorising about the log patterns.**
 
+## Stakes, and the BB-display hazard (v0.26.0)
+
+`TORN_STAKES` maps blind level to table name, so the blind read off the log
+identifies the table. Two entries are corroborated by scans from this device —
+$1M River Wizard, $2.5M Cat's Chance — and **the user plays both**, so a table
+switch is a real event: `noteBlindLevel` notices a change rather than letting
+`lastSeenBB` carry a stale level onto a different table.
+
+**The hazard the ladder exists to catch:** Torn can render amounts as
+`181.00 BB` instead of `$181,000,000`. In that mode every parsed figure is six
+or more orders of magnitude too small and **nothing looks broken** — the numbers
+are simply tiny. `plausibleBB` refuses a blind under $10, so P/L is withheld for
+that session rather than written wrong, and `bbDisplayModeSuspected` surfaces it
+in Settings and the deep scan. Withholding is the right trade: a gap in the data
+is recoverable, a silently wrong win rate is not.
+
+## Session reads and tilt (v0.26.0)
+
+`player.recent` is a capped array of one digit per hand — `0` folded, `1`
+played, `2` played and raised. Deliberately **not** hand records: this is stored
+for every player forever and the store already grows unboundedly (open finding
+#2). Three states is all `sessionRates` needs.
+
+Badges default to `badgeMode: 'session'` over `sessionWindow: 15`, falling back
+to lifetime while the window is thin. How someone is playing *now* beats their
+long-run average — a nit who has just started 3-betting everything is the read
+that matters, and lifetime figures actively hide it.
+
+**`tiltRead` is behavioural, not financial.** It compares a player's recent VPIP
+against *their own* prior baseline, never against the pool and never against
+money lost. A player stuck three buy-ins who keeps playing their game is not
+tilting; a station who has always played 70% is not either. The baseline
+**excludes the recent window**, so a long tilt stretch can't quietly raise the
+number it is being measured against.
+
+## Showdown ranges (v0.26.0)
+
+`player.shownHands` maps hand class → `{seen, raised, won}`. It is the only
+**direct** evidence of anyone's range in the file; every other stat infers one
+from frequencies.
+
+The raw material was already being captured and discarded — `hand.shown` held
+the revealed cards and nothing ever read them. Before adding a data source,
+check whether it is already in the store; that is now twice this has happened.
+
+Two things to preserve:
+
+- **Bank at settlement, not at the reveal line.** When `shows` fires,
+  `hand.winners` is still empty (the `wins` lines come after), so recording
+  there scores every showdown as a loss.
+- **Split by preflop action.** "What they raise with" and "what they call with"
+  are different ranges; averaging them describes neither.
+
+The UI must keep saying showdowns are a **floor** on a range, never the whole of
+it — a pot that ends in a fold reveals nothing.
+
 ## Money formatting (v0.17.0)
 
 `fmtMoney` / `fmtSignedMoney` are the only places money is rendered. Torn poker
