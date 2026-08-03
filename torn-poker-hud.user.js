@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.25.0
+// @version      0.25.1
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -16,6 +16,16 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 0.25.1 - P/L shows both units everywhere. The players list column leads with
+ *          big blinds and carries the chip figure underneath; the Stats tab has
+ *          one P/L row with bb in the value column and chips in the pool column.
+ *          A player tracked before 0.23.0 has real chip P/L and a zero bb
+ *          figure, so there the chip figure is promoted to the top line and no
+ *          bb figure is shown — "+0.0bb" reads as "flat against them" rather
+ *          than "not measured yet", which is the opposite of the truth.
+ *          Also fixes two rows left over from the 3-column Stats table: the
+ *          "By street" and P/L headings still used colspan="2", so they and the
+ *          per-street rows were short a cell.
  * 0.25.0 - Stats are now read at a glance instead of being read. Every
  *          percentage in the Stats tab renders as a bar with a tick marking the
  *          pool average, plus a "Pool" column and ▲▼ when the deviation is worth
@@ -400,7 +410,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '0.25.0';
+  const HUD_VERSION = '0.25.1';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -3543,6 +3553,13 @@
     .tph-stat-legend { color: #8d959c !important; font-size: 10px; line-height: 1.4;
                        border-bottom: none !important; padding-top: 8px !important; }
     .tph-pool-row td { color: #8d959c !important; font-size: 11px; border-bottom: 1px solid #444; }
+    .tph-stat-head td { padding-top: 10px !important; color: #c3cad1 !important;
+                        border-bottom: 1px solid #444 !important; }
+    /* Secondary P/L unit under the primary one. Muted and inheriting the row's
+       win/loss colour would be wrong — it is the same figure, so it takes the
+       same colour, just quieter. */
+    .tph-pl-sub { font-size: 10px; opacity: .7; margin-top: 1px; white-space: nowrap;
+                  color: inherit !important; }
     .tph-ptable { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12px; }
     .tph-ptable th { text-align: left; opacity: 0.6; font-weight: normal; border-bottom: 1px solid #444; padding: 3px 4px; }
     .tph-ptable td { padding: 6px 4px; border-bottom: 1px solid #2a2a2e; }
@@ -3918,13 +3935,20 @@
             figure, so a handful of hands won't read as extreme. Pool figures are
             borrowed, not measured here — check them against your own in the
             players list.</td></tr>
-          <tr><td colspan="2" style="padding-top:6px"><b>By street</b> — aggression / fold</td></tr>
+          <tr class="tph-stat-head"><td colspan="3"><b>By street</b> — aggression / fold</td></tr>
           ${POSTFLOP_STREETS.map((s) => `<tr><td>${s[0].toUpperCase() + s.slice(1)}</td>`
-            + `<td>${fmtPct(r.byStreet[s].afq)} / ${fmtPct(r.byStreet[s].foldPct)}`
-            + `<span style="opacity:.6"> (${r.byStreet[s].actions} actions)</span></td></tr>`).join('')}
-          <tr><td colspan="2" style="padding-top:6px"><b>Your results vs them</b></td></tr>
-          <tr><td>Chips</td><td>${fmtSignedMoney(p.plChipsEst)}</td></tr>
-          <tr><td>Big blinds</td><td>${fmtBB(p.plBBEst)}</td></tr>
+            + `<td class="tph-stat-v">${fmtPct(r.byStreet[s].afq)} / ${fmtPct(r.byStreet[s].foldPct)}</td>`
+            + `<td class="tph-stat-n">${r.byStreet[s].actions} actions</td></tr>`).join('')}
+          <tr class="tph-stat-head"><td colspan="3"><b>Your results vs them</b></td></tr>
+          <tr>
+            <td>P/L</td>
+            <td class="tph-stat-v" style="color:${pl0(p) >= 0 ? '#7ed957' : '#ff6b6b'} !important">
+              <b>${fmtBB(p.plBBEst)}</b></td>
+            <td class="tph-stat-n">${fmtSignedMoney(p.plChipsEst)}</td>
+          </tr>
+          ${!p.plBBEst && p.plChipsEst ? '<tr><td colspan="3" class="tph-stat-legend">'
+            + 'Big blinds only started accruing in v0.23.0, so the bb figure lags the '
+            + 'chip figure for a player tracked before then.</td></tr>' : ''}
         </table>
       `;
     } else if (openPlayerTab === 'report') {
@@ -3982,14 +4006,19 @@
   // P/L and a zero bb figure, and colouring off bb would show them as flat.
   function pl0(p) { return p.plChipsEst || 0; }
 
-  // Big blinds are the comparable unit and the one to show — but plBBEst only
-  // began accruing in 0.23.0, so a player tracked before that has real chip P/L
-  // and a zero bb figure. Printing "+0.0bb" there would read as "flat against
-  // them" when it means "not measured yet". Fall back to chips instead.
+  // Both units, stacked: big blinds lead because they are comparable across
+  // stakes, chips underneath because that is what is actually sitting in front
+  // of you and what the table shows.
+  //
+  // plBBEst only began accruing in 0.23.0, so a player tracked before that has
+  // real chip P/L and a zero bb figure. Printing "+0.0bb" would read as "flat
+  // against them" rather than "not measured yet" — so in that case the chip
+  // figure is promoted to the top line and no bb figure is shown at all.
   function plShort(p) {
-    return (p.plBBEst && Math.abs(p.plBBEst) >= 0.05)
-      ? fmtBB(p.plBBEst)
-      : fmtSignedMoney(pl0(p));
+    const chips = fmtSignedMoney(pl0(p));
+    const hasBB = p.plBBEst && Math.abs(p.plBBEst) >= 0.05;
+    if (!hasBB) return `<b>${chips}</b>`;
+    return `<b>${fmtBB(p.plBBEst)}</b><div class="tph-pl-sub">${chips}</div>`;
   }
 
   function poolComparisonLine() {
@@ -4599,6 +4628,7 @@
       POOL_SPREAD,
       deviation,
       statRow,
+      plShort,
       classify,
       classifyProvisional,
       observedPoolAverages,

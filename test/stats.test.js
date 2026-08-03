@@ -135,6 +135,33 @@ const raiser = player({ hands: 100, vpip: 30, pfr: 28, limpMade: 1 });
 t.ok('a raiser limps a far smaller share of their VPIP',
   T.computeRates(raiser).limpShareOfVpip < lr.limpShareOfVpip);
 
+// --- P/L shown in both units ------------------------------------------------
+
+// Big blinds lead because they're comparable across stakes; chips go underneath
+// because that's what's actually in front of you.
+{
+  const both = T.plShort(player({ plChipsEst: 41000000, plBBEst: 16.4 }));
+  t.ok('big blinds lead', both.indexOf('16.4bb') < both.indexOf('$41M'));
+  t.ok('chips are shown too', both.includes('$41M'));
+  t.ok('the chip figure is the quiet one', both.includes('tph-pl-sub'));
+}
+
+// A player tracked before 0.23.0 has real chip P/L and a zero bb figure.
+// "+0.0bb" would read as "flat against them" rather than "not measured yet",
+// so the chip figure is promoted and no bb figure is shown at all.
+{
+  const legacy = T.plShort(player({ plChipsEst: -12500000, plBBEst: 0 }));
+  t.ok('chips are promoted when there is no bb data', legacy.includes('-$12.5M'));
+  t.ok('no misleading zero-bb figure', !legacy.includes('bb'));
+  t.ok('and no second line', !legacy.includes('tph-pl-sub'));
+}
+
+// A genuinely tiny bb figure is treated as absent for the same reason.
+{
+  const tiny = T.plShort(player({ plChipsEst: 5000, plBBEst: 0.01 }));
+  t.ok('a rounding-error bb figure is not shown', !tiny.includes('bb'));
+}
+
 // --- The WTSD anchor is gone ------------------------------------------------
 
 // It was mapped from the source's `wwsf` (won when saw flop), a different stat.
