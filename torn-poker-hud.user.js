@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.28.0
+// @version      0.29.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -16,6 +16,33 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 0.29.0 - Tilt watches YOU too, gets a big-loss trigger, and stops borrowing
+ *          the fire emoji.
+ *          - 🤮 is now tilt. 🔥 is a separate, new read: RUNNING HOT, someone
+ *            winning far more recent pots than the seat count makes likely.
+ *            Both can be true at once — steaming and getting there are
+ *            different questions.
+ *          - Self-tilt. Badges deliberately skip hero's seat, so the one player
+ *            the HUD could never warn about was you — the case where it is
+ *            worth most. The coach panel now carries the same read, since
+ *            hero's record accumulates exactly like anyone else's.
+ *          - Surfacing fixed. It used to be a bare emoji on the badge with the
+ *            explanation in a `title` tooltip, which a touchscreen cannot show.
+ *            Now in the players list, at the top of the Stats tab, and in the
+ *            coach — with the reason written out.
+ *          - A recent big pot loss (75bb+) LOWERS the tilt bar from 20pp to
+ *            12pp rather than triggering on its own. Losing money is not tilt:
+ *            a player stuck three buy-ins who keeps playing their game is not
+ *            tilting. But a big loss raises the prior that a VPIP spike IS tilt
+ *            rather than a run of playable cards, so less behavioural evidence
+ *            carries the same weight. The sting expires after 20 hands.
+ *          - The tilt window is capped at 15 hands regardless of the badge's
+ *            sessionWindow setting. Tilt is short-lived; read over 40 hands the
+ *            stretch blends back into normal play and the signal fades exactly
+ *            when it is truest.
+ *          `recent` now packs a "won" bit alongside the play state. Values
+ *          written before it existed are 0-2 and read correctly as "did not
+ *          win", so no migration was needed.
  * 0.28.0 - Stats panel fits the screen, and the turn cue knows whose turn it is.
  *          WIDTH — the Stats table now uses table-layout:fixed with explicit
  *          column widths, so a long label or a wide number can no longer push
@@ -507,7 +534,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '0.28.0';
+  const HUD_VERSION = '0.29.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -715,13 +742,19 @@
       // Showdowns are rare, so this stays small even over thousands of hands.
       shownHands: {},
       // Rolling window of the most recent hands, newest LAST. One small integer
-      // per hand: 0 = folded preflop, 1 = played, 2 = played and raised.
+      // per hand, used as a bitfield:
+      //   bits 0-1 : 0 folded preflop, 1 played, 2 played and raised
+      //   bit 2 (4): won the hand
       //
       // Deliberately not a list of hand records — this is stored for every
       // player forever, and the store already grows unboundedly (open finding
-      // #2). Three states in one digit is enough to recompute a session VPIP
-      // and PFR, which is all the session badge and tilt detection need.
+      // #2). Values written before the win bit existed are 0-2, which read
+      // correctly as "did not win", so no migration is needed.
       recent: [],
+      // Value of `hands` the last time this player lost a big pot. "Hands ago"
+      // is `hands - lastBigLossHand`, which needs no upkeep between hands.
+      // -1 means never.
+      lastBigLossHand: -1,
       plChipsEst: 0,
       // Same estimate as plChipsEst, in big blinds. Accumulated at hand time
       // because that is the only point the blind level is known — it cannot be
@@ -1939,25 +1972,39 @@
     // better failure than dropping the settlement.
     const inSet = (s, x) => !!(s && typeof s.has === 'function' && s.has(x));
 
+    // Winners are needed before the per-hand window is written, so the "won"
+    // bit can go in with the play state rather than needing a second pass.
+    const wonByXid = {};
+    if (hand.winners.length > 0) {
+      const unknown = hand.winners.filter((w) => !w.amount).length;
+      const fallbackShare = unknown ? Math.round(hand.pot / hand.winners.length) : 0;
+      hand.winners.forEach((w) => {
+        wonByXid[w.xid] = (wonByXid[w.xid] || 0) + (w.amount || fallbackShare);
+      });
+    }
+
+    const settleBB = plausibleBB(hand.bbAmount || lastSeenBB) ? (hand.bbAmount || lastSeenBB) : 0;
+
     hand.dealtInXids.forEach((xid) => {
       const p = getPlayer(xid);
       p.hands += 1;
-      pushRecent(p, inSet(hand.countedPfr, xid) ? 2 : inSet(hand.countedVpip, xid) ? 1 : 0);
+      const play = inSet(hand.countedPfr, xid) ? 2 : inSet(hand.countedVpip, xid) ? 1 : 0;
+      pushRecent(p, play | (wonByXid[xid] > 0 ? RECENT_WON : 0));
+
+      // A pot lost big enough to plausibly set someone off. Recorded against
+      // their own hand count so "how long ago" needs no upkeep between hands.
+      if (settleBB > 0) {
+        const net = (wonByXid[xid] || 0) - (hand.contributions[xid] || 0);
+        if (net / settleBB <= -BIG_LOSS_BB) p.lastBigLossHand = p.hands;
+      }
     });
     if (heroXid && hand.dealtInXids.has(heroXid)) STORE.hero.hands += 1;
     touchSession(0, heroXid && hand.dealtInXids.has(heroXid));
 
     if (hand.winners.length > 0) {
-      // If the log didn't print an amount, split the pot we tracked. Leaving it
-      // at 0 would score a WIN as losing everything the winner had contributed.
-      const unknown = hand.winners.filter((w) => !w.amount).length;
-      const fallbackShare = unknown ? Math.round(hand.pot / hand.winners.length) : 0;
-      const wonByXid = {};
-      hand.winners.forEach((w) => {
-        const amt = w.amount || fallbackShare;
-        wonByXid[w.xid] = (wonByXid[w.xid] || 0) + amt;
-      });
-
+      // wonByXid was built above, before the per-hand window was written — it
+      // carries the "did the log print an amount" fallback, which leaving at 0
+      // would score a WIN as losing everything the winner had contributed.
       const contributors = Object.keys(hand.contributions);
 
       if (heroXid) {
@@ -2744,25 +2791,42 @@
   // it. Nothing reads more than sessionWindow entries.
   const RECENT_MAX = 40;
 
+  // Bitfield layout for `recent`. See emptyPlayer.
+  const RECENT_PLAY_MASK = 3; // bits 0-1: fold / play / raise
+  const RECENT_WON = 4;       // bit 2
+
   function pushRecent(p, code) {
     if (!Array.isArray(p.recent)) p.recent = [];
     p.recent.push(code);
     if (p.recent.length > RECENT_MAX) p.recent.splice(0, p.recent.length - RECENT_MAX);
   }
 
+  function recentWindow(p, n) {
+    const w = (Array.isArray(p && p.recent) ? p.recent : []).slice(-Math.max(1, n));
+    return w.length ? w : null;
+  }
+
   // VPIP/PFR over the last `n` hands only. Null when the window is too thin to
   // say anything — the caller falls back to lifetime rather than showing a
   // number built from three hands.
   function sessionRates(p, n) {
-    const win = (Array.isArray(p.recent) ? p.recent : []).slice(-Math.max(1, n));
-    if (!win.length) return null;
-    const played = win.filter((c) => c >= 1).length;
-    const raised = win.filter((c) => c >= 2).length;
+    const win = recentWindow(p, n);
+    if (!win) return null;
+    const played = win.filter((c) => (c & RECENT_PLAY_MASK) >= 1).length;
+    const raised = win.filter((c) => (c & RECENT_PLAY_MASK) >= 2).length;
     return {
       hands: win.length,
       vpip: (100 * played) / win.length,
       pfr: (100 * raised) / win.length,
     };
+  }
+
+  // Share of the last `n` hands this player WON.
+  function sessionWinRate(p, n) {
+    const win = recentWindow(p, n);
+    if (!win) return null;
+    const won = win.filter((c) => (c & RECENT_WON) !== 0).length;
+    return { hands: win.length, won, winPct: (100 * won) / win.length };
   }
 
   // Tilt is BEHAVIOURAL: a player is tilting when they start playing differently
@@ -2776,24 +2840,80 @@
   const TILT_MIN_RECENT = 10;    // below this the window is noise
   const TILT_MIN_LIFETIME = 30;  // below this there is no baseline to deviate from
   const TILT_VPIP_JUMP = 20;     // percentage points above their own norm
+  // Tilt is a short-lived state. Reading it over more hands than this blends
+  // the tilt stretch back into normal play and the signal disappears exactly
+  // when it is most true, so the tilt window is capped independently of the
+  // badge's sessionWindow setting.
+  const TILT_WINDOW_MAX = 15;
 
-  // Returns { jump, recent, baseline } or null.
+  // A pot this size, lost, is the kind that actually sets someone off.
+  const BIG_LOSS_BB = 75;
+  // How long the sting lasts. Beyond this the loss is no longer plausibly
+  // driving the next decision.
+  const BIG_LOSS_MEMORY_HANDS = 20;
+  // With a recent big loss as corroboration, less behavioural evidence is
+  // needed to reach the same confidence — see the note in tiltRead.
+  const TILT_VPIP_JUMP_AFTER_LOSS = 12;
+
+  function tiltWindowSize() {
+    return Math.min(STORE.settings.sessionWindow || TILT_WINDOW_MAX, TILT_WINDOW_MAX);
+  }
+
+  // Hands since this player last lost a pot of BIG_LOSS_BB or more, or null.
+  function handsSinceBigLoss(p) {
+    if (!p || typeof p.lastBigLossHand !== 'number' || p.lastBigLossHand < 0) return null;
+    const ago = p.hands - p.lastBigLossHand;
+    return ago >= 0 && ago <= BIG_LOSS_MEMORY_HANDS ? ago : null;
+  }
+
+  // Returns { jump, recent, baseline, hands, sinceBigLoss } or null.
+  //
+  // A big recent loss LOWERS the bar rather than being required on its own,
+  // and that split is the whole design:
+  //
+  // - Losing money is not tilt. A player stuck three buy-ins who keeps playing
+  //   their game is not tilting, so a big loss alone flags nothing.
+  // - But a big loss raises the prior probability that a VPIP spike IS tilt
+  //   rather than a run of playable cards. With that corroboration, 12 points
+  //   of deviation carries the same weight 20 does without it.
+  //
+  // The baseline excludes the recent window, so a long tilt stretch cannot
+  // quietly raise the very number it is being measured against.
   function tiltRead(p) {
     if (!p || p.hands < TILT_MIN_LIFETIME) return null;
-    const win = sessionRates(p, STORE.settings.sessionWindow || 15);
+    const win = sessionRates(p, tiltWindowSize());
     if (!win || win.hands < TILT_MIN_RECENT) return null;
 
-    // The baseline excludes the recent window, so a long tilt stretch can't
-    // quietly raise the very number it is being measured against.
     const priorHands = p.hands - win.hands;
     const priorVpip = priorHands > 0
       ? (100 * (p.vpip - (win.vpip / 100) * win.hands)) / priorHands
       : null;
     if (priorVpip == null || priorVpip < 0) return null;
 
+    const sinceBigLoss = handsSinceBigLoss(p);
+    const threshold = sinceBigLoss != null ? TILT_VPIP_JUMP_AFTER_LOSS : TILT_VPIP_JUMP;
+
     const jump = win.vpip - priorVpip;
-    if (jump < TILT_VPIP_JUMP) return null;
-    return { jump, recent: win.vpip, baseline: priorVpip, hands: win.hands };
+    if (jump < threshold) return null;
+    return { jump, recent: win.vpip, baseline: priorVpip, hands: win.hands, sinceBigLoss };
+  }
+
+  // Running hot: winning far more of the recent hands than any seat count
+  // makes likely. Expectation is roughly 1/seats — about 11% nine-handed and
+  // 17% six-handed — so this threshold is 2-3x expectation whichever it is.
+  //
+  // Not the mirror of tilt. Tilt is relative to the player's own baseline
+  // because playing differently is what matters; running hot is absolute,
+  // because the point is simply that they are scooping pots.
+  const HEAT_MIN_RECENT = 8;
+  const HEAT_WIN_PCT = 35;
+
+  // Returns { winPct, won, hands } or null.
+  function heatRead(p) {
+    if (!p) return null;
+    const w = sessionWinRate(p, tiltWindowSize());
+    if (!w || w.hands < HEAT_MIN_RECENT) return null;
+    return w.winPct >= HEAT_WIN_PCT ? w : null;
   }
 
   // ===========================================================================
@@ -3741,6 +3861,29 @@
 
     if (heroTurn) out.push('<b>▶ Your turn.</b>');
 
+    // Hero gets the same read as everyone else. Badges deliberately skip your
+    // own seat, so without this the one player the HUD can never warn about is
+    // you — and that is the case where the warning is worth most.
+    //
+    // Hero's own record accumulates normally (dealtInXids includes hero), so
+    // the same tiltRead/heatRead run against it unchanged.
+    const self = !heroUnresolved() ? STORE.players[heroXid] : null;
+    if (self) {
+      const selfTilt = tiltRead(self);
+      const selfHeat = heatRead(self);
+      if (selfTilt) {
+        out.push(`<span class="tph-self-tilt">🤮 <b>You are playing ${selfTilt.jump.toFixed(0)}pp `
+          + `looser than your own norm</b> over the last ${selfTilt.hands} hands`
+          + (selfTilt.sinceBigLoss != null
+            ? `, after losing a big pot ${selfTilt.sinceBigLoss === 0 ? 'just now' : selfTilt.sinceBigLoss + ' hands ago'}`
+            : '')
+          + '. Worth a break, or at least a tighter next orbit.</span>');
+      } else if (selfHeat) {
+        out.push(`<span class="tph-self-heat">🔥 You have won ${selfHeat.won} of your last `
+          + `${selfHeat.hands} hands. Running hot is not a reason to widen.</span>`);
+      }
+    }
+
     // Effective stack and SPR, read from the seats rather than assumed.
     // The preflop charts still assume ~100bb — that caveat stands and the
     // footnote still says so — but postflop commitment is driven by SPR, and
@@ -3927,7 +4070,11 @@
       max-width: 140px; overflow: hidden; }
     .tph-badge b { color: #ffc94d !important; font-weight: 700; }
     .tph-badge .tph-badge-dim { color: #9fb0bf !important; }
-    .tph-badge .tph-badge-tilt { margin-right: 2px; }
+    .tph-badge .tph-badge-tilt, .tph-badge .tph-badge-heat { margin-right: 2px; }
+    .tph-state-note { color: #ffd9a0 !important; font-size: 11px; line-height: 1.35;
+                      background: rgba(255,192,70,.10); border-bottom: none !important; }
+    .tph-self-tilt { color: #ffb3a0 !important; display: block; }
+    .tph-self-heat { color: #ffd98a !important; display: block; }
     /* background/color pinned: we inject into Torn's page, so an inherited or
        lower-specificity colour can be overridden by their stylesheet and leave
        dark text on a dark panel. */
@@ -4208,6 +4355,20 @@
   // Below this the session window is too thin to prefer over lifetime.
   const SESSION_BADGE_MIN = 6;
 
+  // One place each, so the badge tooltip, the players list, the Stats tab and
+  // the coach all describe these the same way.
+  function tiltText(t) {
+    return `🤮 Tilting — playing ${t.jump.toFixed(0)}pp looser than their own norm `
+      + `over the last ${t.hands} hands`
+      + (t.sinceBigLoss != null
+        ? `, and lost a big pot ${t.sinceBigLoss === 0 ? 'just now' : t.sinceBigLoss + ' hand(s) ago'}.`
+        : '.');
+  }
+
+  function heatText(h) {
+    return `🔥 Running hot — won ${h.won} of the last ${h.hands} hands (${h.winPct.toFixed(0)}%).`;
+  }
+
   // --- "It's your turn" cues -------------------------------------------------
   //
   // On a phone the table is small and the action buttons are easy to miss,
@@ -4421,7 +4582,12 @@
       const useSession = !!(sess && sess.hands >= SESSION_BADGE_MIN);
       const r = player ? computeRates(player) : {};
       const shown = useSession ? sess : r;
+      // 🤮 tilting — playing far looser than their own norm.
+      // 🔥 running hot — winning far more pots than the seat count makes likely.
+      // Different questions, so both can be true at once: a player can be
+      // steaming AND getting there.
       const tilt = player ? tiltRead(player) : null;
+      const heat = player ? heatRead(player) : null;
       // Always show a TYPE, never just a hand count. Below minHands `classify`
       // returns "Unrated", which told you nothing about the player — the read is
       // the point of the badge. Show the provisional archetype with a "?" so it
@@ -4431,7 +4597,8 @@
         : (label === 'Unrated' ? classifyProvisional(player) + '?' : label);
       badge.innerHTML = hands === 0
         ? `<b>new</b>`
-        : `${tilt ? '<span class="tph-badge-tilt">🔥</span>' : ''}<b>${type}</b> `
+        : `${tilt ? '<span class="tph-badge-tilt">🤮</span>' : ''}`
+          + `${heat ? '<span class="tph-badge-heat">🔥</span>' : ''}<b>${type}</b> `
           + `<span class="tph-badge-dim">${useSession ? 'L' + sess.hands + ' ' : ''}`
           + `${fmtNum(shown.vpip)}/${fmtNum(shown.pfr)}${useSession ? '' : '/' + fmtNum(r.afq)}</span>`;
       badge.title = `${playerDisplayName(xid)} — ${hands} hand(s) seen. `
@@ -4439,7 +4606,8 @@
           ? `Showing the last ${sess.hands} hands (VPIP/PFR). Lifetime: ${fmtNum(r.vpip)}/${fmtNum(r.pfr)}/${fmtNum(r.afq)}.`
           : 'VPIP/PFR/AFq over everything seen.')
         + (label === 'Unrated' && hands > 0 ? ` "?" = provisional, under the ${STORE.settings.minHands}-hand minimum.` : '')
-        + (tilt ? ` 🔥 Playing ${tilt.jump.toFixed(0)}pp looser than their own norm over the last ${tilt.hands} hands.` : '')
+        + (tilt ? ` ${tiltText(tilt)}` : '')
+        + (heat ? ` ${heatText(heat)}` : '')
         + ' Tap for full stats.';
       badge.addEventListener('click', () => openPlayerPanel(xid));
       document.body.appendChild(badge);
@@ -4647,6 +4815,18 @@
     if (openPlayerTab === 'stats') {
       body.innerHTML = `
         <table class="tph-stats">
+          ${(() => {
+            // Above the numbers, because a state read changes what you do right
+            // now in a way a lifetime average never does.
+            const tilt = tiltRead(p);
+            const heat = heatRead(p);
+            if (!tilt && !heat) return '';
+            return '<tr><td colspan="3" class="tph-state-note">'
+              + (tilt ? escapeHtml(tiltText(tilt)) : '')
+              + (tilt && heat ? '<br>' : '')
+              + (heat ? escapeHtml(heatText(heat)) : '')
+              + '</td></tr>';
+          })()}
           <tr><th>Stat</th><th>Them</th><th>Pool</th></tr>
           <tr><td class="tph-stat-l">Hands</td><td class="tph-stat-v"><b>${p.hands}</b></td><td class="tph-stat-n">${p.hands < STORE.settings.minHands ? '<span class="tph-stat-norm">low</span>' : ''}</td></tr>
           ${statRow('VPIP', r.vpip, s.vpip, 'vpip')}
@@ -4773,8 +4953,10 @@
           const a = d && d.level !== 'typical' ? (d.dir === 'up' ? '▲' : '▼') : '';
           return `<span class="${c}">${fmtPct(raw)}${a}</span>`;
         };
+        const tilt = tiltRead(p);
+        const heat = heatRead(p);
         return `<tr data-xid="${escapeHtml(xid)}" class="tph-prow">
-            <td><b>${escapeHtml(p.name)}</b></td>
+            <td><b>${escapeHtml(p.name)}</b>${tilt ? ' 🤮' : ''}${heat ? ' 🔥' : ''}</td>
             <td>${classify(p)}</td>
             <td>${p.hands}</td>
             <td>${cell(r.vpip, s.vpip, 'vpip')}/${cell(r.pfr, s.pfr, 'pfr')}</td>
@@ -4857,7 +5039,7 @@
         &nbsp;<label>over <input type="number" class="tph-sw" min="5" max="40" value="${STORE.settings.sessionWindow}" style="width:48px"> hands</label>
       </div>
       <div style="opacity:.7;margin:2px 0 10px">Recent form shows how they are playing NOW and falls back to lifetime
-        until enough hands are seen. 🔥 marks a player running ${TILT_VPIP_JUMP}+ points looser than their own norm.</div>
+        until enough hands are seen. 🤮 marks a player running ${TILT_VPIP_JUMP}+ points looser than their own norm (${TILT_VPIP_JUMP_AFTER_LOSS}+ if they just lost a ${BIG_LOSS_BB}bb pot). 🔥 marks someone winning a lot of recent pots. Both apply to you too — see the coach panel.</div>
       <div style="opacity:.7;margin:2px 0 10px">Small line under each seat: archetype and VPIP/PFR/AFq. Tap one for full stats. Turn off to leave the table completely clear.</div>
       <h4>Your turn</h4>
       <label><input type="checkbox" class="tph-turncue-toggle" ${STORE.settings.turnCues ? 'checked' : ''}> Highlight the screen when it's your turn</label><br>
@@ -5439,8 +5621,20 @@
       pushRecent,
       sessionRates,
       tiltRead,
+      heatRead,
+      sessionWinRate,
+      handsSinceBigLoss,
+      tiltWindowSize,
+      tiltText,
+      heatText,
       RECENT_MAX,
+      RECENT_WON,
       TILT_VPIP_JUMP,
+      TILT_VPIP_JUMP_AFTER_LOSS,
+      TILT_WINDOW_MAX,
+      BIG_LOSS_BB,
+      BIG_LOSS_MEMORY_HANDS,
+      HEAT_WIN_PCT,
       isFoldControl,
       foldGuardHandler,
       FOLD_ARM_MS,
