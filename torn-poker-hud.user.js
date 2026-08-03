@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.30.0
+// @version      0.31.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -16,6 +16,32 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 0.31.0 - Effective stack is now honest, and the badge says what it means.
+ *          EFFECTIVE STACK — effectiveStackVs(hand, villain) replaces
+ *          effectiveStack(hand), fixing two things that were quietly wrong:
+ *            - Hero is always in the calculation. The old version took the
+ *              minimum across live players, so if hero's own seat failed to
+ *              parse it reported the shortest VILLAIN — a number that can be
+ *              far larger than what you can actually lose, shown with no
+ *              warning. Without your stack there is no honest answer, so the
+ *              line is now absent instead.
+ *            - Pairwise when there is someone to be pairwise with. Against a
+ *              specific opponent the figure is min(you, them); the table
+ *              minimum is only right with no particular opponent in mind, and
+ *              using it while facing a bet understates what is at stake against
+ *              the player actually betting. The line names who it is against.
+ *          SPR now uses the pot as it stood at the START of the street
+ *          (hand.potAtStreetStart) rather than the live pot, which shrank the
+ *          number while you were deciding — the opposite of what SPR is for.
+ *          Preflop it is omitted entirely; SPR is a postflop concept.
+ *          BADGE — archetypes abbreviated to three letters (BAL, STA, NIT, TAG,
+ *          LAG, MAN, FSH) so the numbers have room, and the numbers are now
+ *          LABELLED: "STA 15h V74 P12 A16". Previously they were bare figures
+ *          whose COUNT changed with the badge mode — two in session mode, three
+ *          in lifetime — which is worse than either. V and P follow the
+ *          selected window; A is always lifetime, because postflop samples are
+ *          too scarce for a 15-hand window to be anything but noise. Settings
+ *          now spells the whole format out.
  * 0.30.0 - Coach panel cut down. It is read mid-decision on a phone, so every
  *          line has to earn its place; it had grown to nine.
  *          Removed outright:
@@ -555,7 +581,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '0.30.0';
+  const HUD_VERSION = '0.31.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -1375,6 +1401,11 @@
       contributions: {},       // xid -> total chips this hand
       streetContributions: {}, // xid -> chips this street
       dealtInXids: dealtIn,    // immutable — used as the "hands observed" denominator
+      // Pot as it stood when the current street began. SPR is conventionally
+      // fixed at the start of a street; measuring it against the live pot makes
+      // the number shrink while you are deciding, which is the opposite of what
+      // it is for.
+      potAtStreetStart: 0,
       playersIn: new Set(dealtIn), // mutable — shrinks as players fold, used for opportunity counts
       winners: [],             // {xid, amount}[] — supports split pots, applied at hand end
       actions: [],             // {x,a,amt,s}[] — replayable action log for the History tab
@@ -1526,12 +1557,38 @@
   // Smallest stack among players still in the hand — the most anyone can
   // actually win or lose, and the number SPR should be measured against.
   // Returns null when fewer than two stacks are readable.
-  function effectiveStack(hand) {
+  // Effective stack: the most that can actually change hands, which is always
+  // bounded by the SHORTER of two specific stacks — yours and theirs.
+  //
+  // Returns { chips, vsXid, pairwise } or null. Two rules it now enforces that
+  // the earlier version did not:
+  //
+  // 1. HERO IS ALWAYS IN IT. The old version took the minimum across live
+  //    players, so if hero's own seat failed to parse it silently reported the
+  //    shortest VILLAIN — a number that can be far larger than what you can
+  //    actually lose, presented with no warning. Without your stack there is no
+  //    honest answer, so it returns null.
+  // 2. PAIRWISE WHEN THERE IS SOMEONE TO BE PAIRWISE WITH. Against a specific
+  //    opponent the number is min(you, them). The table minimum is only right
+  //    when you have no particular opponent in mind, and using it while facing
+  //    a bet quietly understates what is at stake against the player betting.
+  function effectiveStackVs(hand, villainXid) {
     const stacks = readAllStacks();
+    const heroStack = heroUnresolved() ? null : stacks[heroXid];
+    if (!(heroStack > 0)) return null;
+
+    if (villainXid && villainXid !== heroXid && stacks[villainXid] > 0) {
+      return { chips: Math.min(heroStack, stacks[villainXid]), vsXid: villainXid, pairwise: true };
+    }
+
+    // No specific opponent: the shortest live opponent bounds the pot.
     const live = hand ? Array.from(hand.playersIn) : Object.keys(stacks);
-    const vals = live.map((x) => stacks[x]).filter((v) => typeof v === 'number' && v > 0);
-    if (vals.length < 2) return null;
-    return Math.min(...vals);
+    const opp = live
+      .filter((x) => x !== heroXid)
+      .map((x) => stacks[x])
+      .filter((v) => typeof v === 'number' && v > 0);
+    if (!opp.length) return null;
+    return { chips: Math.min(heroStack, Math.min(...opp)), vsXid: null, pairwise: false };
   }
 
   // Seat id holding the dealer button, or null.
@@ -1828,6 +1885,7 @@
 
     if (type === 'flop' || type === 'turn' || type === 'river') {
       hand.street = type;
+      hand.potAtStreetStart = hand.pot; // fix SPR's denominator for this street
       hand.streetContributions = {};
       hand.cbetOpportunity = {};
       hand.cbetFacedThisStreet = null;
@@ -3095,6 +3153,16 @@
     { name: 'Fish', test: (r) => r.vpip != null && r.vpip > POOL_AVG.vpip && (r.pfr == null || r.pfr / r.vpip < A.aggRatio) },
   ];
 
+  // Three-letter forms for the seat badge and the players list, where the full
+  // word eats space the numbers need. Panels and reports keep the full name.
+  const ARCHETYPE_SHORT = {
+    Nit: 'NIT', TAG: 'TAG', LAG: 'LAG', Maniac: 'MAN',
+    Station: 'STA', Fish: 'FSH', Balanced: 'BAL', Unrated: 'UNR',
+  };
+  function shortType(label) {
+    return ARCHETYPE_SHORT[label] || String(label || '').slice(0, 3).toUpperCase();
+  }
+
   function classify(player) {
     if (player.hands < STORE.settings.minHands) return 'Unrated';
     return classifyProvisional(player);
@@ -3917,21 +3985,27 @@
     }
 
     // Stack depth, in one line. bb is what matters, so the cash figure is gone.
-    const eff = effectiveStack(hand);
+    // Anchored on hero and pairwise against whoever is actually being faced —
+    // see effectiveStackVs. Absent entirely when hero's own stack can't be
+    // read, because there is no honest effective stack without it.
+    const eff = effectiveStackVs(hand, villainXid);
     const rawBB2 = hand.bbAmount || lastSeenBB;
     const bb = plausibleBB(rawBB2) ? rawBB2 : 0;
-    if (eff != null) {
-      const effBB = bb > 0 ? eff / bb : null;
+    if (eff) {
+      const effBB = bb > 0 ? eff.chips / bb : null;
       const bits = [];
-      if (effBB != null) bits.push(`<b>${effBB.toFixed(0)}bb</b> eff`);
-      else bits.push(`<b>${fmtMoney(eff)}</b> eff`);
-      if (pot > 0) {
-        const spr = eff / pot;
+      const vs = eff.pairwise ? ` v ${escapeHtml(playerDisplayName(eff.vsXid))}` : '';
+      bits.push((effBB != null ? `<b>${effBB.toFixed(0)}bb</b>` : `<b>${fmtMoney(eff.chips)}</b>`) + ' eff' + vs);
+
+      // SPR is a postflop concept, measured against the pot at the START of the
+      // street — not the live pot, which shrinks the number as the betting
+      // round grows it.
+      if (hand.street !== 'preflop' && hand.potAtStreetStart > 0) {
+        const spr = eff.chips / hand.potAtStreetStart;
         bits.push(`SPR <b>${spr.toFixed(1)}</b> ${spr < 1 ? 'committed' : spr < 3 ? 'low' : spr < 7 ? 'medium' : 'deep'}`);
       }
       // The baselines are ~100bb charts. Now that depth is readable, applying
-      // them silently at 15bb would be a confidently wrong answer — so this
-      // stays, just short.
+      // them silently at 15bb would be a confidently wrong answer.
       if (effBB != null && effBB < 40) {
         bits.push(effBB < 20
           ? '<b>⚠ push/fold depth — charts don\'t model it</b>'
@@ -4614,18 +4688,28 @@
       // the point of the badge. Show the provisional archetype with a "?" so it
       // is visibly not yet trustworthy, and keep the numbers alongside it.
       const hands = player ? player.hands : 0;
-      const type = hands === 0 ? 'new'
-        : (label === 'Unrated' ? classifyProvisional(player) + '?' : label);
+      const type = hands === 0 ? 'NEW'
+        : (label === 'Unrated' ? shortType(classifyProvisional(player)) + '?' : shortType(label));
+      // Numbers are LABELLED rather than slash-separated. "74/12/16" is three
+      // unexplained figures on a badge with no room for a legend, and the count
+      // used to change between session and lifetime mode — two numbers or three
+      // depending on a setting, which is worse than either.
+      //
+      // V and P follow the selected window. A (postflop aggression) is always
+      // LIFETIME: postflop samples are scarce, so a 15-hand window would be
+      // mostly noise. The window marker ("15h") sits before V and P only.
       badge.innerHTML = hands === 0
-        ? `<b>new</b>`
+        ? `<b>NEW</b>`
         : `${tilt ? '<span class="tph-badge-tilt">🤮</span>' : ''}`
           + `${heat ? '<span class="tph-badge-heat">🔥</span>' : ''}<b>${type}</b> `
-          + `<span class="tph-badge-dim">${useSession ? 'L' + sess.hands + ' ' : ''}`
-          + `${fmtNum(shown.vpip)}/${fmtNum(shown.pfr)}${useSession ? '' : '/' + fmtNum(r.afq)}</span>`;
+          + `<span class="tph-badge-dim">${useSession ? sess.hands + 'h ' : ''}`
+          + `V${fmtNum(shown.vpip)} P${fmtNum(shown.pfr)} A${fmtNum(r.afq)}</span>`;
       badge.title = `${playerDisplayName(xid)} — ${hands} hand(s) seen. `
+        + 'V = VPIP (hands played), P = PFR (raised preflop), A = AFq (postflop aggression). '
         + (useSession
-          ? `Showing the last ${sess.hands} hands (VPIP/PFR). Lifetime: ${fmtNum(r.vpip)}/${fmtNum(r.pfr)}/${fmtNum(r.afq)}.`
-          : 'VPIP/PFR/AFq over everything seen.')
+          ? `V and P cover the last ${sess.hands} hands; A is lifetime. `
+            + `Lifetime V${fmtNum(r.vpip)} P${fmtNum(r.pfr)}.`
+          : 'All lifetime.')
         + (label === 'Unrated' && hands > 0 ? ` "?" = provisional, under the ${STORE.settings.minHands}-hand minimum.` : '')
         + (tilt ? ` ${tiltText(tilt)}` : '')
         + (heat ? ` ${heatText(heat)}` : '')
@@ -4980,7 +5064,7 @@
         const heat = heatRead(p);
         return `<tr data-xid="${escapeHtml(xid)}" class="tph-prow">
             <td><b>${escapeHtml(p.name)}</b>${tilt ? ' 🤮' : ''}${heat ? ' 🔥' : ''}</td>
-            <td>${classify(p)}</td>
+            <td>${shortType(classify(p))}</td>
             <td>${p.hands}</td>
             <td>${cell(r.vpip, s.vpip, 'vpip')}/${cell(r.pfr, s.pfr, 'pfr')}</td>
             <td style="color:${pl0(p) >= 0 ? '#7ed957' : '#ff6b6b'}">${plShort(p)}</td>
@@ -5063,7 +5147,11 @@
       </div>
       <div style="opacity:.7;margin:2px 0 10px">Recent form shows how they are playing NOW and falls back to lifetime
         until enough hands are seen. 🤮 marks a player running ${TILT_VPIP_JUMP}+ points looser than their own norm (${TILT_VPIP_JUMP_AFTER_LOSS}+ if they just lost a ${BIG_LOSS_BB}bb pot). 🔥 marks someone winning a lot of recent pots. Both apply to you too — see the coach panel.</div>
-      <div style="opacity:.7;margin:2px 0 10px">Small line under each seat: archetype and VPIP/PFR/AFq. Tap one for full stats. Turn off to leave the table completely clear.</div>
+      <div style="opacity:.7;margin:2px 0 10px">Small line under each seat, e.g. <b>STA 15h V74 P12 A16</b>:
+        type · window · <b>V</b>PIP (hands played) · <b>P</b>FR (raised preflop) · <b>A</b>Fq (postflop aggression).
+        "15h" means V and P cover your last 15 hands; A is always lifetime, since postflop samples are too scarce
+        for a short window. Types: NIT, TAG, LAG, MAN(iac), STA(tion), FSH, BAL(anced); "?" = provisional.
+        Tap a badge for full stats. Turn off to leave the table completely clear.</div>
       <h4>Your turn</h4>
       <label><input type="checkbox" class="tph-turncue-toggle" ${STORE.settings.turnCues ? 'checked' : ''}> Highlight the screen when it's your turn</label><br>
       <label><input type="checkbox" class="tph-nextcue-toggle" ${STORE.settings.nextToActCue ? 'checked' : ''}> Amber warning when you're next to act</label><br>
@@ -5672,6 +5760,8 @@
       parseCardsFromText,
       classify,
       classifyProvisional,
+      shortType,
+      ARCHETYPE_SHORT,
       observedPoolAverages,
       ACTION_BTN_RE,
       isPDA,

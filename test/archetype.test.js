@@ -118,4 +118,36 @@ t.eq('reports the number of players it used', obs.players, 5);
 t.near('observed VPIP matches what was stored', obs.vpip, 50);
 t.near('observed PFR matches what was stored', obs.pfr, 15);
 
+// --- Short forms for the badge ---------------------------------------------
+
+// The badge has no room for "Balanced" alongside three numbers, and the full
+// word crowded them out.
+Object.keys(T.ARCHETYPE_SHORT).forEach((full) => {
+  const s = T.shortType(full);
+  t.eq(`${full} shortens to 3 chars`, s.length, 3);
+  t.eq(`${full} shortens uppercase`, s, s.toUpperCase());
+});
+t.eq('Balanced is BAL', T.shortType('Balanced'), 'BAL');
+t.eq('Station is STA', T.shortType('Station'), 'STA');
+t.eq('Maniac is MAN', T.shortType('Maniac'), 'MAN');
+
+// Short forms must stay unique, or two different reads render identically.
+{
+  const shorts = Object.keys(T.ARCHETYPE_SHORT).map(T.shortType);
+  t.eq('every short form is distinct', new Set(shorts).size, shorts.length);
+}
+
+// Every archetype the rules can produce needs a short form, including the
+// Balanced fallback that no rule names.
+{
+  const produced = T.ARCHETYPE_RULES.map((r) => r.name).concat(['Balanced', 'Unrated']);
+  produced.forEach((name) => {
+    t.ok(`${name} has an explicit short form`, !!T.ARCHETYPE_SHORT[name]);
+  });
+}
+
+// An unknown label degrades rather than throwing.
+t.eq('an unknown label is truncated', T.shortType('Whatever'), 'WHA');
+t.eq('an empty label does not throw', T.shortType(''), '');
+
 process.exit(t.report());
