@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.31.0
+// @version      0.32.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -16,6 +16,29 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 0.32.0 - Showdowns weren't reaching the Range tab. Three causes, all in the
+ *          card parsing rather than the storage — the pipeline from log line to
+ *          shownHands was fine.
+ *          - parseCardsFromText had NO word boundaries and ran case-
+ *            insensitively, so it matched rank+suit letters inside ordinary
+ *            words. "9 of hearts, 7 of spades" came out as "ATo": a confidently
+ *            wrong holding, which is worse than none. Torn's own descriptions
+ *            ("Two Pairs: Aces and Eights") are full of the same traps. Now
+ *            bounded on both sides, and prose yields nothing.
+ *          - Only "reveal"/"reveals" were accepted. "revealed" and "turns over"
+ *            fell through to the unmatched list. All forms now match.
+ *          - If Torn draws the reveal's cards as ELEMENTS rather than glyphs,
+ *            the row text reads "Bob reveals (Two Pairs: ...)" — the line parses
+ *            fine and simply carries no cards, so nothing appears unmatched and
+ *            the Range tab stays empty with no clue why. readLogRows now
+ *            appends card aria-labels ("9 of hearts") to each row, and the
+ *            parser understands that spelling. Appended text is stable, so the
+ *            snapshot diff is unaffected.
+ *          The deep scan now prints every reveal row it can see with what each
+ *          one parsed to, so a remaining failure names itself.
+ *          Worth knowing: showdowns are banked at SETTLEMENT, not when the
+ *          reveal line lands — hand.winners is still empty at that point. The
+ *          Range tab therefore fills in one hand later, by design.
  * 0.31.0 - Effective stack is now honest, and the badge says what it means.
  *          EFFECTIVE STACK — effectiveStackVs(hand, villain) replaces
  *          effectiveStack(hand), fixing two things that were quietly wrong:
@@ -581,7 +604,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '0.31.0';
+  const HUD_VERSION = '0.32.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -1279,7 +1302,11 @@
     { type: 'turn', re: /^(?:the\s+)?turn\b:?\s*(.+)/i },
     { type: 'river', re: /^(?:the\s+)?river\b:?\s*(.+)/i },
     // Showdowns read "_AY_  reveals [9♥, 7♠] (Two Pairs: Nines and Sevens)".
-    { type: 'shows', re: /^(.+?)\s+(?:show(?:s|ed)?|reveals?)\s+(.+)/i },
+    // "reveals" was the confirmed wording, but the pattern only accepted
+    // reveal/reveals — "revealed" and "turns over" fell straight through to the
+    // unmatched list. A missed reveal costs a showdown from the Range tab
+    // silently, so accept every form.
+    { type: 'shows', re: /^(.+?)\s+(?:show(?:s|ed|n)?|reveal(?:s|ed)?|turn(?:s|ed)?\s+over|flip(?:s|ped)?(?:\s+over)?)\s+(.+)/i },
     { type: 'wins', re: /^(.+?)\s+w(?:ins?|on)\b(?:\s+the\s+pot)?(?:\s*\$?([\d,]+))?/i },
   ];
 
@@ -2393,12 +2420,36 @@
     return !!(root && root.querySelector && root.querySelector(SELECTORS.logRow));
   }
 
+  // Text of every log row, with any card IMAGES in the row spelled out and
+  // appended.
+  //
+  // A reveal whose cards are drawn as elements rather than glyphs leaves
+  // textContent reading only "Bob reveals (Two Pairs: Nines and Sevens)" — the
+  // actor and Torn's description of the made hand, but not the holding. The
+  // Range tab then never fills in and nothing appears unmatched, because the
+  // line DID parse; it just carried no cards.
+  //
+  // Card elements carry aria-labels like "9 of hearts", which parseCardsFromText
+  // now understands. Appending them is stable text, so the snapshot diff in
+  // scanLogRows still works exactly as before.
+  function rowText(row) {
+    const base = (row.textContent || '').trim();
+    let labels = '';
+    if (row.querySelectorAll) {
+      row.querySelectorAll('[role="img"][aria-label]').forEach((img) => {
+        const l = img.getAttribute('aria-label');
+        if (l && !/face down/i.test(l)) labels += ' ' + l;
+      });
+    }
+    return (base + labels).trim();
+  }
+
   function readLogRows() {
     const root = logRoot();
     if (!root || !root.querySelectorAll) return null;
     const rows = root.querySelectorAll(SELECTORS.logRow);
     if (!rows.length) return null; // uncalibrated page — caller uses the fallback
-    return Array.from(rows, (row) => (row.textContent || '').trim());
+    return Array.from(rows, rowText);
   }
 
   // How many of the previous lines are still present, assuming new lines land at
@@ -3526,16 +3577,51 @@
 
   const SUIT_SYMBOLS = { '♠': 's', '♥': 'h', '♦': 'd', '♣': 'c' };
 
+  // Cards out of text, in both shapes Torn uses.
+  //
+  // Torn writes "9♥" in the visual log and "9 of hearts" in aria-labels and
+  // screen-reader text, so both must parse. The spelled-out form matters more
+  // than it looks: readLogRows appends card aria-labels to each row, which is
+  // the only way a reveal renders when Torn draws the cards as elements rather
+  // than text.
+  //
+  // The old pattern was `/(10|[2-9TJQKA])\s*([shdc♠♥♦♣])/gi` with no boundaries,
+  // and case-insensitivity made it match letters INSIDE ordinary words: it read
+  // "9 of hearts, 7 of spades" as "ATo" — a confidently wrong hand rather than
+  // no hand, which is the worse failure. Torn's own hand descriptions ("Two
+  // Pairs: Aces and Eights") are full of such traps. Hence the boundaries.
   function parseCardsFromText(text) {
+    const s = String(text || '');
     const out = [];
-    const re = /(10|[2-9TJQKA])\s*([shdc♠♥♦♣])/gi;
+    const seen = new Set();
+    const add = (rank, suit) => {
+      if (!rank || !SUIT_CHARS.includes(suit)) return;
+      const key = rank + suit;
+      if (seen.has(key)) return; // the same card can't appear twice
+      seen.add(key);
+      out.push({ rank, suit });
+    };
+
+    // "9 of hearts", "Ace of spades", "10 of clubs".
+    const wordRe = new RegExp(
+      '\\b(10|[2-9]|' + Object.keys(RANK_WORDS).join('|') + '|[TJQKA])\\s+of\\s+(spades?|hearts?|diamonds?|clubs?)\\b',
+      'gi'
+    );
     let m;
-    while ((m = re.exec(String(text || '')))) {
-      const suitRaw = m[2];
-      const suit = SUIT_SYMBOLS[suitRaw] || suitRaw.toLowerCase();
-      if (!SUIT_CHARS.includes(suit)) continue;
-      out.push({ rank: normRank(m[1]), suit });
+    while ((m = wordRe.exec(s))) {
+      const rawRank = m[1].toLowerCase();
+      add(RANK_WORDS[rawRank] || normRank(m[1]), m[2][0].toLowerCase());
     }
+
+    // "9♥" or "9s". Bounded on BOTH sides by a non-alphanumeric, so "Ac" inside
+    // "Aces" and "ad" inside "spades" can no longer be read as cards.
+    const tightRe = /(?:^|[^A-Za-z0-9])(10|[2-9TJQKA])\s?([shdc♠♥♦♣])(?![A-Za-z0-9])/gi;
+    while ((m = tightRe.exec(s))) {
+      const suitRaw = m[2];
+      add(normRank(m[1]), SUIT_SYMBOLS[suitRaw] || suitRaw.toLowerCase());
+      tightRe.lastIndex -= 1; // the leading boundary can be the next card's separator
+    }
+
     return out.slice(0, 5);
   }
 
@@ -5472,6 +5558,20 @@
     const withShowdowns = Object.keys(STORE.players)
       .filter((x) => STORE.players[x] && Object.keys(STORE.players[x].shownHands || {}).length).length;
     L.push('showdown ranges: ' + withShowdowns + ' player(s) with at least one shown hand');
+    // A reveal that parses but carries no cards is invisible: it never reaches
+    // the unmatched list, and the Range tab just stays empty. Print the raw
+    // reveal rows so the wording and the card shape can both be checked.
+    const revealRows = (readLogRows() || []).filter((r) => /reveal|shows?\b|turns?\s+over/i.test(r));
+    L.push('reveal rows in log: ' + revealRows.length);
+    revealRows.slice(0, 4).forEach((r) => {
+      const line = cleanLogLine(r);
+      const pat = LOG_PATTERNS.find((p) => p.re.test(line));
+      const m = pat ? pat.re.exec(line) : null;
+      const parsed = m && m[2] ? parseCardsFromText(m[2]) : [];
+      L.push('  ' + JSON.stringify(squish(r, 110)));
+      L.push('    -> ' + (pat ? pat.type : 'UNMATCHED')
+        + ' -> ' + (handClassFromCards(parsed) || 'NO CARDS PARSED'));
+    });
     L.push('badgeMode: ' + STORE.settings.badgeMode + ' over ' + STORE.settings.sessionWindow + ' hands');
     L.push('');
 

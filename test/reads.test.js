@@ -137,6 +137,47 @@ t.eq('nothing is not a hand', T.handClassFromCards([]), null);
 t.eq('the hand description is ignored',
   T.handClassFromCards(cards('[9♥, 7♠] (Two Pairs: Nines and Sevens)')), '97o');
 
+// --- Card parsing must never invent a hand ---------------------------------
+//
+// The old pattern had no word boundaries and ran case-insensitively, so it read
+// letters INSIDE ordinary words as cards: "9 of hearts, 7 of spades" came out
+// as "ATo". A confidently wrong holding is worse than no holding, and Torn's
+// own hand descriptions are full of these traps.
+[
+  '(Two Pairs: Aces and Eights)',
+  '(Pair: Aces)',
+  '(Straight to the Ace)',
+  '(Full House: Aces over Kings)',
+  'spades and clubs',
+  'Alice called $2,500,000',
+].forEach((prose) => {
+  t.eq(`no cards invented from "${prose.slice(0, 28)}"`, cards(prose).length, 0);
+});
+
+// Both shapes Torn uses. Spelled-out names come from aria-labels, which
+// readLogRows appends — the only way a reveal renders when the cards are drawn
+// as elements rather than text.
+t.eq('glyph form', T.handClassFromCards(cards('[9♥, 7♠]')), '97o');
+t.eq('spelled-out form', T.handClassFromCards(cards('9 of hearts, 7 of spades')), '97o');
+t.eq('spelled-out with rank words', T.handClassFromCards(cards('ace of spades king of clubs')), 'AKo');
+t.eq('spelled-out ten', T.handClassFromCards(cards('ten of spades jack of spades')), 'JTs');
+// Description first, cards after — the order aria-labels arrive in.
+t.eq('cards found after a description',
+  T.handClassFromCards(cards('(Two Pairs: Aces and Eights) 9 of hearts 7 of spades')), '97o');
+
+// Every reveal verb Torn might use. A missed one costs a showdown silently:
+// the line still parses as something, it just carries no cards.
+['reveals', 'revealed', 'shows', 'showed', 'turns over', 'flips over'].forEach((verb) => {
+  const line = `Bob ${verb} [9♥, 7♠]`;
+  const pat = T.LOG_PATTERNS.find((p) => p.re.test(T.cleanLogLine(line)));
+  t.eq(`"${verb}" is a showdown`, pat && pat.type, 'shows');
+  const m = pat ? pat.re.exec(T.cleanLogLine(line)) : null;
+  t.eq(`"${verb}" yields the hand`, T.handClassFromCards(cards(m ? m[2] : '')), '97o');
+});
+
+// The board still reads, since the same parser serves it.
+t.eq('a three-card flop still parses', cards('The flop:  5♣, 7♦, A♦').length, 3);
+
 {
   const R = load();
   R.STORE = R.emptyStore();
