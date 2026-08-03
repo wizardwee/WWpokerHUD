@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.24.0
+// @version      0.25.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -16,6 +16,30 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 0.25.0 - Stats are now read at a glance instead of being read. Every
+ *          percentage in the Stats tab renders as a bar with a tick marking the
+ *          pool average, plus a "Pool" column and ▲▼ when the deviation is worth
+ *          acting on. The players list colours VPIP/PFR the same way and carries
+ *          a pool-average reference row.
+ *          POOL_SPREAD gives each stat its own scale, which is the whole point:
+ *          5pp on VPIP (norm 51) is noise, 5pp on 3-bet (norm 3.7) more than
+ *          doubles it. One shared threshold would call the first notable and the
+ *          second typical — exactly backwards. It is a judgement call, not a
+ *          measurement, and says so.
+ *          Colour comes from the SHRUNK figure while the printed number stays
+ *          RAW: a two-hand player really did VPIP 100% and the tab should say
+ *          so, but lighting the row up as extreme off two hands is reading noise
+ *          as a read. Colours are grey/amber/orange, never red/green — high VPIP
+ *          is not "bad", it is loose, and a good/bad palette asserts a judgement
+ *          the HUD is in no position to make. Direction comes from the arrow.
+ *          The players list P/L column now shows big blinds, falling back to
+ *          chips for players tracked before 0.23.0 — printing "+0.0bb" there
+ *          would read as "flat against them" rather than "not measured yet".
+ *          Note for anyone adding UI: pinTextColor deliberately SKIPS elements
+ *          carrying a tph- class, so a new tph- cell with no colour of its own
+ *          is left for Torn's bare td rule to darken. That is the 0.18.2 bug,
+ *          and these rows hit it — every tph- element holding text now declares
+ *          its own colour.
  * 0.24.0 - Fixes from the first live scan of the 0.22.0 work. Most of it held:
  *          `self___` resolved hero to a real XID (heroXid: 311421, P/L bound at
  *          last), `dealer___`+`position-2___` resolved the button, all 9 stacks
@@ -376,7 +400,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '0.24.0';
+  const HUD_VERSION = '0.25.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -2444,6 +2468,41 @@
     };
   }
 
+  // How far from POOL_AVG a stat has to move before it means anything, in
+  // percentage points.
+  //
+  // These are a JUDGEMENT CALL, not a measurement. The honest thing would be the
+  // population standard deviation of each stat, which nothing here has measured
+  // — so they are set from how much room each stat has and how much a difference
+  // changes play. The scale is what makes deviations comparable: 5pp on VPIP
+  // (norm 50.9) is noise, while 5pp on 3-bet (norm 3.7) more than doubles it.
+  //
+  // One spread = "notable", two = "extreme". Adjust these rather than adding
+  // per-stat special cases at the call sites.
+  const POOL_SPREAD = {
+    vpip: 10,
+    pfr: 6,
+    threeBet: 2,
+    foldTo3Bet: 12,
+    cbet: 15,
+    foldToCbet: 12,
+    limpShareOfVpip: 15,
+  };
+
+  // 'typical' | 'notable' | 'extreme', plus direction. Null norm means the stat
+  // has no published pool figure (AFq, WTSD) — those get no verdict rather than
+  // a made-up one.
+  function deviation(value, norm, spread) {
+    if (value == null || norm == null || !spread) return null;
+    const diff = value - norm;
+    const mags = Math.abs(diff) / spread;
+    return {
+      diff,
+      level: mags >= 2 ? 'extreme' : mags >= 1 ? 'notable' : 'typical',
+      dir: diff > 0 ? 'up' : diff < 0 ? 'down' : 'flat',
+    };
+  }
+
   // Thresholds are POOL-RELATIVE, not absolute. Each is written as a multiple
   // of, or distance from, POOL_AVG so that correcting POOL_AVG later moves the
   // labels with it rather than silently invalidating them.
@@ -3449,6 +3508,41 @@
     .tph-panel .tph-tab.active { background: #333; }
     .tph-panel button { background: #234; color: #cfe; border: 1px solid #567; border-radius: 4px;
       padding: 6px 10px; margin: 3px 4px 3px 0; font: 12px -apple-system, sans-serif; cursor: pointer; }
+    /* Stats tab. Three columns: label, their figure, the pool norm + bar.
+       Deviation colours are deliberately NOT red/green — high VPIP is not
+       "bad", it is loose, and a good/bad palette would assert a judgement the
+       HUD is in no position to make. Grey = typical, amber = notable,
+       orange-red = extreme; direction comes from the arrow, not the colour. */
+    .tph-stats { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .tph-stats th { text-align: left; opacity: .55; font-weight: normal;
+                    border-bottom: 1px solid #444; padding: 3px 4px; }
+    .tph-stats td { padding: 5px 4px; border-bottom: 1px solid #2a2a2e; vertical-align: top; }
+    .tph-stats td:first-child { white-space: nowrap; }
+    /* Explicit colours, not inherited. pinTextColor deliberately SKIPS anything
+       carrying a tph- class, so a tph- cell with no colour of its own is left
+       for Torn's bare td rule to darken — the v0.18.2 bug, reintroduced. Any
+       new tph- element that holds text needs a colour declared right here.
+       Declared BEFORE the .tph-dev-* rules so those win on equal specificity.
+       (No backticks in this block: the whole stylesheet is a template literal.) */
+    .tph-stat-v { white-space: nowrap; width: 27%; color: #f2f4f6 !important; }
+    .tph-stat-n { width: 42%; font-size: 11px; color: #aeb6bd !important; }
+    .tph-dev-n { font-size: 10px; opacity: .8; margin-left: 3px; }
+    .tph-dev-typical { color: #c3cad1 !important; }
+    .tph-dev-notable { color: #ffc457 !important; }
+    .tph-dev-extreme { color: #ff8a5b !important; }
+    /* Bar track. position:relative so the norm tick can be absolutely placed
+       at its own percentage along the same 0-100 scale as the fill. */
+    .tph-bar { position: relative; height: 6px; margin-top: 4px; border-radius: 3px;
+               background: #2f3338; overflow: visible; }
+    .tph-bar-fill { display: block; height: 100%; border-radius: 3px; background: #6b7784; }
+    .tph-bar-fill.tph-dev-typical { background: #6b7784; }
+    .tph-bar-fill.tph-dev-notable { background: #ffc457; }
+    .tph-bar-fill.tph-dev-extreme { background: #ff8a5b; }
+    .tph-bar-tick { position: absolute; top: -2px; width: 2px; height: 10px;
+                    background: #f2f4f6; opacity: .85; margin-left: -1px; }
+    .tph-stat-legend { color: #8d959c !important; font-size: 10px; line-height: 1.4;
+                       border-bottom: none !important; padding-top: 8px !important; }
+    .tph-pool-row td { color: #8d959c !important; font-size: 11px; border-bottom: 1px solid #444; }
     .tph-ptable { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12px; }
     .tph-ptable th { text-align: left; opacity: 0.6; font-weight: normal; border-bottom: 1px solid #444; padding: 3px 4px; }
     .tph-ptable td { padding: 6px 4px; border-bottom: 1px solid #2a2a2e; }
@@ -3735,9 +3829,47 @@
     renderPlayerPanel();
   }
 
+  // One stat row: label, value, population norm, and a bar with the norm marked.
+  //
+  // The bar is the point of this — a number next to another number needs
+  // reading, a marker to the left or right of a tick is read at a glance.
+  //
+  // Colour comes from the SHRUNK value while the printed figure stays RAW. A
+  // player seen for two hands who played both really did VPIP 100%, and the
+  // Stats tab should say so; lighting the row up as "extreme" off two hands
+  // would be reading noise as a read.
+  //
+  // opts.key names the POOL_AVG / POOL_SPREAD entry. Omit it for stats with no
+  // published pool figure — they render plain, with no verdict.
+  function statRow(label, rawValue, shrunkValue, key) {
+    const norm = key ? POOL_AVG[key] : null;
+    const dev = deviation(shrunkValue, norm, key ? POOL_SPREAD[key] : null);
+
+    const cls = dev ? `tph-dev-${dev.level}` : '';
+    const arrow = dev && dev.level !== 'typical' ? (dev.dir === 'up' ? ' ▲' : ' ▼') : '';
+    const delta = dev && dev.level !== 'typical'
+      ? `<span class="tph-dev-n">${dev.diff > 0 ? '+' : ''}${dev.diff.toFixed(0)}</span>` : '';
+
+    // Bars are drawn on a 0-100 scale, which is the scale every one of these
+    // stats already lives on. clamp() keeps a nonsense value inside the track.
+    const clamp = (v) => Math.max(0, Math.min(100, v));
+    const bar = rawValue == null ? '' : `
+      <div class="tph-bar">
+        <span class="tph-bar-fill ${cls}" style="width:${clamp(rawValue)}%"></span>
+        ${norm != null ? `<i class="tph-bar-tick" style="left:${clamp(norm)}%"></i>` : ''}
+      </div>`;
+
+    return `<tr>
+      <td>${escapeHtml(label)}</td>
+      <td class="tph-stat-v ${cls}"><b>${fmtPct(rawValue)}</b>${arrow}${delta}</td>
+      <td class="tph-stat-n">${norm != null ? norm.toFixed(0) + '%' : '—'}${bar}</td>
+    </tr>`;
+  }
+
   function renderPlayerPanel() {
     const p = openPlayerXid ? getPlayer(openPlayerXid) : null;
-    const r = p ? computeRates(p) : null;
+    const r = p ? computeRates(p) : null;          // raw — what was observed
+    const s = p ? computeShrunkRates(p) : null;    // sample-adjusted — drives colour
     renderPanel({
       marker: 'tph-player-panel',
       open: !!openPlayerXid,
@@ -3753,14 +3885,14 @@
       </div>
       <div class="tph-tab-body"></div>
     `,
-      wire: (panel) => renderPlayerPanelBody(panel, p, r),
+      wire: (panel) => renderPlayerPanelBody(panel, p, r, s),
     });
   }
 
   // Tab content, built inside renderPanel's wire step so pinTextColor still
   // runs after it — the Stats table and the Report <pre> are exactly the
   // elements Torn's own `td`/`pre` rules would otherwise darken.
-  function renderPlayerPanelBody(panel, p, r) {
+  function renderPlayerPanelBody(panel, p, r, s) {
     panel.querySelectorAll('.tph-tab').forEach((tab) => {
       tab.addEventListener('click', () => { openPlayerTab = tab.dataset.tab; renderPlayerPanel(); });
     });
@@ -3768,18 +3900,24 @@
     const body = panel.querySelector('.tph-tab-body');
     if (openPlayerTab === 'stats') {
       body.innerHTML = `
-        <table>
-          <tr><td>Hands</td><td>${p.hands}</td></tr>
-          <tr><td>VPIP</td><td>${fmtPct(r.vpip)}</td></tr>
-          <tr><td>PFR</td><td>${fmtPct(r.pfr)}</td></tr>
-          <tr><td>AFq</td><td>${fmtPct(r.afq)}</td></tr>
-          <tr><td>3-Bet</td><td>${fmtPct(r.threeBet)}</td></tr>
-          <tr><td>Fold to 3-Bet</td><td>${fmtPct(r.foldTo3Bet)}</td></tr>
-          <tr><td>C-Bet</td><td>${fmtPct(r.cbet)}</td></tr>
-          <tr><td>Fold to C-Bet</td><td>${fmtPct(r.foldToCbet)}</td></tr>
-          <tr><td>Limp</td><td>${fmtPct(r.limp)}${r.limpShareOfVpip != null ? ` (${fmtPct(r.limpShareOfVpip)} of VPIP)` : ''}</td></tr>
-          <tr><td>WTSD</td><td>${fmtPct(r.wtsd)}</td></tr>
-          <tr><td>Avg bet size</td><td>${r.avgBetPct != null ? r.avgBetPct.toFixed(0) + '% pot' : '—'}</td></tr>
+        <table class="tph-stats">
+          <tr><th>Stat</th><th>Them</th><th>Pool</th></tr>
+          <tr><td>Hands</td><td><b>${p.hands}</b></td><td class="tph-stat-n">${p.hands < STORE.settings.minHands ? 'low sample' : ''}</td></tr>
+          ${statRow('VPIP', r.vpip, s.vpip, 'vpip')}
+          ${statRow('PFR', r.pfr, s.pfr, 'pfr')}
+          ${statRow('3-Bet', r.threeBet, s.threeBet, 'threeBet')}
+          ${statRow('Fold to 3-Bet', r.foldTo3Bet, s.foldTo3Bet, 'foldTo3Bet')}
+          ${statRow('C-Bet', r.cbet, s.cbet, 'cbet')}
+          ${statRow('Fold to C-Bet', r.foldToCbet, s.foldToCbet, 'foldToCbet')}
+          ${statRow('Limp (of VPIP)', r.limpShareOfVpip, s.limpShareOfVpip, 'limpShareOfVpip')}
+          ${statRow('AFq (postflop)', r.afq, r.afq, null)}
+          ${statRow('WTSD', r.wtsd, r.wtsd, null)}
+          <tr><td>Avg bet size</td><td><b>${r.avgBetPct != null ? r.avgBetPct.toFixed(0) + '%' : '—'}</b></td><td class="tph-stat-n">of pot</td></tr>
+          <tr><td colspan="3" class="tph-stat-legend">Bar is them; the tick is the pool average.
+            ▲▼ marks a deviation worth acting on. Colour uses a sample-adjusted
+            figure, so a handful of hands won't read as extreme. Pool figures are
+            borrowed, not measured here — check them against your own in the
+            players list.</td></tr>
           <tr><td colspan="2" style="padding-top:6px"><b>By street</b> — aggression / fold</td></tr>
           ${POSTFLOP_STREETS.map((s) => `<tr><td>${s[0].toUpperCase() + s.slice(1)}</td>`
             + `<td>${fmtPct(r.byStreet[s].afq)} / ${fmtPct(r.byStreet[s].foldPct)}`
@@ -3839,6 +3977,21 @@
   // script rather than from anything this HUD measured. Showing both side by
   // side is how that assumption gets checked: if these drift apart over a few
   // hundred hands, POOL_AVG is what needs correcting, and every label with it.
+  // P/L sign for colouring. Reads the chip figure, not the bb one: bb only
+  // started accruing in 0.23.0, so a player tracked before then has real chip
+  // P/L and a zero bb figure, and colouring off bb would show them as flat.
+  function pl0(p) { return p.plChipsEst || 0; }
+
+  // Big blinds are the comparable unit and the one to show — but plBBEst only
+  // began accruing in 0.23.0, so a player tracked before that has real chip P/L
+  // and a zero bb figure. Printing "+0.0bb" there would read as "flat against
+  // them" when it means "not measured yet". Fall back to chips instead.
+  function plShort(p) {
+    return (p.plBBEst && Math.abs(p.plBBEst) >= 0.05)
+      ? fmtBB(p.plBBEst)
+      : fmtSignedMoney(pl0(p));
+  }
+
   function poolComparisonLine() {
     const obs = observedPoolAverages();
     if (!obs) return '';
@@ -3856,13 +4009,21 @@
     const rows = all.length
       ? all.map(({ xid, p }) => {
         const r = computeRates(p);
-        const pl = Math.round(p.plChipsEst || 0);
+        const s = computeShrunkRates(p);
+        // Raw figures shown, sample-adjusted figures colour them — same rule as
+        // the Stats tab, so a two-hand player doesn't light up the list.
+        const cell = (raw, shrunk, key) => {
+          const d = deviation(shrunk, POOL_AVG[key], POOL_SPREAD[key]);
+          const c = d ? `tph-dev-${d.level}` : '';
+          const a = d && d.level !== 'typical' ? (d.dir === 'up' ? '▲' : '▼') : '';
+          return `<span class="${c}">${fmtPct(raw)}${a}</span>`;
+        };
         return `<tr data-xid="${escapeHtml(xid)}" class="tph-prow">
             <td><b>${escapeHtml(p.name)}</b></td>
             <td>${classify(p)}</td>
             <td>${p.hands}</td>
-            <td>${fmtPct(r.vpip)}/${fmtPct(r.pfr)}</td>
-            <td style="color:${pl >= 0 ? '#7ed957' : '#ff6b6b'}">${fmtSignedMoney(pl)}</td>
+            <td>${cell(r.vpip, s.vpip, 'vpip')}/${cell(r.pfr, s.pfr, 'pfr')}</td>
+            <td style="color:${pl0(p) >= 0 ? '#7ed957' : '#ff6b6b'}">${plShort(p)}</td>
           </tr>`;
       }).join('')
       : `<tr><td colspan="5"><i>No players tracked yet.</i></td></tr>`;
@@ -3879,6 +4040,8 @@
       <input class="tph-pfilter" placeholder="Filter by name…" value="${escapeHtml(playersFilter)}" style="width:60%">
       <table class="tph-ptable">
         <tr><th>Name</th><th>Type</th><th>Hands</th><th>VPIP/PFR</th><th>P/L</th></tr>
+        <tr class="tph-pool-row"><td colspan="3"><i>Pool average</i></td>
+          <td>${POOL_AVG.vpip.toFixed(0)}%/${POOL_AVG.pfr.toFixed(0)}%</td><td>—</td></tr>
         ${rows}
       </table>
       <div style="opacity:.75;margin-top:10px;border-top:1px solid #444;padding-top:8px">
@@ -4433,6 +4596,9 @@
       POOL_AVG,
       PRIOR_WEIGHT,
       ARCHETYPE_RULES,
+      POOL_SPREAD,
+      deviation,
+      statRow,
       classify,
       classifyProvisional,
       observedPoolAverages,

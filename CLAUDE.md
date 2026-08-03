@@ -529,6 +529,47 @@ to face they have nothing to call, and counting it would make every BB look like
 a habitual limper. It inherits the known imprecision that an all-in is counted
 as a raise.
 
+### Deviation indicators (v0.25.0)
+
+`POOL_SPREAD` says how far a stat must move from `POOL_AVG` before it means
+anything. Each stat gets its own scale, and that is the entire point: 5pp on
+VPIP (norm 50.9) is noise, 5pp on 3-bet (norm 3.7) more than doubles it. A
+single shared threshold calls the first notable and the second typical — exactly
+backwards. One spread = notable, two = extreme.
+
+Like `POOL_AVG`, the spreads are a **judgement call, not a measurement**. The
+honest version would be the population standard deviation of each stat, which
+nothing here has measured.
+
+Three rules the rendering follows, all of which exist for a reason:
+
+- **Print raw, colour shrunk.** `statRow(label, raw, shrunk, key)` prints the
+  observed figure and colours by the sample-adjusted one. A two-hand player
+  really did VPIP 100% and the Stats tab should say so — but lighting the row up
+  as "extreme" off two hands is reading noise as a read.
+- **Never red/green.** Grey → amber → orange-red by *magnitude*; direction comes
+  from the ▲▼ arrow. High VPIP is not "bad", it is loose. A good/bad palette
+  asserts a judgement the HUD is in no position to make, and it breaks outright
+  on fold-type stats where "more" is passive rather than worse.
+- **No pool figure, no verdict.** AFq and WTSD render plain, with a bar and no
+  tick. Inventing an anchor to have something to compare against is how the WTSD
+  mis-anchor happened.
+
+### Adding UI? `pinTextColor` skips your element
+
+`pinTextColor` walks a panel and forces `color: inherit !important` on
+everything that does **not** carry a `tph-` class. So a new `tph-` element that
+holds text and declares no colour of its own is left for Torn's bare `td`/`pre`
+rules to darken — the v0.18.2 bug, and these stat rows hit it during
+development.
+
+**Every `tph-` element that holds text must declare its own colour**, and
+declare it *before* any modifier class that overrides it, since both are single
+class selectors with `!important` and the later rule wins.
+
+The stylesheet is a template literal. **No backticks in CSS comments** — one in
+the word `td` terminated the string and broke the parse.
+
 ### Shrinkage replaced the hard sample gate
 
 `computeShrunkRates` pulls every rate toward `POOL_AVG` with a
