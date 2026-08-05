@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.35.0
+// @version      0.36.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -16,6 +16,32 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 0.36.0 - Exploit tab: a synthesised plan for beating one specific player,
+ *          drawn from every stat plus their showdown range.
+ *          Ranked, not narrative — mid-hand you want the two or three
+ *          adjustments worth the most, not a paragraph. Ordering is by expected
+ *          gain, and against this pool postflop outranks preflop because they
+ *          do not fold: the top line for a station is "stop bluffing flops",
+ *          for a nit it is "c-bet every flop".
+ *          Every claim names the number it came from. An exploit you cannot
+ *          trace back to a stat is indistinguishable from a guess, and POOL_AVG
+ *          is borrowed rather than measured here, so the reader has to be able
+ *          to check the reasoning. Tested: every line cites a figure.
+ *          Two failure modes the tests rule out. It must not contradict itself
+ *          — independent rules can easily produce "bluff more" and "stop
+ *          bluffing" in one list. And it must stay quiet without evidence: a
+ *          pool-average player yields nothing, three fold-to-c-bet spots
+ *          produce no c-bet advice, and a new player gets an explanation rather
+ *          than a blank box.
+ *          The live coach now shows the TOP entry from the same synthesis
+ *          rather than its own separate rules — exploitDeviation is deleted.
+ *          One line is all there is room for mid-hand, and it should be the
+ *          most valuable one rather than whichever rule was checked first.
+ *          Tilt outranks everything when present, since it fades within an
+ *          orbit and the others do not.
+ *          Hero's badge is centred on the seat instead of left-aligned, so it
+ *          sits under the chip pile rather than off toward the edge. Same
+ *          vertical position as every other badge.
  * 0.35.0 - Showdowns are read off the SEATS, not the log. Revealed hands were
  *          plainly visible on the table while both the Range tab and the
  *          History tab stayed empty — and the log path had already been fixed
@@ -652,7 +678,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '0.35.0';
+  const HUD_VERSION = '0.36.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -3628,35 +3654,6 @@
       + `this hand — no MDF or pot odds; this happens when the HUD starts mid-hand.)${why}`;
   }
 
-  function exploitDeviation(villainXid) {
-    if (!villainXid) return null;
-    const p = STORE.players[villainXid];
-    if (!p || p.hands < STORE.settings.minHands) return null;
-    const r = computeRates(p);
-
-    // One line, and only the single strongest read — a stack of exploits is a
-    // paragraph nobody finishes mid-decision. Ordered by how much the
-    // adjustment is worth, most actionable first.
-    const who = playerDisplayName(villainXid);
-
-    // Fold-to-c-bet is the most directly actionable postflop number there is:
-    // it says whether c-betting them prints. It was collected for versions
-    // before anything read it.
-    if (r.foldToCbet != null && p.foldToCbetOpp >= 8) {
-      if (r.foldToCbet > 60) return `⚡ ${who} folds to c-bets ${fmtPct(r.foldToCbet)} — fire the flop.`;
-      if (r.foldToCbet < 30) return `⚡ ${who} won't fold flops (${fmtPct(r.foldToCbet)}) — value only, no bluffs.`;
-    }
-    if (r.foldTo3Bet != null && r.foldTo3Bet > 70) {
-      return `⚡ ${who} folds to 3-bets ${fmtPct(r.foldTo3Bet)} — 3-bet light.`;
-    }
-    if (r.vpip != null && r.vpip > 40 && r.pfr != null && r.pfr / (r.vpip || 1) < 0.3) {
-      return `⚡ ${who} is a station (VPIP ${fmtPct(r.vpip)}) — value bet, don't bluff.`;
-    }
-    if (r.afq != null && r.afq > 55) {
-      return `⚡ ${who} is very aggressive (AFq ${fmtPct(r.afq)}) — call down lighter.`;
-    }
-    return null;
-  }
 
   // ===========================================================================
   // 12. CARD READING, EQUITY, POSITION, SESSION
@@ -4285,14 +4282,163 @@
       out.push(`Need <b>~${need.toFixed(0)}%</b> to continue.`);
     }
 
-    const deviation = exploitDeviation(villainXid);
-    if (deviation) out.push(deviation);
+    // The live panel takes only the TOP adjustment from the same synthesis the
+    // Exploit tab shows in full — one line is all there is room for mid-hand,
+    // and it should be the most valuable one rather than whichever rule
+    // happened to be checked first.
+    const villain = villainXid ? STORE.players[villainXid] : null;
+    if (villain && villain.hands >= STORE.settings.minHands) {
+      const top = buildExploitPlan(villain)[0];
+      if (top) {
+        out.push(`⚡ <b>${escapeHtml(playerDisplayName(villainXid))}</b> — `
+          + `${escapeHtml(squish(top.text, 150))}`);
+      }
+    }
     return out.filter(Boolean);
   }
 
   // ===========================================================================
   // 11. TENDENCY REPORT
   // ===========================================================================
+
+  // A ranked plan for beating one specific player, synthesised from everything
+  // known about them.
+  //
+  // Ranked, not narrative: mid-hand you want the two or three adjustments that
+  // are worth the most, not a paragraph. Each entry carries a `gain` used only
+  // for ordering — the biggest edge against this pool is usually postflop
+  // (they don't fold) rather than preflop, so those score higher.
+  //
+  // Every claim names the number it came from. An exploit you can't trace back
+  // to a stat is indistinguishable from a guess, and this pool's baselines are
+  // borrowed rather than measured (see POOL_AVG), so the reader needs to be
+  // able to check the reasoning.
+  //
+  // Returns [{ gain, tag, text }], strongest first.
+  function buildExploitPlan(p) {
+    if (!p) return [];
+    const r = computeRates(p);
+    const s = computeShrunkRates(p);
+    const out = [];
+    const add = (gain, tag, text) => out.push({ gain, tag, text });
+    const n = p.hands || 0;
+
+    // --- Postflop: the biggest lever against a passive pool ------------------
+    if (r.foldToCbet != null && p.foldToCbetOpp >= 8) {
+      if (s.foldToCbet > POOL_AVG.foldToCbet + POOL_SPREAD.foldToCbet) {
+        add(100, 'C-bet', `Folds to c-bets ${fmtPct(r.foldToCbet)} vs a ${POOL_AVG.foldToCbet}% pool `
+          + `(${p.foldToCbetOpp} spots). C-bet every flop you take the lead in, any two cards. `
+          + 'This is the single most profitable adjustment against them.');
+      } else if (s.foldToCbet < POOL_AVG.foldToCbet - POOL_SPREAD.foldToCbet) {
+        add(95, 'C-bet', `Folds to c-bets only ${fmtPct(r.foldToCbet)} (${p.foldToCbetOpp} spots). `
+          + 'Stop bluffing flops. Bet for value and check your air — a c-bet here is lighting money on fire.');
+      }
+    }
+
+    // Firing flops then surrendering is the most exploitable postflop pattern
+    // there is, and it needs the per-street split to be visible at all.
+    const f = r.byStreet.flop;
+    const tn = r.byStreet.turn;
+    if (f.afq != null && tn.afq != null && f.actions >= 8 && tn.actions >= 6 && f.afq - tn.afq > 20) {
+      add(90, 'Turn', `Aggression collapses from ${fmtPct(f.afq)} on the flop to ${fmtPct(tn.afq)} on the turn. `
+        + 'Float their flop bet in position and take it away on the turn when they check.');
+    }
+    if (tn.afq != null && tn.actions >= 6 && tn.afq > 55) {
+      add(70, 'Turn', `Keeps firing turns (${fmtPct(tn.afq)} aggression, ${tn.actions} actions) — `
+        + 'their turn bets are not automatic bluffs; call down with real hands rather than floats.');
+    }
+
+    // --- Preflop ------------------------------------------------------------
+    if (r.foldTo3Bet != null && p.foldTo3BetOpp >= 6) {
+      if (s.foldTo3Bet > POOL_AVG.foldTo3Bet + POOL_SPREAD.foldTo3Bet) {
+        add(85, '3-bet', `Folds to 3-bets ${fmtPct(r.foldTo3Bet)} vs a ${POOL_AVG.foldTo3Bet}% pool `
+          + `(${p.foldTo3BetOpp} spots). 3-bet their opens light, especially in position.`);
+      } else if (s.foldTo3Bet < POOL_AVG.foldTo3Bet - POOL_SPREAD.foldTo3Bet) {
+        add(60, '3-bet', `Rarely folds to 3-bets (${fmtPct(r.foldTo3Bet)}). 3-bet for value only — `
+          + 'a light 3-bet just builds a pot out of position with the worse hand.');
+      }
+    }
+    if (r.limpShareOfVpip != null && p.limpMade >= 5
+        && s.limpShareOfVpip > POOL_AVG.limpShareOfVpip + POOL_SPREAD.limpShareOfVpip) {
+      add(80, 'Isolate', `Limps into ${fmtPct(r.limpShareOfVpip)} of the pots they enter. `
+        + 'Raise big to isolate them in position — their limping range is capped, and they will call too wide.');
+    }
+    if (r.vpip != null && n >= 20) {
+      if (s.vpip > POOL_AVG.vpip + POOL_SPREAD.vpip) {
+        add(55, 'Range', `Plays ${fmtPct(r.vpip)} of hands vs a ${POOL_AVG.vpip.toFixed(0)}% pool — `
+          + 'their range is wide and weak. Value bet thinner than feels comfortable and stop bluffing.');
+      } else if (s.vpip < POOL_AVG.vpip - POOL_SPREAD.vpip) {
+        add(65, 'Range', `Plays only ${fmtPct(r.vpip)} of hands vs a ${POOL_AVG.vpip.toFixed(0)}% pool — `
+          + 'genuinely tight for this table. Respect their raises and steal their blinds relentlessly.');
+      }
+    }
+    if (r.pfr != null && r.vpip > 0 && n >= 20) {
+      const gap = r.vpip - r.pfr;
+      if (gap > 40) {
+        add(50, 'Passive', `Huge VPIP/PFR gap (${fmtPct(r.vpip)}/${fmtPct(r.pfr)}) — a caller, not a raiser. `
+          + 'When they DO raise, believe it.');
+      }
+    }
+
+    // --- Showdown -----------------------------------------------------------
+    if (r.wtsd != null && n >= 30) {
+      if (r.wtsd > 40) {
+        add(75, 'Showdown', `Goes to showdown ${fmtPct(r.wtsd)} of hands played — a station. `
+          + 'Three-street value with anything decent; never try to bluff them off a made hand.');
+      } else if (r.wtsd < 18) {
+        add(60, 'Showdown', `Reaches showdown only ${fmtPct(r.wtsd)} of the time — they give up a lot. `
+          + 'Barrel more streets; they are folding somewhere before the river.');
+      }
+    }
+
+    // --- Sizing tells --------------------------------------------------------
+    if (r.avgBetPct != null && p.betSizeCount >= 12) {
+      if (r.avgBetPct > 85) {
+        add(45, 'Sizing', `Averages ${r.avgBetPct.toFixed(0)}% of pot when betting (${p.betSizeCount} bets) — `
+          + 'oversized. At this pool that usually means value, not a bluff.');
+      } else if (r.avgBetPct < 40) {
+        add(45, 'Sizing', `Averages only ${r.avgBetPct.toFixed(0)}% of pot (${p.betSizeCount} bets) — `
+          + 'small sizing. Raise their weak bets; they are pricing you in.');
+      }
+    }
+
+    // --- What they've actually shown ----------------------------------------
+    const shownAll = shownRange(p, 'all');
+    const shownRaised = shownRange(p, 'raised');
+    if (shownAll.length >= 3) {
+      const total = shownAll.reduce((a, e) => a + e.n, 0);
+      const top = shownAll.slice(0, 5).map((e) => e.cls).join(', ');
+      add(40, 'Range', `Has shown down ${total} hand${total === 1 ? '' : 's'}: ${top}`
+        + `${shownAll.length > 5 ? '…' : ''}. `
+        + (shownRaised.length
+          ? `When they raised preflop they turned up ${shownRaised.slice(0, 4).map((e) => e.cls).join(', ')}.`
+          : 'None of it after a preflop raise, so their raising range is still unknown.')
+        + ' Showdowns are a floor on their range, not all of it.');
+    }
+
+    // --- Live state ----------------------------------------------------------
+    const tilt = tiltRead(p);
+    if (tilt) {
+      add(110, 'Tilt', `${tiltText(tilt)} Widen your value range against them right now and `
+        + 'let them do the bluffing — this fades within an orbit or two.');
+    }
+
+    out.sort((a, b) => b.gain - a.gain);
+    return out;
+  }
+
+  function buildExploitHtml(p) {
+    const plan = buildExploitPlan(p);
+    const n = p ? p.hands || 0 : 0;
+    if (!plan.length) {
+      return `<i>Nothing clearly exploitable yet${n ? ` in ${n} hands` : ''}. `
+        + 'This fills in as their numbers separate from the pool average — '
+        + 'no deviation means no exploit worth naming.</i>';
+    }
+    return `<div class="tph-plan-lead">Strongest adjustments first, each with the number it came from.</div>`
+      + plan.map((e) => `<div class="tph-plan"><span class="tph-plan-tag">${escapeHtml(e.tag)}</span>`
+        + `<span class="tph-plan-txt">${escapeHtml(e.text)}</span></div>`).join('');
+  }
 
   function buildReport(xid) {
     const p = STORE.players[xid];
@@ -4463,6 +4609,14 @@
                       border-radius: 3px; padding: 2px 5px; font-size: 12px;
                       font-family: ui-monospace, Menlo, monospace; }
     .tph-range-hand sub { color: #8fa6bd !important; font-size: 9px; margin-left: 1px; }
+    /* Exploit plan. Ranked list, tag on the left so the category is scannable. */
+    .tph-plan-lead { color: #8d959c !important; font-size: 10px; margin-bottom: 7px; }
+    .tph-plan { display: flex; gap: 7px; align-items: flex-start; margin-bottom: 8px;
+                padding-bottom: 8px; border-bottom: 1px solid #2a2a2e; }
+    .tph-plan-tag { color: #cfe3ff !important; background: #26303a; border: 1px solid #3b4956;
+                    border-radius: 3px; padding: 1px 5px; font-size: 10px; flex: 0 0 auto;
+                    min-width: 52px; text-align: center; }
+    .tph-plan-txt { color: #e6ebf0 !important; font-size: 12px; line-height: 1.4; }
     .tph-ptable { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12px; }
     .tph-ptable th { text-align: left; opacity: 0.6; font-weight: normal; border-bottom: 1px solid #444; padding: 3px 4px; }
     .tph-ptable td { padding: 6px 4px; border-bottom: 1px solid #2a2a2e; }
@@ -4882,7 +5036,16 @@
       // the top of it. Clamped so a bottom-row seat doesn't push it off screen.
       const maxTop = Math.max(0, window.innerHeight - BADGE_HEIGHT_PX);
       badge.style.top = Math.min(Math.max(0, rect.bottom + 1), maxTop) + 'px';
-      badge.style.left = Math.max(0, rect.left) + 'px';
+      if (isSelf) {
+        // Centred on the seat rather than left-aligned, so it sits under the
+        // chip pile instead of hanging off toward the edge. Same vertical
+        // position as every other badge. translateX(-50%) does the centring
+        // because the badge's own width isn't known until it is in the DOM.
+        badge.style.left = Math.max(0, rect.left + rect.width / 2) + 'px';
+        badge.style.transform = 'translateX(-50%)';
+      } else {
+        badge.style.left = Math.max(0, rect.left) + 'px';
+      }
       const label = player ? classify(player) : 'Unrated';
       // In session mode the badge shows the last `sessionWindow` hands, which is
       // how they are playing NOW. It falls back to lifetime whenever the window
@@ -5115,6 +5278,7 @@
       <h3>${escapeHtml(p.name)} — ${classify(p)}</h3>
       <div class="tph-tabs">
         <div class="tph-tab ${openPlayerTab === 'stats' ? 'active' : ''}" data-tab="stats">Stats</div>
+        <div class="tph-tab ${openPlayerTab === 'plan' ? 'active' : ''}" data-tab="plan">Exploit</div>
         <div class="tph-tab ${openPlayerTab === 'range' ? 'active' : ''}" data-tab="range">Range</div>
         <div class="tph-tab ${openPlayerTab === 'report' ? 'active' : ''}" data-tab="report">Report</div>
         <div class="tph-tab ${openPlayerTab === 'history' ? 'active' : ''}" data-tab="history">History</div>
@@ -5200,6 +5364,8 @@
           `}
         </table>
       `;
+    } else if (openPlayerTab === 'plan') {
+      body.innerHTML = buildExploitHtml(p);
     } else if (openPlayerTab === 'range') {
       body.innerHTML = buildRangeHtml(p);
     } else if (openPlayerTab === 'report') {
@@ -6052,7 +6218,8 @@
       set currentHand(h) { currentHand = h; },
       shownRange,
       buildRangeHtml,
-      exploitDeviation,
+      buildExploitPlan,
+      buildExploitHtml,
       parseCardsFromText,
       parseCardEl,
       classify,
