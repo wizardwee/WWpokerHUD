@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.36.0
+// @version      0.37.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -16,6 +16,24 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 0.37.0 - Stack swing and stake history per player.
+ *          STACK — trackStacks() records each seated player's stack on the 3s
+ *          tick, keeping the low and high of their CURRENT sitting. Session-
+ *          scoped on purpose: a lifetime low would just record the smallest
+ *          table they had ever sat at. It resets after a session-length gap or
+ *          when the blind level changes, because a $40M low carried from a
+ *          table where that was deep to one where it is four blinds is worse
+ *          than no figure.
+ *          The swing is the actual read — someone 250bb below their high has
+ *          just lost a stack, which is the state tilt follows from. It appears
+ *          in the Stats tab (now / high / low / off-high, each with a bb
+ *          figure), in the badge tooltip, and as a "Stuck" entry in the exploit
+ *          plan ranked just under tilt itself.
+ *          TABLES — p.tables counts hands per blind level at settlement, keyed
+ *          by the level rather than the table name so a rename in TORN_STAKES
+ *          cannot orphan stored counts. The Stats tab shows "Usually plays" as
+ *          a share, and an unknown stake still names itself in BB rather than
+ *          vanishing, since Torn adds tables and the ladder will go stale.
  * 0.36.0 - Exploit tab: a synthesised plan for beating one specific player,
  *          drawn from every stat plus their showdown range.
  *          Ranked, not narrative — mid-hand you want the two or three
@@ -678,7 +696,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '0.36.0';
+  const HUD_VERSION = '0.37.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -896,6 +914,15 @@
       // #2). Values written before the win bit existed are 0-2, which read
       // correctly as "did not win", so no migration is needed.
       recent: [],
+      // Stack swing for the CURRENT sitting, not lifetime. Reset when the gap
+      // since we last saw them exceeds a session, or when the blind level
+      // changes — a low of $40M means nothing carried from a table where that
+      // was a deep stack to one where it is four blinds.
+      // { now, low, high, start, bb, at }
+      stack: null,
+      // Blind level -> hands seen at it. Bounded by the number of Torn stakes,
+      // so this cannot grow without limit the way the player list can.
+      tables: {},
       // Value of `hands` the last time this player lost a big pot. "Hands ago"
       // is `hands - lastBigLossHand`, which needs no upkeep between hands.
       // -1 means never.
@@ -1695,6 +1722,48 @@
     if (found) saveStore();
   }
 
+  // Record each seated player's stack, tracking the low and high of their
+  // current sitting.
+  //
+  // The swing is the read: a player $200M below their session high has just
+  // lost a stack, which is the state tilt actually follows from. Lifetime
+  // low/high would be meaningless — it would just record the smallest and
+  // largest table they have ever sat at.
+  function trackStacks() {
+    const stacks = readAllStacks();
+    const bb = plausibleBB(lastSeenBB) ? lastSeenBB : 0;
+    const now = Date.now();
+    let dirty = false;
+
+    Object.keys(stacks).forEach((xid) => {
+      const v = stacks[xid];
+      if (!(v > 0)) return;
+      const p = getPlayer(xid);
+      const s = p.stack;
+      // A gap longer than a session, or a different stake, starts a new sitting.
+      const stale = !s || (now - (s.at || 0)) > SESSION_GAP_MS || (bb && s.bb && s.bb !== bb);
+      if (stale) {
+        p.stack = { now: v, low: v, high: v, start: v, bb: bb || null, at: now };
+      } else {
+        s.now = v;
+        if (v < s.low) s.low = v;
+        if (v > s.high) s.high = v;
+        s.at = now;
+        if (bb) s.bb = bb;
+      }
+      dirty = true;
+    });
+    if (dirty) saveStore();
+  }
+
+  // How far below their session high this player is sitting, in big blinds.
+  // Null when there is nothing to compare against.
+  function stackSwingBB(p) {
+    const s = p && p.stack;
+    if (!s || !s.bb || !(s.high > 0)) return null;
+    return { downBB: (s.high - s.now) / s.bb, upBB: (s.now - s.start) / s.bb };
+  }
+
   // xid -> stack, for every seat that reports one.
   function readAllStacks() {
     const out = {};
@@ -2224,6 +2293,13 @@
     hand.dealtInXids.forEach((xid) => {
       const p = getPlayer(xid);
       p.hands += 1;
+      // Which stakes this player is usually found at. Keyed by blind level
+      // rather than table name so a rename in TORN_STAKES doesn't orphan the
+      // stored counts.
+      if (settleBB > 0) {
+        if (!p.tables || typeof p.tables !== 'object') p.tables = {};
+        p.tables[settleBB] = (p.tables[settleBB] || 0) + 1;
+      }
       const play = inSet(hand.countedPfr, xid) ? 2 : inSet(hand.countedVpip, xid) ? 1 : 0;
       pushRecent(p, play | (wonByXid[xid] > 0 ? RECENT_WON : 0));
 
@@ -2855,6 +2931,7 @@
       // Cheap, and it repairs "#<xid>" names from earlier versions as soon as
       // that player is seen at a table again.
       harvestSeatNames();
+      trackStacks();
     }, 3000);
     harvestSeatNames();
 
@@ -4301,6 +4378,22 @@
   // 11. TENDENCY REPORT
   // ===========================================================================
 
+  // Where this player is usually found, busiest first.
+  // Returns [{ bb, name, hands, share }].
+  function tablesPlayed(p) {
+    const src = (p && p.tables) || {};
+    const total = Object.keys(src).reduce((a, k) => a + (src[k] || 0), 0);
+    if (!total) return [];
+    return Object.keys(src)
+      .map((k) => ({
+        bb: Number(k),
+        name: tableNameForBB(Number(k)) || fmtMoney(Number(k)) + ' BB',
+        hands: src[k],
+        share: (100 * src[k]) / total,
+      }))
+      .sort((a, b) => b.hands - a.hands);
+  }
+
   // A ranked plan for beating one specific player, synthesised from everything
   // known about them.
   //
@@ -4417,6 +4510,19 @@
     }
 
     // --- Live state ----------------------------------------------------------
+    // Stack swing is a state read, not a tendency: it says what just happened
+    // to them, which is often a better predictor of the next hand than
+    // anything in their lifetime numbers.
+    const sw = stackSwingBB(p);
+    if (sw && sw.downBB >= 50) {
+      add(88, 'Stuck', `Down ${sw.downBB.toFixed(0)}bb from their high this sitting. `
+        + 'Expect them to widen and to call lighter trying to get it back — '
+        + 'value bet, and stop bluffing until they settle.');
+    } else if (sw && sw.upBB >= 100) {
+      add(35, 'Winning', `Up ${sw.upBB.toFixed(0)}bb this sitting. A big stack covers yours, `
+        + 'so pots against them are for your whole stack — pick spots accordingly.');
+    }
+
     const tilt = tiltRead(p);
     if (tilt) {
       add(110, 'Tilt', `${tiltText(tilt)} Widen your value range against them right now and `
@@ -5092,6 +5198,9 @@
         + (label === 'Unrated' && hands > 0 ? ` "?" = provisional, under the ${STORE.settings.minHands}-hand minimum.` : '')
         + (tilt ? ` ${tiltText(tilt)}` : '')
         + (heat ? ` ${heatText(heat)}` : '')
+        + (player && player.stack
+          ? ` Stack ${fmtMoney(player.stack.now)} (sitting low ${fmtMoney(player.stack.low)}, high ${fmtMoney(player.stack.high)}).`
+          : '')
         + ' Tap for full stats.';
       badge.addEventListener('click', () => openPlayerPanel(xid));
       document.body.appendChild(badge);
@@ -5327,6 +5436,33 @@
           ${statRow('WTSD', r.wtsd, r.wtsd, null)}
           <tr><td class="tph-stat-l">Bet size</td><td class="tph-stat-v"><b>${r.avgBetPct != null ? r.avgBetPct.toFixed(0) + '%' : '—'}</b></td><td class="tph-stat-n"><span class="tph-stat-norm">of pot</span></td></tr>
           <tr><td colspan="3" class="tph-stat-legend">Tick = pool average (reference figures, not measured here).</td></tr>
+          ${(() => {
+            const s = p.stack;
+            if (!s) return '';
+            const sw = stackSwingBB(p);
+            const bbOf = (v) => (s.bb ? ` <span class="tph-stat-norm">${(v / s.bb).toFixed(0)}bb</span>` : '');
+            return '<tr class="tph-stat-head"><td colspan="3"><b>Stack this sitting</b></td></tr>'
+              + `<tr><td class="tph-stat-l">Now</td><td class="tph-stat-v"><b>${fmtMoney(s.now)}</b></td>`
+              + `<td class="tph-stat-n">${bbOf(s.now)}</td></tr>`
+              + `<tr><td class="tph-stat-l">High</td><td class="tph-stat-v">${fmtMoney(s.high)}</td>`
+              + `<td class="tph-stat-n">${bbOf(s.high)}</td></tr>`
+              + `<tr><td class="tph-stat-l">Low</td><td class="tph-stat-v">${fmtMoney(s.low)}</td>`
+              + `<td class="tph-stat-n">${bbOf(s.low)}</td></tr>`
+              + (sw && sw.downBB >= 1
+                ? `<tr><td class="tph-stat-l">Off high</td><td class="tph-stat-v" style="color:#ff8a5b !important">`
+                  + `<b>-${sw.downBB.toFixed(0)}bb</b></td><td class="tph-stat-n"></td></tr>`
+                : '')
+              + '<tr><td colspan="3" class="tph-stat-legend">Resets when they leave for a session '
+              + 'or move stakes — a low from a different table would mean nothing.</td></tr>';
+          })()}
+          ${(() => {
+            const tabs = tablesPlayed(p);
+            if (!tabs.length) return '';
+            return '<tr class="tph-stat-head"><td colspan="3"><b>Usually plays</b></td></tr>'
+              + tabs.slice(0, 4).map((e) => `<tr><td class="tph-stat-l">${escapeHtml(e.name)}</td>`
+                + `<td class="tph-stat-v">${e.share.toFixed(0)}%</td>`
+                + `<td class="tph-stat-n"><span class="tph-stat-norm">${e.hands} hands</span></td></tr>`).join('');
+          })()}
           <tr class="tph-stat-head"><td colspan="3"><b>By street</b> — aggr / fold</td></tr>
           ${POSTFLOP_STREETS.map((st) => `<tr><td class="tph-stat-l">${st[0].toUpperCase() + st.slice(1)}</td>`
             + `<td class="tph-stat-v">${fmtPct(r.byStreet[st].afq)} / ${fmtPct(r.byStreet[st].foldPct)}</td>`
@@ -6219,6 +6355,9 @@
       shownRange,
       buildRangeHtml,
       buildExploitPlan,
+      trackStacks,
+      stackSwingBB,
+      tablesPlayed,
       buildExploitHtml,
       parseCardsFromText,
       parseCardEl,
