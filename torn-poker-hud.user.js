@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.37.0
+// @version      0.37.1
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -16,6 +16,16 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 0.37.1 - "Last seen" row under Usually plays: the last three DISTINCT tables,
+ *          newest first, each with how long ago.
+ *          "Usually plays" is a lifetime share and says nothing about movement.
+ *          Someone who has just dropped two stakes is a different proposition
+ *          from a regular, and only a recency row shows that.
+ *          Records table CHANGES rather than hands — consecutive hands at one
+ *          stake collapse into a single entry whose timestamp moves forward, so
+ *          a 200-hand session stays one entry instead of flooding the list.
+ *          Returning to a table already listed IS a new entry, since the row is
+ *          about where they have been in order. Capped at three.
  * 0.37.0 - Stack swing and stake history per player.
  *          STACK — trackStacks() records each seated player's stack on the 3s
  *          tick, keeping the low and high of their CURRENT sitting. Session-
@@ -696,7 +706,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '0.37.0';
+  const HUD_VERSION = '0.37.1';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -923,6 +933,11 @@
       // Blind level -> hands seen at it. Bounded by the number of Torn stakes,
       // so this cannot grow without limit the way the player list can.
       tables: {},
+      // The last few DISTINCT tables they were seen at, most recent first:
+      // [{ bb, at }]. Consecutive hands at one table collapse into a single
+      // entry whose `at` moves forward, so this records table CHANGES rather
+      // than replaying the same stake three times. Capped at RECENT_TABLES_MAX.
+      recentTables: [],
       // Value of `hands` the last time this player lost a big pot. "Hands ago"
       // is `hands - lastBigLossHand`, which needs no upkeep between hands.
       // -1 means never.
@@ -2299,6 +2314,7 @@
       if (settleBB > 0) {
         if (!p.tables || typeof p.tables !== 'object') p.tables = {};
         p.tables[settleBB] = (p.tables[settleBB] || 0) + 1;
+        noteRecentTable(p, settleBB);
       }
       const play = inSet(hand.countedPfr, xid) ? 2 : inSet(hand.countedVpip, xid) ? 1 : 0;
       pushRecent(p, play | (wonByXid[xid] > 0 ? RECENT_WON : 0));
@@ -4378,6 +4394,44 @@
   // 11. TENDENCY REPORT
   // ===========================================================================
 
+  // How many table CHANGES to remember. Three covers "where they came from"
+  // without turning a player record into a movement log.
+  const RECENT_TABLES_MAX = 3;
+
+  // Note that this player was seen at `bb`. Consecutive hands at the same table
+  // just move the timestamp forward — this records moves, not hands, so a
+  // 200-hand session at one table stays a single entry.
+  function noteRecentTable(p, bb) {
+    if (!Array.isArray(p.recentTables)) p.recentTables = [];
+    const head = p.recentTables[0];
+    if (head && head.bb === bb) { head.at = Date.now(); return; }
+    p.recentTables.unshift({ bb, at: Date.now() });
+    if (p.recentTables.length > RECENT_TABLES_MAX) p.recentTables.length = RECENT_TABLES_MAX;
+  }
+
+  // "3m", "2h", "4d" — short enough to sit inline on a phone.
+  function shortAgo(ts) {
+    if (!ts) return '';
+    const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+    if (s < 60) return 'now';
+    if (s < 3600) return Math.floor(s / 60) + 'm';
+    if (s < 86400) return Math.floor(s / 3600) + 'h';
+    return Math.floor(s / 86400) + 'd';
+  }
+
+  // The last few tables, most recent first, resolved to names.
+  function recentTablesOf(p) {
+    return (Array.isArray(p && p.recentTables) ? p.recentTables : [])
+      .filter((e) => e && plausibleBB(e.bb))
+      .slice(0, RECENT_TABLES_MAX)
+      .map((e) => ({
+        bb: e.bb,
+        at: e.at,
+        ago: shortAgo(e.at),
+        name: tableNameForBB(e.bb) || fmtMoney(e.bb) + ' BB',
+      }));
+  }
+
   // Where this player is usually found, busiest first.
   // Returns [{ bb, name, hands, share }].
   function tablesPlayed(p) {
@@ -4723,6 +4777,13 @@
                     border-radius: 3px; padding: 1px 5px; font-size: 10px; flex: 0 0 auto;
                     min-width: 52px; text-align: center; }
     .tph-plan-txt { color: #e6ebf0 !important; font-size: 12px; line-height: 1.4; }
+    /* Recent tables, newest first. Wraps rather than scrolling — the panel
+       must never scroll sideways. */
+    .tph-recent { font-size: 11px; line-height: 1.6; color: #aeb6bd !important; }
+    .tph-recent-t { color: #aeb6bd !important; white-space: nowrap; }
+    .tph-recent-now { color: #7ee0a6 !important; }
+    .tph-recent-ago { color: #8d959c !important; font-size: 9px; margin-left: 3px; }
+    .tph-recent-arr { color: #5b646c !important; margin: 0 5px; }
     .tph-ptable { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12px; }
     .tph-ptable th { text-align: left; opacity: 0.6; font-weight: normal; border-bottom: 1px solid #444; padding: 3px 4px; }
     .tph-ptable td { padding: 6px 4px; border-bottom: 1px solid #2a2a2e; }
@@ -5457,11 +5518,23 @@
           })()}
           ${(() => {
             const tabs = tablesPlayed(p);
-            if (!tabs.length) return '';
-            return '<tr class="tph-stat-head"><td colspan="3"><b>Usually plays</b></td></tr>'
+            const recent = recentTablesOf(p);
+            if (!tabs.length && !recent.length) return '';
+            let html = '<tr class="tph-stat-head"><td colspan="3"><b>Usually plays</b></td></tr>'
               + tabs.slice(0, 4).map((e) => `<tr><td class="tph-stat-l">${escapeHtml(e.name)}</td>`
                 + `<td class="tph-stat-v">${e.share.toFixed(0)}%</td>`
                 + `<td class="tph-stat-n"><span class="tph-stat-norm">${e.hands} hands</span></td></tr>`).join('');
+            // Where they have been lately, newest first. "Usually plays" is a
+            // lifetime share and says nothing about movement — someone who has
+            // just come down two stakes is a different proposition from a
+            // regular, and only this row shows it.
+            if (recent.length) {
+              html += '<tr><td class="tph-stat-l">Last seen</td><td colspan="2" class="tph-recent">'
+                + recent.map((e, i) => `<span class="tph-recent-t${i === 0 ? ' tph-recent-now' : ''}">`
+                  + `${escapeHtml(e.name)}<span class="tph-recent-ago">${escapeHtml(e.ago)}</span></span>`).join('<span class="tph-recent-arr">←</span>')
+                + '</td></tr>';
+            }
+            return html;
           })()}
           <tr class="tph-stat-head"><td colspan="3"><b>By street</b> — aggr / fold</td></tr>
           ${POSTFLOP_STREETS.map((st) => `<tr><td class="tph-stat-l">${st[0].toUpperCase() + st.slice(1)}</td>`
@@ -6358,6 +6431,10 @@
       trackStacks,
       stackSwingBB,
       tablesPlayed,
+      recentTablesOf,
+      noteRecentTable,
+      shortAgo,
+      RECENT_TABLES_MAX,
       buildExploitHtml,
       parseCardsFromText,
       parseCardEl,

@@ -184,4 +184,86 @@ function withSeats(seats) {
   t.eq('an unpriced hand adds no table', Object.keys(T.STORE.players.V.tables).length, 2);
 }
 
+// --- Recent tables ----------------------------------------------------------
+
+// "Usually plays" is a lifetime share and says nothing about movement. Someone
+// who has just come down two stakes is a different proposition from a regular,
+// and only the recency row shows it.
+
+{
+  const T = load();
+  T.STORE = T.emptyStore();
+  const p = T.emptyPlayer('v', 'Mover');
+
+  T.noteRecentTable(p, 2500000);
+  T.noteRecentTable(p, 2500000);
+  T.noteRecentTable(p, 2500000);
+  t.eq('consecutive hands at one table stay one entry', p.recentTables.length, 1);
+
+  T.noteRecentTable(p, 1000000);
+  t.eq('a move adds an entry', p.recentTables.length, 2);
+  t.eq('newest first', p.recentTables[0].bb, 1000000);
+  t.eq('and the previous table is behind it', p.recentTables[1].bb, 2500000);
+
+  // Returning to a table already in the list is still a move, so it appears
+  // again — the row records where they have BEEN, in order.
+  T.noteRecentTable(p, 2500000);
+  t.eq('returning is a new entry', p.recentTables[0].bb, 2500000);
+  t.eq('three moves are kept', p.recentTables.length, 3);
+
+  T.noteRecentTable(p, 500000);
+  t.eq('the list is capped', p.recentTables.length, T.RECENT_TABLES_MAX);
+  t.eq('and the oldest is dropped', p.recentTables[T.RECENT_TABLES_MAX - 1].bb, 1000000);
+}
+
+{
+  const T = load();
+  T.STORE = T.emptyStore();
+  const p = T.emptyPlayer('v', 'Mover');
+  T.noteRecentTable(p, 1000000);
+  T.noteRecentTable(p, 2500000);
+
+  const r = T.recentTablesOf(p);
+  t.eq('resolved to names, newest first', r[0].name, "Cat's Chance");
+  t.eq('with where they came from', r[1].name, 'River Wizard');
+  t.eq('and a relative time', r[0].ago, 'now');
+
+  // An implausible blind cannot become a table — see the BB display-mode guard.
+  p.recentTables.unshift({ bb: 3, at: Date.now() });
+  t.ok('an implausible blind is filtered out', !T.recentTablesOf(p).some((e) => e.bb === 3));
+}
+
+{
+  const T = load();
+  t.eq('never seen anywhere reports nothing', T.recentTablesOf(T.emptyPlayer('x', 'X')).length, 0);
+  t.eq('a missing timestamp does not throw', T.shortAgo(0), '');
+  t.eq('just now', T.shortAgo(Date.now()), 'now');
+  t.eq('minutes', T.shortAgo(Date.now() - 5 * 60 * 1000), '5m');
+  t.eq('hours', T.shortAgo(Date.now() - 3 * 3600 * 1000), '3h');
+  t.eq('days', T.shortAgo(Date.now() - 2 * 86400 * 1000), '2d');
+}
+
+// Recorded through the real settlement path, not just the helper.
+{
+  const T = load();
+  T.STORE = T.emptyStore();
+  T.heroXid = 'H';
+  const settle = (bb) => T.applyHandResults({
+    gameId: null, street: 'preflop', pot: 3000000, bbAmount: bb,
+    contributions: { H: 500000, V: 1000000 },
+    dealtInXids: new Set(['H', 'V']),
+    winners: [{ xid: 'V', amount: 1500000 }],
+    actions: [{ x: 'H', a: 'fold', amt: 0, s: 'preflop' }], shown: {}, shownCards: {},
+  });
+
+  settle(2500000);
+  settle(2500000);
+  settle(1000000);
+
+  const r = T.recentTablesOf(T.STORE.players.V);
+  t.eq('settlement records the move', r.length, 2);
+  t.eq('newest table first', r[0].name, 'River Wizard');
+  t.eq('previous table behind it', r[1].name, "Cat's Chance");
+}
+
 process.exit(t.report());
