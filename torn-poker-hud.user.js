@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.37.1
+// @version      0.38.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -16,6 +16,24 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 0.38.0 - The collapsed pill is "Coach", and it carries a live exploit tip.
+ *          It used to read "📊 GTO" — wrong on both counts. These are reference
+ *          charts, not solver output (that word was removed everywhere else in
+ *          0.13.0 and this was the last one standing), and a static label
+ *          carries no information: collapsing the coach meant giving up the
+ *          read entirely, when the point of collapsing is to reclaim screen.
+ *          The pill now shows the same top adjustment the expanded panel leads
+ *          with, shortened to a few words — "C-bet · no flop bluffs",
+ *          "Stuck · value bet". Every plan entry gained a `short` form for
+ *          this; the full sentence stays on the tooltip and in the Exploit tab.
+ *          currentExploitTip() picks the subject, and BOTH the pill and the
+ *          live panel use it, so the two can't disagree about who matters. It
+ *          prefers whoever is driving the action — a stronger read on someone
+ *          who has already folded out of the decision is not more useful — and
+ *          falls back to the most exploitable player still in the pot, so an
+ *          unraised multiway pot still gets a read rather than nothing.
+ *          Pill content refreshes on every render rather than only at creation,
+ *          which is what made a static label the only option before.
  * 0.37.1 - "Last seen" row under Usually plays: the last three DISTINCT tables,
  *          newest first, each with how long ago.
  *          "Usually plays" is a lifetime share and says nothing about movement.
@@ -706,7 +724,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '0.37.1';
+  const HUD_VERSION = '0.38.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -4379,13 +4397,10 @@
     // Exploit tab shows in full — one line is all there is room for mid-hand,
     // and it should be the most valuable one rather than whichever rule
     // happened to be checked first.
-    const villain = villainXid ? STORE.players[villainXid] : null;
-    if (villain && villain.hands >= STORE.settings.minHands) {
-      const top = buildExploitPlan(villain)[0];
-      if (top) {
-        out.push(`⚡ <b>${escapeHtml(playerDisplayName(villainXid))}</b> — `
-          + `${escapeHtml(squish(top.text, 150))}`);
-      }
+    const tip = currentExploitTip();
+    if (tip) {
+      out.push(`⚡ <b>${escapeHtml(playerDisplayName(tip.xid))}</b> — `
+        + `${escapeHtml(squish(tip.entry.text, 150))}`);
     }
     return out.filter(Boolean);
   }
@@ -4467,7 +4482,10 @@
     const r = computeRates(p);
     const s = computeShrunkRates(p);
     const out = [];
-    const add = (gain, tag, text) => out.push({ gain, tag, text });
+    // `short` is a 2-5 word action for the collapsed pill and the live line,
+    // where there is no room for the full sentence. The long form stays for
+    // the Exploit tab and the tooltip.
+    const add = (gain, tag, text, short) => out.push({ gain, tag, text, short });
     const n = p.hands || 0;
 
     // --- Postflop: the biggest lever against a passive pool ------------------
@@ -4475,10 +4493,10 @@
       if (s.foldToCbet > POOL_AVG.foldToCbet + POOL_SPREAD.foldToCbet) {
         add(100, 'C-bet', `Folds to c-bets ${fmtPct(r.foldToCbet)} vs a ${POOL_AVG.foldToCbet}% pool `
           + `(${p.foldToCbetOpp} spots). C-bet every flop you take the lead in, any two cards. `
-          + 'This is the single most profitable adjustment against them.');
+          + 'This is the single most profitable adjustment against them.', 'fire every flop');
       } else if (s.foldToCbet < POOL_AVG.foldToCbet - POOL_SPREAD.foldToCbet) {
         add(95, 'C-bet', `Folds to c-bets only ${fmtPct(r.foldToCbet)} (${p.foldToCbetOpp} spots). `
-          + 'Stop bluffing flops. Bet for value and check your air — a c-bet here is lighting money on fire.');
+          + 'Stop bluffing flops. Bet for value and check your air — a c-bet here is lighting money on fire.', 'no flop bluffs');
       }
     }
 
@@ -4488,42 +4506,42 @@
     const tn = r.byStreet.turn;
     if (f.afq != null && tn.afq != null && f.actions >= 8 && tn.actions >= 6 && f.afq - tn.afq > 20) {
       add(90, 'Turn', `Aggression collapses from ${fmtPct(f.afq)} on the flop to ${fmtPct(tn.afq)} on the turn. `
-        + 'Float their flop bet in position and take it away on the turn when they check.');
+        + 'Float their flop bet in position and take it away on the turn when they check.', 'float, stab turn');
     }
     if (tn.afq != null && tn.actions >= 6 && tn.afq > 55) {
       add(70, 'Turn', `Keeps firing turns (${fmtPct(tn.afq)} aggression, ${tn.actions} actions) — `
-        + 'their turn bets are not automatic bluffs; call down with real hands rather than floats.');
+        + 'their turn bets are not automatic bluffs; call down with real hands rather than floats.', 'turn bets are real');
     }
 
     // --- Preflop ------------------------------------------------------------
     if (r.foldTo3Bet != null && p.foldTo3BetOpp >= 6) {
       if (s.foldTo3Bet > POOL_AVG.foldTo3Bet + POOL_SPREAD.foldTo3Bet) {
         add(85, '3-bet', `Folds to 3-bets ${fmtPct(r.foldTo3Bet)} vs a ${POOL_AVG.foldTo3Bet}% pool `
-          + `(${p.foldTo3BetOpp} spots). 3-bet their opens light, especially in position.`);
+          + `(${p.foldTo3BetOpp} spots). 3-bet their opens light, especially in position.`, '3-bet them light');
       } else if (s.foldTo3Bet < POOL_AVG.foldTo3Bet - POOL_SPREAD.foldTo3Bet) {
         add(60, '3-bet', `Rarely folds to 3-bets (${fmtPct(r.foldTo3Bet)}). 3-bet for value only — `
-          + 'a light 3-bet just builds a pot out of position with the worse hand.');
+          + 'a light 3-bet just builds a pot out of position with the worse hand.', '3-bet value only');
       }
     }
     if (r.limpShareOfVpip != null && p.limpMade >= 5
         && s.limpShareOfVpip > POOL_AVG.limpShareOfVpip + POOL_SPREAD.limpShareOfVpip) {
       add(80, 'Isolate', `Limps into ${fmtPct(r.limpShareOfVpip)} of the pots they enter. `
-        + 'Raise big to isolate them in position — their limping range is capped, and they will call too wide.');
+        + 'Raise big to isolate them in position — their limping range is capped, and they will call too wide.', 'isolate their limps');
     }
     if (r.vpip != null && n >= 20) {
       if (s.vpip > POOL_AVG.vpip + POOL_SPREAD.vpip) {
         add(55, 'Range', `Plays ${fmtPct(r.vpip)} of hands vs a ${POOL_AVG.vpip.toFixed(0)}% pool — `
-          + 'their range is wide and weak. Value bet thinner than feels comfortable and stop bluffing.');
+          + 'their range is wide and weak. Value bet thinner than feels comfortable and stop bluffing.', 'value bet thin');
       } else if (s.vpip < POOL_AVG.vpip - POOL_SPREAD.vpip) {
         add(65, 'Range', `Plays only ${fmtPct(r.vpip)} of hands vs a ${POOL_AVG.vpip.toFixed(0)}% pool — `
-          + 'genuinely tight for this table. Respect their raises and steal their blinds relentlessly.');
+          + 'genuinely tight for this table. Respect their raises and steal their blinds relentlessly.', 'steal their blinds');
       }
     }
     if (r.pfr != null && r.vpip > 0 && n >= 20) {
       const gap = r.vpip - r.pfr;
       if (gap > 40) {
         add(50, 'Passive', `Huge VPIP/PFR gap (${fmtPct(r.vpip)}/${fmtPct(r.pfr)}) — a caller, not a raiser. `
-          + 'When they DO raise, believe it.');
+          + 'When they DO raise, believe it.', 'believe their raises');
       }
     }
 
@@ -4531,10 +4549,10 @@
     if (r.wtsd != null && n >= 30) {
       if (r.wtsd > 40) {
         add(75, 'Showdown', `Goes to showdown ${fmtPct(r.wtsd)} of hands played — a station. `
-          + 'Three-street value with anything decent; never try to bluff them off a made hand.');
+          + 'Three-street value with anything decent; never try to bluff them off a made hand.', 'three-street value');
       } else if (r.wtsd < 18) {
         add(60, 'Showdown', `Reaches showdown only ${fmtPct(r.wtsd)} of the time — they give up a lot. `
-          + 'Barrel more streets; they are folding somewhere before the river.');
+          + 'Barrel more streets; they are folding somewhere before the river.', 'barrel more');
       }
     }
 
@@ -4542,10 +4560,10 @@
     if (r.avgBetPct != null && p.betSizeCount >= 12) {
       if (r.avgBetPct > 85) {
         add(45, 'Sizing', `Averages ${r.avgBetPct.toFixed(0)}% of pot when betting (${p.betSizeCount} bets) — `
-          + 'oversized. At this pool that usually means value, not a bluff.');
+          + 'oversized. At this pool that usually means value, not a bluff.', 'big bet = value');
       } else if (r.avgBetPct < 40) {
         add(45, 'Sizing', `Averages only ${r.avgBetPct.toFixed(0)}% of pot (${p.betSizeCount} bets) — `
-          + 'small sizing. Raise their weak bets; they are pricing you in.');
+          + 'small sizing. Raise their weak bets; they are pricing you in.', 'raise their small bets');
       }
     }
 
@@ -4560,7 +4578,7 @@
         + (shownRaised.length
           ? `When they raised preflop they turned up ${shownRaised.slice(0, 4).map((e) => e.cls).join(', ')}.`
           : 'None of it after a preflop raise, so their raising range is still unknown.')
-        + ' Showdowns are a floor on their range, not all of it.');
+        + ' Showdowns are a floor on their range, not all of it.', 'seen at showdown');
     }
 
     // --- Live state ----------------------------------------------------------
@@ -4571,20 +4589,51 @@
     if (sw && sw.downBB >= 50) {
       add(88, 'Stuck', `Down ${sw.downBB.toFixed(0)}bb from their high this sitting. `
         + 'Expect them to widen and to call lighter trying to get it back — '
-        + 'value bet, and stop bluffing until they settle.');
+        + 'value bet, and stop bluffing until they settle.', 'stuck — value bet');
     } else if (sw && sw.upBB >= 100) {
       add(35, 'Winning', `Up ${sw.upBB.toFixed(0)}bb this sitting. A big stack covers yours, `
-        + 'so pots against them are for your whole stack — pick spots accordingly.');
+        + 'so pots against them are for your whole stack — pick spots accordingly.', 'covers your stack');
     }
 
     const tilt = tiltRead(p);
     if (tilt) {
       add(110, 'Tilt', `${tiltText(tilt)} Widen your value range against them right now and `
-        + 'let them do the bluffing — this fades within an orbit or two.');
+        + 'let them do the bluffing — this fades within an orbit or two.', 'tilting — widen value');
     }
 
     out.sort((a, b) => b.gain - a.gain);
     return out;
+  }
+
+  // The single most useful exploit tip for the hand in progress.
+  //
+  // Prefers whoever is driving the action, since that is the player you are
+  // about to make a decision against. Falls back to the most exploitable
+  // opponent still in the pot, so an unraised multiway pot still gets a read
+  // rather than nothing.
+  //
+  // Returns { xid, entry } or null.
+  function currentExploitTip() {
+    const hand = currentHand;
+    if (!hand) return null;
+
+    const order = [];
+    if (hand.lastAggressor) order.push(hand.lastAggressor);
+    hand.playersIn.forEach((x) => { if (!order.includes(x)) order.push(x); });
+
+    let best = null;
+    for (const xid of order) {
+      if (!xid || isHeroRecord(xid)) continue;
+      const p = STORE.players[xid];
+      if (!p || p.hands < STORE.settings.minHands) continue;
+      const top = buildExploitPlan(p)[0];
+      if (!top) continue;
+      // The aggressor wins outright — a stronger read on someone who has
+      // already folded out of the decision is not more useful.
+      const score = top.gain + (xid === hand.lastAggressor ? 1000 : 0);
+      if (!best || score > best.score) best = { xid, entry: top, score };
+    }
+    return best;
   }
 
   function buildExploitHtml(p) {
@@ -4887,6 +4936,13 @@
       box-shadow: 0 2px 8px rgba(0,0,0,0.5); touch-action: none;
       user-select: none; -webkit-user-select: none; }
     .tph-coach-pill.tph-dragging { cursor: grabbing; opacity: 0.85; }
+    /* The pill carries a live tip, so it has to be able to grow — but capped
+       and ellipsised, because it floats over the table and must never become a
+       banner. */
+    .tph-coach-pill { max-width: 62vw; white-space: nowrap; overflow: hidden;
+                      text-overflow: ellipsis; display: flex; align-items: center; gap: 6px; }
+    .tph-pill-tag { color: #9bd !important; font-weight: 600; flex: 0 0 auto; }
+    .tph-pill-tip { color: #e6ebf0 !important; overflow: hidden; text-overflow: ellipsis; }
     .tph-calib { position: fixed; z-index: 99999; top: 4px; left: 4px; right: 4px; max-height: 62%; overflow-y: auto;
       background: rgba(10,10,10,0.97); color: #9f9; border: 1px solid #494; border-radius: 6px; padding: 8px;
       font: 10px/1.3 monospace; }
@@ -5302,8 +5358,6 @@
       if (!pill) {
         pill = document.createElement('div');
         pill.className = 'tph-coach-pill';
-        pill.textContent = '📊 GTO';
-        pill.title = 'Tap to show the GTO coach — drag to move';
         document.body.appendChild(pill);
         applyStoredPos(pill, 'coachPillPos', PILL_KEEP_VISIBLE_PX);
         // The expanded panel was draggable and the collapsed pill was not — it
@@ -5315,6 +5369,21 @@
           posKey: 'coachPillPos',
           keepVisiblePx: PILL_KEEP_VISIBLE_PX,
         });
+      }
+
+      // Refreshed on every render, not just on creation. Collapsed used to mean
+      // a static "GTO" label carrying no information at all — the point of
+      // collapsing is to reclaim the screen, not to give up the read. The pill
+      // now carries the same top exploit tip the expanded panel leads with,
+      // shortened to a few words.
+      const tip = currentExploitTip();
+      if (tip && tip.entry.short) {
+        pill.innerHTML = `<span class="tph-pill-tag">${escapeHtml(tip.entry.tag)}</span>`
+          + `<span class="tph-pill-tip">${escapeHtml(tip.entry.short)}</span>`;
+        pill.title = `${playerDisplayName(tip.xid)} — ${tip.entry.text} (tap to expand, drag to move)`;
+      } else {
+        pill.innerHTML = '<span class="tph-pill-tag">Coach</span>';
+        pill.title = 'Tap to show the coach — drag to move';
       }
       return;
     }
@@ -5792,7 +5861,7 @@
       <div style="opacity:.7;margin:2px 0 10px">Guards against misclicking Fold next to Call. It never folds for you —
         the second tap is your own. If anything goes wrong the tap passes straight through, and missing the
         ${FOLD_ARM_MS / 1000}s window costs nothing, since Torn folds you on timeout anyway.</div>
-      <h4>GTO coach</h4>
+      <h4>Coach</h4>
       <label><input type="checkbox" class="tph-coach-toggle" ${STORE.settings.coachHidden ? '' : 'checked'}> Show coach panel</label><br>
       <label>Full table size: <input type="number" class="tph-table-max" min="2" max="10" value="${STORE.settings.tableMax}" style="width:60px"></label>
       <div style="opacity:.7;margin:2px 0 6px">Equity is always quoted against a full ring of this size, plus the live and heads-up counts.</div>
@@ -6436,6 +6505,7 @@
       shortAgo,
       RECENT_TABLES_MAX,
       buildExploitHtml,
+      currentExploitTip,
       parseCardsFromText,
       parseCardEl,
       classify,
