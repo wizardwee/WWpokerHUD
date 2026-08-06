@@ -116,7 +116,8 @@ const t = runner('storage-warning');
   t.ok('reports the size', /2 KB/.test(html));
   t.ok('reports the player count', /2 players/.test(html));
   t.ok('says the limit is an estimate', /estimate/i.test(html));
-  t.ok('and says player records are never deleted', /never deleted/i.test(html));
+  t.ok('and states the cleanup policy', /cleanup drops players/i.test(html));
+  t.ok('including that you are never dropped', /never dropped/i.test(html));
   t.ok('no alarm when nothing is wrong', !/tph-warn/.test(html));
 
   T.saveFailure = { at: Date.now(), message: 'QuotaExceededError' };

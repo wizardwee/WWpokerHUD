@@ -211,12 +211,10 @@ script header so they're visible while editing.
    sum. The deep scan prints both and flags a mismatch over 2%. Remaining
    exposure: `hand.pot` (log-summed) is still what P/L falls back to when a
    winner line carries no amount.
-2. **`STORE.players` grows forever.** Nothing prunes. **Half closed in
-   v0.40.0** — the *silent* half. A refused save now sets `saveFailure`, raises
-   a pointer-events:none banner and fills a Storage section in Settings, so
-   hitting the ceiling is visible instead of costing a session's data with no
-   symptom. The growth itself is still unbounded; `lastSeen` is written on every
-   `getPlayer` access and is the key any prune would sort on. See "Pruning" below.
+2. ~~**`STORE.players` grows forever.**~~ **CLOSED across v0.40.0–v0.41.0.**
+   The silent half went first (a refused save raises a banner and fills a
+   Storage section in Settings), then the growth itself — `prunePlayers` bounds
+   the map at `PRUNE_PLAYER_CAP`. See "Storage, and what it costs" below.
 3. **All-in is counted as a raise** (`preflopRaiseEvents`), so a short-stack
    all-in *call* can make the coach read the spot as facing a 3-bet. Needs the
    all-in amount compared against the current bet, which the log doesn't always
@@ -256,6 +254,35 @@ absolute rule as the turn-cue overlay.
 **The harness queues `setTimeout` now** (`sandbox.runTimers()` drains it). It
 used to drop them, and `saveStore`'s write lives inside a 250ms debounce — so
 any test of the save path passed vacuously.
+
+### Pruning (v0.41.0)
+
+`prunePlayers()` in three passes: under 10 hands *and* unseen 30 days → unseen
+180 days at any sample → least-recently-seen down to `PRUNE_PLAYER_CAP` (2000).
+
+**Rule 3 is the only invariant.** Rules 1 and 2 are heuristics that might free
+nothing on the day it matters. "Delete old things and hope" bounds nothing;
+the cap is what makes the ceiling unreachable. Don't drop it in favour of
+"smarter" age rules.
+
+**Thin before old, always.** The measurement above is the reason — a thin record
+is half the cost and none of the read. Reversing this deletes 400-hand regulars
+and keeps one-hand strangers.
+
+Two things survive every rule, and both are load-bearing:
+
+- **Hero's record.** The coach reads it, and it is exactly the record that looks
+  most prunable after a long gap.
+- **Any record with no `lastSeen`.** An unknown age is not an infinite one.
+  Imports and pre-`lastSeen` records land here, and treating epoch-0 as "very
+  old" would let a gist import delete a year of data on the first save after it.
+  They are stamped and judged on a real timestamp next time.
+
+Triggered from `saveStore` — writing is the only thing that makes the store
+bigger — and gated on `STORAGE_WARN_PCT`, so nothing is deleted on a day it
+wasn't needed. A *refused* save forces a pass and retries once; that terminates
+only because the second pass finds nothing to drop and returns false.
+`test/prune.test.js` asserts exactly two `setItem` attempts for that reason.
 
 ## Should this be refactored?
 

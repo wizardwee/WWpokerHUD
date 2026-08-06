@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.40.0
+// @version      0.41.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -15,6 +15,34 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 0.41.0 - STORE.players is bounded. Open finding #2 is CLOSED.
+ *          The shape follows a measurement, not a preference: a fresh one-hand
+ *          record is 562 bytes and a five-hundred-hand one is 1,076. A thin
+ *          record costs HALF what a thick one does for essentially none of the
+ *          value — under minHands classify() returns "Unrated" anyway, and
+ *          shrinkage pulls a three-hand player to the pool average regardless.
+ *          So thin goes before old, and age is the tiebreaker, never the lead:
+ *          a flat "drop everything over 60 days" rule deletes a weekly regular
+ *          with 400 hands and keeps yesterday's one-hand stranger.
+ *            1. Under 10 hands AND not seen in 30 days.
+ *            2. Not seen in 180 days, any sample.
+ *            3. Least recently seen, down to 2000 players.
+ *          Rule 3 is the only part that is an INVARIANT rather than a
+ *          heuristic. Rules 1 and 2 might free nothing; "the store cannot hold
+ *          more than PRUNE_PLAYER_CAP" is what makes the ceiling unreachable
+ *          rather than merely further off.
+ *          Runs off the back of a save (writing is what makes it bigger), and
+ *          only past STORAGE_WARN_PCT — nothing is deleted on a day it was not
+ *          needed. A REFUSED save forces a pass immediately and retries once;
+ *          that terminates because the second pass has nothing left to drop.
+ *          Every run is reported in Settings → Storage and persisted, because
+ *          "we dropped 2,900 records last Tuesday" must not be deniable.
+ *          Two things deliberately survive everything: hero's own record, and
+ *          any record with NO lastSeen — an unknown age is not an infinite one,
+ *          and reading epoch-0 as "very old" would let a gist import delete a
+ *          year of good data on the first save after it. Those are stamped and
+ *          judged on a real timestamp next time.
  *
  * 0.40.0 - A full localStorage is no longer silent. saveStore caught the quota
  *          error and console.warn'd, which on a phone is no warning at all —
@@ -748,10 +776,10 @@
  *    resolves on the live table and is never read, so there is no cross-check:
  *    one missed or unparsed amount silently skews pot odds and MDF for the rest
  *    of the hand, with nothing to notice it.
- *  - STORE.players grows without bound. `lastSeen` is written on every access
- *    and never read, so nothing prunes players you met once. localStorage
- *    failures are caught and logged, which means hitting quota stops saving
- *    silently rather than telling you.
+ *  - [CLOSED in 0.40.0-0.41.0] STORE.players grew without bound and a quota
+ *    failure was caught and logged, so hitting the ceiling stopped saving
+ *    silently. A refusal now raises a banner and prunePlayers() bounds the map
+ *    at PRUNE_PLAYER_CAP.
  *  - Calibration mode's 3s refresh only starts if the setting was already on at
  *    load; enabling it mid-session gives a panel that updates on log lines only.
  */
@@ -795,7 +823,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '0.40.0';
+  const HUD_VERSION = '0.41.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -1085,12 +1113,19 @@
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(STORE));
         if (saveFailure) { saveFailure = null; renderStorageWarning(); }
+        // After the write, because the write is what made it bigger. Throttled
+        // inside, and a no-op until storage is actually under pressure.
+        if (maybePrune(false)) saveStore();
       } catch (e) {
         console.warn('[TornPokerHUD] Save failed', e);
         // Keep the FIRST failure's timestamp: it marks how far back the
         // in-memory-only data goes, which is what the user needs to know.
         if (!saveFailure) saveFailure = { at: Date.now(), message: (e && e.message) || String(e) };
         renderStorageWarning();
+        // Emergency path: the write was REFUSED, so prune now rather than
+        // waiting out the throttle, and retry. Terminates because a second
+        // pass has nothing left to drop and returns false.
+        if (maybePrune(true)) saveStore();
       }
     }, 250);
   }
@@ -1124,6 +1159,91 @@
     if (n >= 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + ' MB';
     if (n >= 1024) return Math.round(n / 1024) + ' KB';
     return Math.round(n) + ' B';
+  }
+
+  // --- Pruning ---------------------------------------------------------------
+  //
+  // The shape here follows from a measurement, not a preference. A fresh
+  // one-hand player record is 562 bytes; a five-hundred-hand one is 1,076. A
+  // thin record therefore costs HALF what a thick one does for essentially none
+  // of the value — under `minHands` classify() returns "Unrated" anyway, and
+  // shrinkage pulls a three-hand player to the pool average regardless.
+  //
+  // So thin goes before old. Age is the tiebreaker, never the lead: a weekly
+  // regular with 400 hands against them is worth far more than yesterday's
+  // one-hand stranger, and a flat age rule deletes exactly the wrong one.
+  //
+  // The LRU cap is the only part that is an INVARIANT rather than a heuristic.
+  // "Delete old things and hope" bounds nothing; "the store cannot hold more
+  // than PRUNE_PLAYER_CAP players" does, and it is what makes the ceiling
+  // unreachable rather than merely further off.
+  const PRUNE_THIN_HANDS = 10;   // below this the record has never produced a read
+  const PRUNE_THIN_DAYS = 30;
+  const PRUNE_MAX_DAYS = 180;    // any sample: a read this old has decayed anyway
+  const PRUNE_PLAYER_CAP = 2000; // ~1.6MB of players, plus a capped 266KB history
+  // The check reads the whole stored string, so it is throttled rather than run
+  // on every debounced save.
+  const PRUNE_MIN_INTERVAL_MS = 60 * 1000;
+
+  // Returns a report; does not save. Callers decide when to persist.
+  function prunePlayers(now) {
+    const t = now || Date.now();
+    const players = (STORE && STORE.players) || {};
+    const day = 24 * 60 * 60 * 1000;
+    const r = { at: t, thin: 0, stale: 0, lru: 0, dropped: 0, kept: 0 };
+    const drop = (xid, bucket) => { delete players[xid]; r[bucket] += 1; r.dropped += 1; };
+
+    Object.keys(players).forEach((xid) => {
+      const p = players[xid];
+      if (!p) { delete players[xid]; return; }
+      // Hero's own record is never a candidate — it holds your own tendencies
+      // and the coach reads it.
+      if (isHeroRecord(xid)) return;
+      // A missing lastSeen is an UNKNOWN age, not an infinite one. Imported
+      // records and anything written before lastSeen was maintained land here,
+      // and reading epoch-0 as "very old" would let a gist import delete a
+      // year of good data on the first save after it. Stamp it and let the
+      // next prune judge it against a real timestamp.
+      if (!p.lastSeen) { p.lastSeen = t; return; }
+      const age = t - p.lastSeen;
+      if ((p.hands || 0) < PRUNE_THIN_HANDS && age > PRUNE_THIN_DAYS * day) { drop(xid, 'thin'); return; }
+      if (age > PRUNE_MAX_DAYS * day) drop(xid, 'stale');
+    });
+
+    // The backstop, oldest first. Hero is excluded from the candidate list, so
+    // the cap is really "cap + you".
+    const left = Object.keys(players).filter((xid) => !isHeroRecord(xid));
+    if (left.length > PRUNE_PLAYER_CAP) {
+      left.sort((a, b) => (players[a].lastSeen || 0) - (players[b].lastSeen || 0));
+      left.slice(0, left.length - PRUNE_PLAYER_CAP).forEach((xid) => drop(xid, 'lru'));
+    }
+    r.kept = Object.keys(players).length;
+    return r;
+  }
+
+  let lastPruneCheck = 0;
+
+  // Runs off the back of a save, never on its own timer: writing is the only
+  // thing that makes the store bigger.
+  //
+  // `force` skips the throttle and the pressure test, for the case where a save
+  // has actually been refused. It cannot loop: a second pass finds nothing to
+  // drop, returns false, and the caller stops re-saving.
+  //
+  // Returns true when something was dropped, i.e. when a re-save is worth it.
+  function maybePrune(force) {
+    const now = Date.now();
+    // Throttle first, deliberately: the pressure test below reads the entire
+    // stored string, which is not something to do on every debounced write.
+    if (!force && now - lastPruneCheck < PRUNE_MIN_INTERVAL_MS) return false;
+    lastPruneCheck = now;
+    if (!force && storageStats().pct < STORAGE_WARN_PCT) return false;
+    const r = prunePlayers(now);
+    if (!r.dropped) return false;
+    // Persisted so it survives a reload — "we dropped 2,900 records last
+    // Tuesday" is exactly the kind of thing that must not be deniable.
+    STORE.lastPrune = r;
+    return true;
   }
 
   // The hero record gains fields too, and `hero || {...}` only helps when it is
@@ -6252,12 +6372,29 @@
       + `<div class="tph-store-line">${fmtBytes(s.chars)} of roughly ${fmtBytes(STORAGE_QUOTA_EST)} `
       + `(${s.pct.toFixed(0)}%) · ${plural(s.players, 'player')} · ${plural(s.hands, 'hand')} in history</div>`
       + (s.level === 'warn'
-        ? '<div class="tph-store-line tph-store-warntext">Getting full. Copy a backup below — when the '
-          + 'limit is reached, saving stops and anything recorded after that is lost on reload.</div>'
+        ? '<div class="tph-store-line tph-store-warntext">Getting full. A cleanup runs automatically past '
+          + `${STORAGE_WARN_PCT}% — copy a backup below first if you want everything kept.</div>`
         : '')
-      + '<div class="tph-store-line">History is capped, but player records are never deleted, so this only '
-      + `grows — about ${fmtBytes(Math.round(s.perPlayer))} each. The limit is an estimate; the browser does `
-      + 'not report the real one here.</div>';
+      + `<div class="tph-store-line">About ${fmtBytes(Math.round(s.perPlayer))} per player. History is capped at `
+      + `${STORE.settings.historyLimit || 200} hands. Past ${STORAGE_WARN_PCT}% a cleanup drops players seen `
+      + `under ${PRUNE_THIN_HANDS} hands and not in ${PRUNE_THIN_DAYS} days, then anything not seen in `
+      + `${PRUNE_MAX_DAYS} days, then the least recently seen down to ${PRUNE_PLAYER_CAP}. Thin records cost `
+      + 'about half what a long-tracked one does and tell you nothing, so they go first. You are never dropped. '
+      + 'The limit is an estimate; the browser does not report the real one here.</div>'
+      + pruneReportHtml();
+  }
+
+  function pruneReportHtml() {
+    const r = STORE && STORE.lastPrune;
+    if (!r || !r.dropped) return '';
+    const parts = [];
+    if (r.thin) parts.push(`${r.thin} thin and stale`);
+    if (r.stale) parts.push(`${r.stale} over ${PRUNE_MAX_DAYS} days old`);
+    if (r.lru) parts.push(`${r.lru} least recently seen`);
+    return '<div class="tph-store-line tph-store-warntext">Last cleanup '
+      + `${new Date(r.at).toLocaleDateString()}: dropped ${r.dropped} player record`
+      + `${r.dropped === 1 ? '' : 's'}${parts.length ? ' — ' + parts.join(', ') : ''}. `
+      + `${r.kept} kept.</div>`;
   }
 
   function wireSettingsPanel(panel) {
@@ -6909,6 +7046,15 @@
       // can guarantee — e.g. the storage banner's pointer-events: none.
       CSS,
       saveStore,
+      prunePlayers,
+      maybePrune,
+      PRUNE_THIN_HANDS,
+      PRUNE_THIN_DAYS,
+      PRUNE_MAX_DAYS,
+      PRUNE_PLAYER_CAP,
+      PRUNE_MIN_INTERVAL_MS,
+      get lastPruneCheck() { return lastPruneCheck; },
+      set lastPruneCheck(v) { lastPruneCheck = v; },
       storageStats,
       storageSettingsHtml,
       renderStorageWarning,
