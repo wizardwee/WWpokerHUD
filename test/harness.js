@@ -37,6 +37,7 @@ function classDom() {
       tagName: String(tag || 'div').toUpperCase(),
       className: '',
       innerHTML: '',
+      textContent: '',
       style: { setProperty() {} },
       dataset: {},
       children: [],
@@ -173,6 +174,7 @@ function load(opts = {}) {
   win.window = win;
   win.self = win;
 
+  const pendingTimers = [];
   const sandbox = {
     window: win,
     document,
@@ -180,13 +182,27 @@ function load(opts = {}) {
     navigator: win.navigator,
     location: win.location,
     console,
-    // Timers are stubbed to no-ops: the file installs several long-lived
-    // intervals (badge render, log poll, hero retry) that would keep node alive
-    // and fire against a DOM that isn't there.
-    setTimeout: () => 0,
+    // setInterval is a no-op: the file installs several long-lived intervals
+    // (badge render, log poll, hero retry) that would keep node alive and fire
+    // against a DOM that isn't there.
+    //
+    // setTimeout is QUEUED rather than dropped, because some behaviour only
+    // exists inside one — saveStore debounces its write by 250ms, so a dropped
+    // timer means the save never happens and a test of it passes vacuously.
+    // Nothing runs until a test calls sandbox.runTimers().
+    setTimeout: (fn) => { pendingTimers.push(fn); return pendingTimers.length; },
     clearTimeout() {},
     setInterval: () => 0,
     clearInterval() {},
+    // Drain the queue. Callbacks may schedule more; that is drained too, with a
+    // cap so a self-rescheduling poll can't spin forever.
+    runTimers(maxRounds) {
+      const cap = maxRounds || 20;
+      for (let i = 0; i < cap && pendingTimers.length; i += 1) {
+        const due = pendingTimers.splice(0, pendingTimers.length);
+        due.forEach((fn) => { try { fn(); } catch (e) { /* surfaced by assertions */ } });
+      }
+    },
     fetch: () => Promise.reject(new Error('network disabled in harness')),
   };
   sandbox.globalThis = sandbox;

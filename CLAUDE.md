@@ -211,10 +211,12 @@ script header so they're visible while editing.
    sum. The deep scan prints both and flags a mismatch over 2%. Remaining
    exposure: `hand.pot` (log-summed) is still what P/L falls back to when a
    winner line carries no amount.
-2. **`STORE.players` grows forever.** `lastSeen` is written on every access and
-   never read; nothing prunes. `saveStore` catches quota errors and logs, so
-   hitting the localStorage ceiling stops persistence *silently*. Surface a save
-   failure in the UI before adding pruning — silent data loss is the worse half.
+2. **`STORE.players` grows forever.** Nothing prunes. **Half closed in
+   v0.40.0** — the *silent* half. A refused save now sets `saveFailure`, raises
+   a pointer-events:none banner and fills a Storage section in Settings, so
+   hitting the ceiling is visible instead of costing a session's data with no
+   symptom. The growth itself is still unbounded; `lastSeen` is written on every
+   `getPlayer` access and is the key any prune would sort on. See "Pruning" below.
 3. **All-in is counted as a raise** (`preflopRaiseEvents`), so a short-stack
    all-in *call* can make the coach read the spot as facing a 3-bet. Needs the
    all-in amount compared against the current bet, which the log doesn't always
@@ -224,6 +226,36 @@ script header so they're visible while editing.
 5. **`tableMax` (default 9) only drives the equity quote**, not the preflop
    charts, which read the per-hand seat count. At a 6-max table with the default
    left alone, equity reads pessimistically (quoted vs 8 opponents).
+
+## Storage, and what it costs (v0.40.0)
+
+Measured, not guessed:
+
+| | Size |
+|---|---|
+| The script itself | 340 KB, fetched once — **not** a runtime concern |
+| A fresh 1-hand player record | **562 bytes** |
+| A long-tracked player record | **1,076 bytes** |
+| Hand history at `historyLimit: 200` | ~266 KB, **capped** |
+
+The number that matters: **a one-hand record costs half what a five-hundred-hand
+record costs.** Any prune should therefore go after thin records before old
+ones — age is the wrong primary axis, because a weekly regular is worth more
+than yesterday's stranger.
+
+`STORAGE_QUOTA_EST` (5 MB) is an **estimate**. The Storage Manager API is absent
+in the PDA webview, so there is no way to ask. It renders a proportion and warns
+at 75%; it must **never gate a write** — guessing low would refuse data that
+would have fitted.
+
+`saveFailure` is set when localStorage refuses a write and cleared when one
+succeeds. The **first** failure's timestamp is kept, because it marks how far
+back the memory-only data goes. The banner is `pointer-events: none`, same
+absolute rule as the turn-cue overlay.
+
+**The harness queues `setTimeout` now** (`sandbox.runTimers()` drains it). It
+used to drop them, and `saveStore`'s write lives inside a 250ms debounce — so
+any test of the save path passed vacuously.
 
 ## Should this be refactored?
 

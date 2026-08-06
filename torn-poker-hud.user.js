@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.39.0
+// @version      0.40.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -15,6 +15,33 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 0.40.0 - A full localStorage is no longer silent. saveStore caught the quota
+ *          error and console.warn'd, which on a phone is no warning at all —
+ *          and it is the worst failure in the file precisely because it has no
+ *          symptom: the HUD keeps working perfectly off the in-memory STORE for
+ *          the rest of the session, then loses everything recorded since the
+ *          first refusal on reload.
+ *            - A refusal now sets `saveFailure` and raises a banner. It is
+ *              pointer-events:none, per the rule that nothing the HUD draws
+ *              over the table may swallow a tap on Fold or Call.
+ *            - Settings gained a Storage section: a meter, the size, the player
+ *              and history counts, and the per-player cost. Placed directly
+ *              above Backup, because copying one is the remedy for every state
+ *              it can report. Amber past 75%.
+ *            - The players list footer carries the same figure, since that is
+ *              where the player count is visible.
+ *          A successful save clears the state; the FIRST failure's timestamp is
+ *          kept, since it marks how far back the memory-only data goes.
+ *          The quota is an ESTIMATE (5MB) — the Storage Manager API is absent
+ *          in the PDA webview. It renders a proportion and warns early; it
+ *          never gates a write, because guessing low would refuse data that
+ *          would have fitted.
+ *          test/harness.js now QUEUES setTimeout instead of dropping it, with
+ *          runTimers() to drain. saveStore's write lives inside a 250ms
+ *          debounce, so a dropped timer meant any test of it passed vacuously.
+ *          Open finding #2 is half closed: this is the "surface it" half. The
+ *          store still grows without bound.
  *
  * 0.39.0 - Recent form on the badge is a two-level Bayesian blend rather than a
  *          mode switch: the window is shrunk toward the player's OWN baseline,
@@ -768,7 +795,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '0.39.0';
+  const HUD_VERSION = '0.40.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -1041,13 +1068,62 @@
   let STORE = loadStore();
   let saveScheduled = false;
 
+  // Set when localStorage REFUSES a write, cleared when one succeeds again.
+  //
+  // This used to be a console.warn and nothing else, which on a phone is
+  // invisible. The failure mode it hides is the worst one in the file: the HUD
+  // keeps working perfectly for the rest of the session — badges, stats, coach,
+  // all live off the in-memory STORE — and then everything recorded since the
+  // first refusal vanishes on reload, with no symptom until it is gone.
+  let saveFailure = null;
+
   function saveStore() {
     if (saveScheduled) return;
     saveScheduled = true;
     setTimeout(() => {
       saveScheduled = false;
-      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(STORE)); } catch (e) { console.warn('[TornPokerHUD] Save failed', e); }
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(STORE));
+        if (saveFailure) { saveFailure = null; renderStorageWarning(); }
+      } catch (e) {
+        console.warn('[TornPokerHUD] Save failed', e);
+        // Keep the FIRST failure's timestamp: it marks how far back the
+        // in-memory-only data goes, which is what the user needs to know.
+        if (!saveFailure) saveFailure = { at: Date.now(), message: (e && e.message) || String(e) };
+        renderStorageWarning();
+      }
     }, 250);
+  }
+
+  // Roughly what a WebView allows one origin. NOT a quota read — the Storage
+  // Manager API is absent in the PDA webview, so there is no way to ask. Used
+  // only to render a proportion and to warn early; never to gate a write, since
+  // guessing low would refuse data that would have fitted.
+  const STORAGE_QUOTA_EST = 5 * 1024 * 1024;
+  const STORAGE_WARN_PCT = 75;
+
+  function storageStats() {
+    let chars = 0;
+    try { chars = (localStorage.getItem(STORAGE_KEY) || '').length; } catch (e) { /* unreadable */ }
+    const players = Object.keys((STORE && STORE.players) || {}).length;
+    return {
+      // Browsers charge localStorage in UTF-16 code units, which is what
+      // String#length reports — so this is the figure the quota actually sees,
+      // and it is ~1 byte per character for the ASCII this store is mostly of.
+      chars,
+      players,
+      hands: ((STORE && STORE.hands) || []).length,
+      pct: (100 * chars) / STORAGE_QUOTA_EST,
+      perPlayer: players ? chars / players : 0,
+      failed: !!saveFailure,
+      level: saveFailure ? 'bad' : ((100 * chars) / STORAGE_QUOTA_EST >= STORAGE_WARN_PCT ? 'warn' : 'ok'),
+    };
+  }
+
+  function fmtBytes(n) {
+    if (n >= 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + ' MB';
+    if (n >= 1024) return Math.round(n / 1024) + ' KB';
+    return Math.round(n) + ' B';
   }
 
   // The hero record gains fields too, and `hero || {...}` only helps when it is
@@ -5100,6 +5176,23 @@
       box-shadow: 0 2px 8px rgba(0,0,0,0.5); cursor: grab;
       touch-action: none; user-select: none; -webkit-user-select: none; }
     .tph-gear.tph-dragging { cursor: grabbing; opacity: 0.85; }
+    /* Storage-full banner. pointer-events:none is NOT optional — it sits over
+       the table, and a swallowed tap on Fold is worse than any warning. */
+    .tph-storage-warn { position: fixed; z-index: 100001; top: 0; left: 0; right: 0;
+      pointer-events: none; background: rgba(150,26,26,0.95); color: #fff !important;
+      font: 600 11px/1.4 -apple-system, sans-serif; padding: 5px 8px; text-align: center;
+      letter-spacing: 0.2px; }
+    .tph-gear.tph-storage-bad { box-shadow: 0 0 0 2px #ffd21e; }
+    /* Storage meter in Settings. */
+    .tph-storebar { position: relative; height: 8px; border-radius: 4px; margin: 4px 0 3px;
+      background: rgba(255,255,255,.10); }
+    .tph-storebar-fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px;
+      background: #5aa9e6; }
+    .tph-storebar-fill.tph-store-warn { background: #ffc046; }
+    .tph-storebar-fill.tph-store-bad { background: #ff5b4d; }
+    .tph-store-line { font-size: 10px; line-height: 1.4; color: #8d959c !important; margin: 2px 0; }
+    /* After .tph-store-line, so it wins on the same element. */
+    .tph-store-warntext { color: #ffc046 !important; }
 
     /* ── "It's your turn" cues ───────────────────────────────────────────────
        Non-negotiable: pointer-events NONE on the overlay. This sits over the
@@ -6032,6 +6125,13 @@
         <b>Lifetime:</b> ${STORE.hero.hands} hands, ${fmtSignedMoney(STORE.hero.netChips)}
         &nbsp;|&nbsp; <b>${fmtBB(STORE.hero.netBB)}</b> ${fmtBB100(STORE.hero.netBB, STORE.hero.bbHands)}
         <br>${(STORE.hands || []).length} hands in history
+        &nbsp;|&nbsp; ${(() => {
+          // This list is where the player count is visible, so it is the right
+          // place to say what that count is costing.
+          const s = storageStats();
+          const cls = s.level === 'ok' ? '' : ' class="tph-store-warntext"';
+          return `<span${cls}>${fmtBytes(s.chars)} stored (${s.pct.toFixed(0)}%)</span>`;
+        })()}
         ${poolComparisonLine()}
       </div>
     `,
@@ -6122,6 +6222,7 @@
       <label>OAuth App Client ID: <input type="text" class="tph-client-id" value="${escapeHtml(STORE.settings.githubClientId)}" style="width:70%"></label><br>
       <button class="tph-connect">${GistSync.status === 'connected' ? 'Re-sync now' : 'Connect'}</button>
       <div class="tph-sync-status">${escapeHtml(syncStatusText())}</div>
+      ${storageSettingsHtml()}
       <h4>Backup</h4>
       <textarea class="tph-export" readonly></textarea>
       <button class="tph-copy-export">Copy</button>
@@ -6132,6 +6233,31 @@
       <button class="tph-reset">Reset all data</button>
     `,
     });
+  }
+
+  // Sits immediately above Backup on purpose: the remedy for every state this
+  // can report is "copy a backup", and it should be the next thing under your
+  // thumb rather than something to go looking for.
+  function storageSettingsHtml() {
+    const s = storageStats();
+    const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+    return '<h4>Storage</h4>'
+      + (s.failed
+        ? '<div class="tph-warn">⚠ The last save was REFUSED — storage is full. Everything recorded since '
+          + `${new Date(saveFailure.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} `
+          + 'is in memory only and will be lost when this page reloads. Copy a backup below now, then Reset all data.</div>'
+        : '')
+      + `<div class="tph-storebar"><div class="tph-storebar-fill tph-store-${s.level}" `
+      + `style="width:${Math.min(100, s.pct).toFixed(1)}%"></div></div>`
+      + `<div class="tph-store-line">${fmtBytes(s.chars)} of roughly ${fmtBytes(STORAGE_QUOTA_EST)} `
+      + `(${s.pct.toFixed(0)}%) · ${plural(s.players, 'player')} · ${plural(s.hands, 'hand')} in history</div>`
+      + (s.level === 'warn'
+        ? '<div class="tph-store-line tph-store-warntext">Getting full. Copy a backup below — when the '
+          + 'limit is reached, saving stops and anything recorded after that is lost on reload.</div>'
+        : '')
+      + '<div class="tph-store-line">History is capped, but player records are never deleted, so this only '
+      + `grows — about ${fmtBytes(Math.round(s.perPlayer))} each. The limit is an estimate; the browser does `
+      + 'not report the real one here.</div>';
   }
 
   function wireSettingsPanel(panel) {
@@ -6641,6 +6767,24 @@
     el.addEventListener('pointercancel', endDrag);
   }
 
+  // Loud, because silent data loss is the failure this exists to prevent — but
+  // `pointer-events: none`, because it covers the top of the table and the rule
+  // there is absolute: one tap swallowed on Fold or Call is worse than any
+  // warning is good. Same constraint as the turn-cue overlay.
+  //
+  // Idempotent, so it can be called from the save path as often as that fires.
+  function renderStorageWarning() {
+    const existing = document.querySelector('.tph-storage-warn');
+    if (existing) existing.remove();
+    const gear = document.querySelector('.tph-gear');
+    if (gear) gear.classList.toggle('tph-storage-bad', !!saveFailure);
+    if (!saveFailure) return;
+    const el = document.createElement('div');
+    el.className = 'tph-storage-warn';
+    el.textContent = '⚠ HUD storage is full — nothing is being saved. Settings → Storage.';
+    document.body.appendChild(el);
+  }
+
   function renderGear() {
     const gear = document.createElement('div');
     gear.className = 'tph-gear';
@@ -6761,6 +6905,18 @@
       stackSwingBB,
       stackBarHtml,
       BET_SIZE_MIN,
+      // Exposed so a test can assert a CSS invariant that only the stylesheet
+      // can guarantee — e.g. the storage banner's pointer-events: none.
+      CSS,
+      saveStore,
+      storageStats,
+      storageSettingsHtml,
+      renderStorageWarning,
+      fmtBytes,
+      STORAGE_QUOTA_EST,
+      STORAGE_WARN_PCT,
+      get saveFailure() { return saveFailure; },
+      set saveFailure(v) { saveFailure = v; },
       tablesPlayed,
       recentTablesOf,
       noteRecentTable,
