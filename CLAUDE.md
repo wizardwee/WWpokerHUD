@@ -378,10 +378,42 @@ played, `2` played and raised. Deliberately **not** hand records: this is stored
 for every player forever and the store already grows unboundedly (open finding
 #2). Three states is all `sessionRates` needs.
 
-Badges default to `badgeMode: 'session'` over `sessionWindow: 15`, falling back
-to lifetime while the window is thin. How someone is playing *now* beats their
-long-run average — a nit who has just started 3-betting everything is the read
-that matters, and lifetime figures actively hide it.
+Badges default to `badgeMode: 'session'` over `sessionWindow: 15`. How someone
+is playing *now* beats their long-run average — a nit who has just started
+3-betting everything is the read that matters, and lifetime figures actively
+hide it.
+
+### The window is blended, not switched to (v0.39.0)
+
+`blendedRates(p, n)` is a two-level hierarchy:
+
+    window  ->  their history before the window  ->  POOL_AVG
+
+The badge used to *pick* one of a lifetime figure and a **raw** window figure,
+crossing over at `SESSION_BADGE_MIN = 6` hands. **Don't reintroduce a
+threshold.** That crossover moved the badge toward the *noisier* of the two
+estimates at exactly the moment it claimed to know more, and could shift it 40
+points on one hand. The blend moves continuously and the badge has no modes.
+
+Two invariants:
+
+- **The prior excludes the window.** Those hands are inside `p.hands`, so using
+  lifetime directly double-counts them and lets a long stretch of new behaviour
+  quietly reinforce the baseline it is being measured against. Same reasoning as
+  `tiltRead`'s baseline. With no history outside the window the prior collapses
+  to `POOL_AVG` — right for a player you have only just met.
+- **`RECENT_PRIOR_WEIGHT` (8) is lighter than `PRIOR_WEIGHT` (12)** on purpose.
+  A player's own history predicts their next hand far better than a pool average
+  does, but the whole point of a recent read is that it is allowed to move.
+
+Only VPIP and PFR can be windowed at all, because `player.recent` stores three
+bits per hand. AFq on the badge is therefore always lifetime, and the archetype
+**type** stays lifetime too — 🤮 is what flags someone playing off-type right
+now. Widening `recent` would buy windowed 3-bet/c-bet at the cost of feeding
+open finding #2.
+
+`test/blended-rates.test.js` states the properties, including a max-step-per-hand
+assertion the old switching code fails.
 
 **`tiltRead` is behavioural, not financial.** It compares a player's recent VPIP
 against *their own* prior baseline, never against the pool and never against
@@ -389,6 +421,28 @@ money lost. A player stuck three buy-ins who keeps playing their game is not
 tilting; a station who has always played 70% is not either. The baseline
 **excludes the recent window**, so a long tilt stretch can't quietly raise the
 number it is being measured against.
+
+## This-hand roles on the badges (v0.39.0)
+
+`handRoles(hand)` marks who holds the initiative in the hand *in front of you* —
+gold `PFR`/`3B`/`4B` on the preflop raiser, blue `DONK`/`RR` on anyone taking the
+betting lead postflop who wasn't that raiser.
+
+**It is derived from `hand.actions` on every render, not tracked in parallel
+state.** There is nothing to keep in sync, it is correct after a mid-hand
+re-render (badges redraw every 4s), and it empties itself at settlement because
+`freshHandState()` clears `actions`. Don't "optimise" it into counters updated
+from the parse path — that is a second copy of state that can drift.
+
+Three choices worth preserving:
+
+- **The LAST preflop raiser, not the first.** In a 3-bet pot the 3-bettor is the
+  seat everyone else is playing against. `aggressorByStreet.preflop` gives the
+  same xid but not the raise *count*, which is what lets the chip say `3B`.
+- **The preflop raiser never gets a postflop chip.** Their c-bet is expected; a
+  marker on nearly every hand carries no information.
+- Inherits open finding #3 — an all-in counts as a raise, so an all-in *call*
+  can inflate the tag one level.
 
 ## Showdown ranges (v0.26.0)
 

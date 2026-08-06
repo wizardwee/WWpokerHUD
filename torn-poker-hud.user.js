@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.38.0
+// @version      0.39.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -15,6 +15,50 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 0.39.0 - Recent form on the badge is a two-level Bayesian blend rather than a
+ *          mode switch: the window is shrunk toward the player's OWN baseline,
+ *          which is itself shrunk toward POOL_AVG.
+ *            window -> their history before the window -> POOL_AVG
+ *          It used to pick one of a lifetime figure and a RAW window figure,
+ *          crossing over at 6 hands (SESSION_BADGE_MIN, now deleted). That
+ *          crossover jumped toward the noisier of the two estimates and could
+ *          move the badge 40 points on a single hand. Now a 1-hand window reads
+ *          as their baseline and walks toward what it is actually seeing as it
+ *          fills — no threshold, no two modes.
+ *          The prior EXCLUDES the window, same as tiltRead's baseline: those
+ *          hands are inside p.hands, and counting them twice would let a long
+ *          stretch of new behaviour reinforce its own prior. With no history
+ *          outside the window it collapses to POOL_AVG, which is right for a
+ *          player you have only just met.
+ *          shrunkPct grew an optional 4th argument (prior weight); three-arg
+ *          callers are unchanged. RECENT_PRIOR_WEIGHT is 8, lighter than
+ *          PRIOR_WEIGHT's 12 — a player's own history predicts their next hand
+ *          better than a pool average, but a recent read has to be able to move.
+ *
+ *          Seat badges mark who holds the initiative in the hand in front of
+ *          you, not just what kind of player they are.
+ *            - Gold PFR / 3B / 4B on whoever made the LAST preflop raise. The
+ *              last, not the first: in a 3-bet pot the 3-bettor is the seat
+ *              everyone else is playing against, and the level is worth naming.
+ *            - Blue DONK (led out) or RR (check-raised, or raised the c-bet) on
+ *              anyone taking the betting lead postflop who was NOT that raiser.
+ *              The preflop raiser c-betting is expected and carries no read, so
+ *              they never get a postflop chip.
+ *          Both are derived from hand.actions on every render rather than
+ *          tracked in parallel state, so they are correct after a mid-hand
+ *          re-render and clear themselves when the hand settles. Toggleable in
+ *          Settings → Seat labels.
+ *          The collapsed coach pill leads with 📖.
+ *          "Stack this sitting" is one bar instead of three cash rows. The
+ *          whole content of that read is where NOW sits between the low and the
+ *          high, which three stacked figures made you work out; the track spans
+ *          the sitting's range, the fill ends at now, and a pale tick marks
+ *          where they sat down. Four fewer rows on a phone.
+ *          "Bet size" now carries its sample ("of pot · 9 bets, low") and the
+ *          legend says what it measures — average bet/raise as a share of the
+ *          pot BEFORE it — which the row never explained. The 12-bet threshold
+ *          the exploit plan already gated on is now BET_SIZE_MIN, shared.
  *
  * 0.38.0 - The collapsed pill is "Coach", and it carries a live exploit tip.
  *          It used to read "📊 GTO" — wrong on both counts. These are reference
@@ -724,7 +768,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '0.38.0';
+  const HUD_VERSION = '0.39.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -881,6 +925,7 @@
     badgeMode: 'session',
     sessionWindow: 15,
     showSelfBadge: true, // badge your own seat too — see renderBadges
+    showRoleBadges: true, // PFR/3B/DONK/RR chips for THIS hand — see handRoles
     turnCues: true,       // pulsing border + green gear when it's your turn
     nextToActCue: true,   // quieter amber border when you're one seat away
     turnVibrate: false, // opt-in: a short buzz on the rising edge only
@@ -1797,6 +1842,56 @@
     return { downBB: (s.high - s.now) / s.bb, upBB: (s.now - s.start) / s.bb };
   }
 
+  // "Stack this sitting" as one bar rather than four table rows.
+  //
+  // Three cash figures stacked vertically was a lot of a phone screen for a
+  // question whose whole content is *where NOW sits between them*. The track
+  // spans low..high for the current sitting, the fill ends at now, and the pale
+  // tick marks where they sat down — so "how far off their high" and "up or
+  // down since they sat" are both readable without doing the subtraction.
+  //
+  // Returns '' when there is no stack record, so the caller can drop the
+  // heading with it.
+  function stackBarHtml(p) {
+    const s = p && p.stack;
+    if (!s || !(s.high > 0)) return '';
+    const span = s.high - s.low;
+    // A player who hasn't swung yet has low === high, and a position within a
+    // zero-width range means nothing — show the track full rather than dividing
+    // by zero and rendering NaN%.
+    const pct = (v) => (span > 0 ? Math.max(0, Math.min(100, ((v - s.low) / span) * 100)) : 100);
+    const bb = (v) => (s.bb ? ` · ${(v / s.bb).toFixed(0)}bb` : '');
+    const sw = stackSwingBB(p);
+    const notes = [];
+    if (sw && sw.downBB >= 1) {
+      notes.push(`<span class="tph-stack-down">−${sw.downBB.toFixed(0)}bb off their high</span>`);
+    }
+    if (sw && Math.abs(sw.upBB) >= 1) {
+      notes.push(`<span class="${sw.upBB >= 0 ? 'tph-stack-up' : 'tph-stack-down'}">`
+        + `${sw.upBB >= 0 ? '+' : '−'}${Math.abs(sw.upBB).toFixed(0)}bb since sitting down</span>`);
+    }
+    // The start tick is suppressed when it would sit on top of an end cap:
+    // a 2px line under the fill's own edge reads as a rendering artefact.
+    const startPct = (s.start > 0 && span > 0) ? pct(s.start) : null;
+    const showStart = startPct !== null && startPct > 4 && startPct < 96;
+    return '<tr class="tph-stat-head"><td colspan="3"><b>Stack this sitting</b></td></tr>'
+      + '<tr><td colspan="3" class="tph-stackcell">'
+      + `<div class="tph-stackbar" title="Low ${fmtMoney(s.low)} → high ${fmtMoney(s.high)} this sitting.`
+      + `${showStart ? ` Tick = ${fmtMoney(s.start)}, where they sat down.` : ''}">`
+      + `<div class="tph-stackbar-fill" style="width:${pct(s.now).toFixed(1)}%"></div>`
+      + (showStart ? `<div class="tph-stackbar-start" style="left:${startPct.toFixed(1)}%"></div>` : '')
+      + `<div class="tph-stackbar-now" style="left:${pct(s.now).toFixed(1)}%"></div>`
+      + '</div>'
+      + '<div class="tph-stackscale">'
+      + `<span>low ${fmtMoney(s.low)}</span>`
+      + `<span class="tph-stack-now">${fmtMoney(s.now)}${bb(s.now)}</span>`
+      + `<span>high ${fmtMoney(s.high)}</span>`
+      + '</div>'
+      + (notes.length ? `<div class="tph-stack-note">${notes.join(' · ')}</div>` : '')
+      + '<div class="tph-stack-note">Resets when they leave for a session or move stakes.</div>'
+      + '</td></tr>';
+  }
+
   // xid -> stack, for every seat that reports one.
   function readAllStacks() {
     const out = {};
@@ -2206,6 +2301,11 @@
     }
   }
 
+  // Bets needed before an average sizing is worth acting on. One 300%-pot
+  // shove is not a sizing habit. The exploit plan has always gated on this;
+  // the Stats tab used to print the figure with no indication of the sample.
+  const BET_SIZE_MIN = 12;
+
   function noteBetSizing(xid, amt, potBefore) {
     if (!amt || potBefore <= 0) return;
     const p = getPlayer(xid);
@@ -2293,6 +2393,44 @@
       });
       saveStore();
     }
+  }
+
+  // ---- This-hand roles, for the seat badges ----------------------------------
+  //
+  // Who is the preflop raiser, and who has taken the betting lead off them
+  // postflop. DERIVED from hand.actions on every render rather than tracked in
+  // parallel state: there is nothing to keep in sync, it is correct after a
+  // mid-hand re-render (badges redraw every 4s and on every log line), and it
+  // empties itself at settlement because freshHandState() clears actions.
+  //
+  // `pfr` is the LAST preflop raiser, not the first. That is the seat everyone
+  // else is playing against — in a 3-bet pot the 3-bettor holds the initiative,
+  // and it is also the player c-bet tracking already treats as the aggressor.
+  // hand.aggressorByStreet would give the same xid but not the raise COUNT,
+  // which is what lets the tag say 3B/4B instead of a flat "PFR".
+  //
+  // Inherits the known imprecision noted in the header: an all-in is counted as
+  // a raise, so a short-stack all-in CALL can inflate the tag by one level.
+  function handRoles(hand) {
+    const roles = { pfr: null, tag: null, post: {} };
+    if (!hand || !hand.actions) return roles;
+    let raises = 0;
+    hand.actions.forEach((a) => {
+      const aggressive = a.a === 'bet' || a.a === 'raise' || a.a === 'all-in';
+      if (a.s === 'preflop') {
+        if (aggressive) { raises += 1; roles.pfr = a.x; }
+        return;
+      }
+      if (!aggressive || a.x === roles.pfr) return;
+      // Aggression postflop from someone who was NOT the preflop raiser. Only
+      // one player can open a street, so a `bet` here is a donk lead; a raise is
+      // a check-raise or a raise of the c-bet. Both say the same thing — the
+      // initiative has changed hands — but they are different enough reads to
+      // name separately. Latest action wins, so the tag tracks the live street.
+      roles.post[a.x] = (a.a === 'bet') ? 'DONK' : 'RR';
+    });
+    roles.tag = roles.pfr ? (raises <= 1 ? 'PFR' : (raises + 1) + 'B') : null;
+    return roles;
   }
 
   function applyHandResultsAndReset() {
@@ -3182,9 +3320,11 @@
     return w.length ? w : null;
   }
 
-  // VPIP/PFR over the last `n` hands only. Null when the window is too thin to
-  // say anything — the caller falls back to lifetime rather than showing a
-  // number built from three hands.
+  // Raw VPIP/PFR over the last `n` hands. Null when there is no window at all.
+  //
+  // The COUNTS are returned alongside the percentages because blendedRates needs
+  // them: a percentage has thrown away the sample size, which is the only thing
+  // that says how much to believe it.
   function sessionRates(p, n) {
     const win = recentWindow(p, n);
     if (!win) return null;
@@ -3192,6 +3332,8 @@
     const raised = win.filter((c) => (c & RECENT_PLAY_MASK) >= 2).length;
     return {
       hands: win.length,
+      played,
+      raised,
       vpip: (100 * played) / win.length,
       pfr: (100 * raised) / win.length,
     };
@@ -3342,10 +3484,14 @@
   // and it degrades continuously instead of flipping at a threshold.
   const PRIOR_WEIGHT = 12;
 
-  function shrunkPct(made, opps, poolPct) {
+  // `weight` and `poolPct` are the prior: how many pseudo-observations of what
+  // rate. Both default to the pool-level prior above; blendedRates passes a
+  // player's own history instead, which is what makes the hierarchy work.
+  function shrunkPct(made, opps, poolPct, weight) {
+    const w = weight == null ? PRIOR_WEIGHT : weight;
     const n = opps || 0;
-    if (n <= 0 && !PRIOR_WEIGHT) return null;
-    return (100 * (made + PRIOR_WEIGHT * (poolPct / 100))) / (n + PRIOR_WEIGHT);
+    if (n <= 0 && !w) return null;
+    return (100 * (made + w * (poolPct / 100))) / (n + w);
   }
 
   // Same shape as computeRates, with every rate shrunk toward POOL_AVG.
@@ -3367,6 +3513,56 @@
       afq: raw.afq,
       avgBetPct: raw.avgBetPct,
       byStreet: raw.byStreet,
+    };
+  }
+
+  // Strength of the RECENT window's prior, in pseudo-hands. Lower than
+  // PRIOR_WEIGHT on purpose: the prior here is the player's own history, which
+  // is a far better guess at their next hand than the pool average is, but the
+  // whole point of a recent read is that it is allowed to move. At 8, a
+  // 15-hand window is ~65% window / 35% history, a 6-hand window ~43%, and a
+  // 1-hand window ~11% — i.e. essentially their baseline.
+  const RECENT_PRIOR_WEIGHT = 8;
+
+  // Recent form, done properly: the last `n` hands shrunk toward the player's
+  // OWN baseline, which is itself shrunk toward the pool. Two levels —
+  //
+  //     window  ->  their history before the window  ->  POOL_AVG
+  //
+  // This replaces a hard switch at SESSION_BADGE_MIN hands, which had the badge
+  // showing a lifetime figure at 5 hands and a *raw 6-hand* figure at 6 — a
+  // jump toward the noisier of the two estimates, and one that could move the
+  // number 40 points on a single hand. The blend moves continuously instead,
+  // and the badge no longer has two modes to be in.
+  //
+  // The prior EXCLUDES the window, same as tiltRead's baseline. The window's
+  // hands are inside p.hands, so using lifetime directly would count them twice
+  // and make a long stretch of new behaviour quietly reinforce its own prior.
+  // With no history outside the window the prior collapses to POOL_AVG, which
+  // is the right answer for a player you have only just met.
+  //
+  // Returns null when there is no window; the caller falls back to lifetime.
+  function blendedRates(p, n) {
+    const win = sessionRates(p, n);
+    if (!win) return null;
+    // Clamped: records written before `recent` existed, or a partially merged
+    // one, can leave the window holding more hands than the lifetime counters.
+    const priorHands = Math.max(0, (p.hands || 0) - win.hands);
+    const priorPlayed = Math.max(0, (p.vpip || 0) - win.played);
+    const priorRaised = Math.max(0, (p.pfr || 0) - win.raised);
+    const baseVpip = shrunkPct(priorPlayed, priorHands, POOL_AVG.vpip);
+    const basePfr = shrunkPct(priorRaised, priorHands, POOL_AVG.pfr);
+    return {
+      hands: win.hands,
+      vpip: shrunkPct(win.played, win.hands, baseVpip, RECENT_PRIOR_WEIGHT),
+      pfr: shrunkPct(win.raised, win.hands, basePfr, RECENT_PRIOR_WEIGHT),
+      // Kept so the tooltip can quote what was actually OBSERVED in the window
+      // alongside the estimate. Same rule as the Stats tab: print raw, colour
+      // and classify off the adjusted figure.
+      rawVpip: win.vpip,
+      rawPfr: win.pfr,
+      baseVpip,
+      basePfr,
     };
   }
 
@@ -4557,7 +4753,7 @@
     }
 
     // --- Sizing tells --------------------------------------------------------
-    if (r.avgBetPct != null && p.betSizeCount >= 12) {
+    if (r.avgBetPct != null && p.betSizeCount >= BET_SIZE_MIN) {
       if (r.avgBetPct > 85) {
         add(45, 'Sizing', `Averages ${r.avgBetPct.toFixed(0)}% of pot when betting (${p.betSizeCount} bets) — `
           + 'oversized. At this pool that usually means value, not a bluff.', 'big bet = value');
@@ -4730,6 +4926,18 @@
     .tph-badge-self b { color: #7ee0a6 !important; }
     .tph-badge .tph-badge-dim { color: #9fb0bf !important; }
     .tph-badge .tph-badge-tilt, .tph-badge .tph-badge-heat { margin-right: 2px; }
+    /* This-hand role markers. Deliberately a filled chip rather than more text
+       in the badge's own voice — these describe the hand in front of you, not
+       the player, and they disappear at settlement. Colour is declared here
+       because pinTextColor leaves any tph- element alone, so one that declares
+       none is left to Torn's own bare-element rules. */
+    .tph-badge .tph-badge-role { border-radius: 2px; padding: 0 3px; margin-right: 3px;
+      font-weight: 700; letter-spacing: 0; color: #0d1117 !important; }
+    .tph-badge .tph-role-pre { background: #ffc94d; }
+    .tph-badge .tph-role-post { background: #7fd4ff; }
+    /* Must come after .tph-badge (same specificity, later wins) — without the
+       extra room the role chip pushes V/P/A past the clip. */
+    .tph-badge-wide { max-width: 178px; }
     .tph-state-note { color: #ffd9a0 !important; font-size: 11px; line-height: 1.35;
                       background: rgba(255,192,70,.10); border-bottom: none !important; }
     .tph-self-tilt { color: #ffb3a0 !important; display: block; }
@@ -4797,6 +5005,27 @@
                     background: #fff; opacity: .9; margin-left: -1px; }
     .tph-stat-legend { color: #8d959c !important; font-size: 10px; line-height: 1.35;
                        border-bottom: none !important; padding-top: 7px !important; }
+    /* Stack this sitting, as one bar rather than three cash rows. The track is
+       the low..high range for the CURRENT sitting, the fill ends at now, and
+       the pale tick is where they sat down. No overflow:hidden — the now
+       marker deliberately overhangs the track, and clipping it at 100% would
+       hide it exactly when they are at their high. */
+    .tph-stackcell { padding: 5px 2px 7px !important; }
+    .tph-stackbar { position: relative; height: 8px; border-radius: 4px;
+      background: rgba(255,255,255,.10); margin: 1px 0 4px; }
+    .tph-stackbar-fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px;
+      background: linear-gradient(90deg, #2f6f9e, #5aa9e6); }
+    .tph-stackbar-start { position: absolute; top: 0; bottom: 0; width: 2px;
+      margin-left: -1px; background: rgba(255,255,255,.5); }
+    .tph-stackbar-now { position: absolute; top: -2px; bottom: -2px; width: 3px;
+      margin-left: -1px; border-radius: 2px; background: #fff; }
+    .tph-stackscale { display: flex; justify-content: space-between; align-items: baseline;
+      gap: 6px; font-size: 10px; color: #8d959c !important; }
+    .tph-stackscale .tph-stack-now { color: #e6ebf0 !important; font-size: 11px; font-weight: 700; }
+    .tph-stack-note { font-size: 10px; line-height: 1.35; color: #8d959c !important; margin-top: 3px; }
+    /* After .tph-stack-note, so these win on the spans inside it. */
+    .tph-stack-down { color: #ff8a5b !important; }
+    .tph-stack-up { color: #7ed957 !important; }
     .tph-pool-row td { color: #8d959c !important; font-size: 11px; border-bottom: 1px solid #444; }
     .tph-you { color: #9bd !important; font-size: 9px; margin-left: 4px; border: 1px solid #567;
                border-radius: 3px; padding: 0 3px; vertical-align: middle; }
@@ -4941,6 +5170,7 @@
        banner. */
     .tph-coach-pill { max-width: 62vw; white-space: nowrap; overflow: hidden;
                       text-overflow: ellipsis; display: flex; align-items: center; gap: 6px; }
+    .tph-pill-icon { flex: 0 0 auto; font-size: 13px; line-height: 1; color: #e6ebf0 !important; }
     .tph-pill-tag { color: #9bd !important; font-weight: 600; flex: 0 0 auto; }
     .tph-pill-tip { color: #e6ebf0 !important; overflow: hidden; text-overflow: ellipsis; }
     .tph-calib { position: fixed; z-index: 99999; top: 4px; left: 4px; right: 4px; max-height: 62%; overflow-y: auto;
@@ -5032,9 +5262,6 @@
   // Roughly the badge's own height, used to keep it inside the viewport when a
   // seat sits right at the bottom edge.
   const BADGE_HEIGHT_PX = 14;
-
-  // Below this the session window is too thin to prefer over lifetime.
-  const SESSION_BADGE_MIN = 6;
 
   // One place each, so the badge tooltip, the players list, the Stats tab and
   // the coach all describe these the same way.
@@ -5236,9 +5463,19 @@
     turnCueActive = on;
   }
 
+  function roleTagText(tag) {
+    if (tag === 'DONK') return 'DONK = led out this street without being the preflop raiser.';
+    if (tag === 'RR') return 'RR = raised postflop without being the preflop raiser (check-raise or raise of the c-bet).';
+    if (tag === 'PFR') return 'PFR = made the last raise preflop, so they hold the initiative.';
+    return `${tag} = made the last preflop raise, a ${tag.replace('B', '')}-bet.`;
+  }
+
   function renderBadges() {
     document.querySelectorAll('.tph-badge').forEach((el) => el.remove());
     if (!STORE.settings.showBadges) return;
+    // Computed once for the whole table, not per seat — it walks the action log.
+    const roles = STORE.settings.showRoleBadges === false
+      ? { pfr: null, tag: null, post: {} } : handRoles(currentHand);
     const seats = document.querySelectorAll(SELECTORS.seatContainer);
     seats.forEach((seat) => {
       const xid = resolveSeatKey(seat);
@@ -5253,8 +5490,12 @@
       const player = STORE.players[xid];
       const rect = seat.getBoundingClientRect();
       if (!rect.width && !rect.height) return; // seat not laid out (empty/hidden)
+      // This-hand role marker. A player can't be both, since handRoles skips the
+      // preflop raiser when it looks at postflop aggression.
+      const roleTag = roles.pfr === xid ? roles.tag : (roles.post[xid] || null);
       const badge = document.createElement('div');
-      badge.className = 'tph-badge' + (isSelf ? ' tph-badge-self' : '');
+      badge.className = 'tph-badge' + (isSelf ? ' tph-badge-self' : '')
+        + (roleTag ? ' tph-badge-wide' : '');
       // Below the seat — i.e. under the name and chip stack — rather than over
       // the top of it. Clamped so a bottom-row seat doesn't push it off screen.
       const maxTop = Math.max(0, window.innerHeight - BADGE_HEIGHT_PX);
@@ -5270,13 +5511,14 @@
         badge.style.left = Math.max(0, rect.left) + 'px';
       }
       const label = player ? classify(player) : 'Unrated';
-      // In session mode the badge shows the last `sessionWindow` hands, which is
-      // how they are playing NOW. It falls back to lifetime whenever the window
-      // is too thin to mean anything, so a player you have just sat down with
-      // still reads off everything you know about them.
+      // In session mode V and P are the last `sessionWindow` hands blended
+      // toward the player's own baseline — how they are playing NOW, weighted
+      // by how much of "now" has actually been seen. There is no longer a
+      // threshold at which the badge switches source: a one-hand window reads
+      // as their baseline and walks toward the window's own figure as it fills.
       const sess = player && STORE.settings.badgeMode === 'session'
-        ? sessionRates(player, STORE.settings.sessionWindow || 15) : null;
-      const useSession = !!(sess && sess.hands >= SESSION_BADGE_MIN);
+        ? blendedRates(player, STORE.settings.sessionWindow || 15) : null;
+      const useSession = !!sess;
       const r = player ? computeRates(player) : {};
       const shown = useSession ? sess : r;
       // 🤮 tilting — playing far looser than their own norm.
@@ -5300,17 +5542,28 @@
       // V and P follow the selected window. A (postflop aggression) is always
       // LIFETIME: postflop samples are scarce, so a 15-hand window would be
       // mostly noise. The window marker ("15h") sits before V and P only.
+      // The role marker leads, and is shown even for an unseen player: someone
+      // you have never met who has just 3-bet is exactly the seat you need
+      // flagged, and "NEW" alone doesn't say that.
+      const roleHtml = roleTag
+        ? `<span class="tph-badge-role ${roles.post[xid] ? 'tph-role-post' : 'tph-role-pre'}">${roleTag}</span>`
+        : '';
       badge.innerHTML = hands === 0
-        ? `<b>NEW</b>`
-        : `${tilt ? '<span class="tph-badge-tilt">🤮</span>' : ''}`
+        ? `${roleHtml}<b>NEW</b>`
+        : roleHtml
+          + `${tilt ? '<span class="tph-badge-tilt">🤮</span>' : ''}`
           + `${heat ? '<span class="tph-badge-heat">🔥</span>' : ''}<b>${type}</b> `
           + `<span class="tph-badge-dim">${useSession ? sess.hands + 'h ' : ''}`
           + `V${fmtNum(shown.vpip)} P${fmtNum(shown.pfr)} A${fmtNum(r.afq)}</span>`;
       badge.title = `${isSelf ? 'You' : playerDisplayName(xid)} — ${hands} hand(s) seen. `
+        + (roleTag ? roleTagText(roleTag) + ' ' : '')
         + 'V = VPIP (hands played), P = PFR (raised preflop), A = AFq (postflop aggression). '
         + (useSession
-          ? `V and P cover the last ${sess.hands} hands; A is lifetime. `
-            + `Lifetime V${fmtNum(r.vpip)} P${fmtNum(r.pfr)}.`
+          ? `V and P are the last ${sess.hands} hands (observed V${fmtNum(sess.rawVpip)} P${fmtNum(sess.rawPfr)}) `
+            + `weighted against their own baseline (V${fmtNum(sess.baseVpip)} P${fmtNum(sess.basePfr)}), `
+            + 'so a thin window reads close to the baseline and moves as it fills. A is lifetime. '
+            + `Lifetime V${fmtNum(r.vpip)} P${fmtNum(r.pfr)}. `
+            + 'The TYPE is lifetime — 🤮 is what flags them playing off-type right now.'
           : 'All lifetime.')
         + (label === 'Unrated' && hands > 0 ? ` "?" = provisional, under the ${STORE.settings.minHands}-hand minimum.` : '')
         + (tilt ? ` ${tiltText(tilt)}` : '')
@@ -5376,13 +5629,18 @@
       // collapsing is to reclaim the screen, not to give up the read. The pill
       // now carries the same top exploit tip the expanded panel leads with,
       // shortened to a few words.
+      // 📖 is in its own non-shrinking span rather than inside the tag text, so
+      // the ellipsis that trims a long tip can never eat the thing that
+      // identifies the pill as the coach.
+      const icon = '<span class="tph-pill-icon">📖</span>';
       const tip = currentExploitTip();
       if (tip && tip.entry.short) {
-        pill.innerHTML = `<span class="tph-pill-tag">${escapeHtml(tip.entry.tag)}</span>`
+        pill.innerHTML = icon
+          + `<span class="tph-pill-tag">${escapeHtml(tip.entry.tag)}</span>`
           + `<span class="tph-pill-tip">${escapeHtml(tip.entry.short)}</span>`;
         pill.title = `${playerDisplayName(tip.xid)} — ${tip.entry.text} (tap to expand, drag to move)`;
       } else {
-        pill.innerHTML = '<span class="tph-pill-tag">Coach</span>';
+        pill.innerHTML = icon + '<span class="tph-pill-tag">Coach</span>';
         pill.title = 'Tap to show the coach — drag to move';
       }
       return;
@@ -5564,27 +5822,14 @@
           ${statRow('Limp', r.limpShareOfVpip, s.limpShareOfVpip, 'limpShareOfVpip')}
           ${statRow('AFq', r.afq, r.afq, null)}
           ${statRow('WTSD', r.wtsd, r.wtsd, null)}
-          <tr><td class="tph-stat-l">Bet size</td><td class="tph-stat-v"><b>${r.avgBetPct != null ? r.avgBetPct.toFixed(0) + '%' : '—'}</b></td><td class="tph-stat-n"><span class="tph-stat-norm">of pot</span></td></tr>
-          <tr><td colspan="3" class="tph-stat-legend">Tick = pool average (reference figures, not measured here).</td></tr>
-          ${(() => {
-            const s = p.stack;
-            if (!s) return '';
-            const sw = stackSwingBB(p);
-            const bbOf = (v) => (s.bb ? ` <span class="tph-stat-norm">${(v / s.bb).toFixed(0)}bb</span>` : '');
-            return '<tr class="tph-stat-head"><td colspan="3"><b>Stack this sitting</b></td></tr>'
-              + `<tr><td class="tph-stat-l">Now</td><td class="tph-stat-v"><b>${fmtMoney(s.now)}</b></td>`
-              + `<td class="tph-stat-n">${bbOf(s.now)}</td></tr>`
-              + `<tr><td class="tph-stat-l">High</td><td class="tph-stat-v">${fmtMoney(s.high)}</td>`
-              + `<td class="tph-stat-n">${bbOf(s.high)}</td></tr>`
-              + `<tr><td class="tph-stat-l">Low</td><td class="tph-stat-v">${fmtMoney(s.low)}</td>`
-              + `<td class="tph-stat-n">${bbOf(s.low)}</td></tr>`
-              + (sw && sw.downBB >= 1
-                ? `<tr><td class="tph-stat-l">Off high</td><td class="tph-stat-v" style="color:#ff8a5b !important">`
-                  + `<b>-${sw.downBB.toFixed(0)}bb</b></td><td class="tph-stat-n"></td></tr>`
-                : '')
-              + '<tr><td colspan="3" class="tph-stat-legend">Resets when they leave for a session '
-              + 'or move stakes — a low from a different table would mean nothing.</td></tr>';
-          })()}
+          <tr title="Average bet or raise as a percentage of the pot as it stood BEFORE that bet. 100% is a pot-sized bet. Every bet and raise on every street counts, so it is a sizing habit, not a street-specific one.">
+            <td class="tph-stat-l">Bet size</td>
+            <td class="tph-stat-v"><b>${r.avgBetPct != null ? r.avgBetPct.toFixed(0) + '%' : '—'}</b></td>
+            <td class="tph-stat-n"><span class="tph-stat-norm">of pot${p.betSizeCount ? ` · ${p.betSizeCount} bet${p.betSizeCount === 1 ? '' : 's'}` : ''}${p.betSizeCount && p.betSizeCount < BET_SIZE_MIN ? ', low' : ''}</span></td>
+          </tr>
+          <tr><td colspan="3" class="tph-stat-legend">Bet size = average bet/raise as a share of the pot before it; 100% is pot-sized.
+            Tick = pool average (reference figures, not measured here).</td></tr>
+          ${stackBarHtml(p)}
           ${(() => {
             const tabs = tablesPlayed(p);
             const recent = recentTablesOf(p);
@@ -5834,14 +6079,20 @@
       ${plausibleBB(lastSeenBB) ? `<div style="opacity:.7;margin:2px 0 8px">Table: ${escapeHtml(tableLabel(lastSeenBB))}</div>` : ''}
       <h4>Seat labels</h4>
       <label><input type="checkbox" class="tph-badge-toggle" ${STORE.settings.showBadges ? 'checked' : ''}> Show tendency labels on seats</label><br>
-      <label><input type="checkbox" class="tph-selfbadge-toggle" ${STORE.settings.showSelfBadge ? 'checked' : ''}> Include your own seat (green)</label>
+      <label><input type="checkbox" class="tph-selfbadge-toggle" ${STORE.settings.showSelfBadge ? 'checked' : ''}> Include your own seat (green)</label><br>
+      <label><input type="checkbox" class="tph-rolebadge-toggle" ${STORE.settings.showRoleBadges !== false ? 'checked' : ''}> Mark this hand's raiser and postflop leads</label>
+      <div style="opacity:.7;margin:2px 0 10px">Gold <b>PFR</b> / <b>3B</b> / <b>4B</b> marks whoever made the last preflop raise.
+        Blue <b>DONK</b> (led out) or <b>RR</b> (check-raised or raised the c-bet) marks anyone taking the lead postflop who wasn't
+        that raiser. Both clear when the hand settles.</div>
       <div style="margin:6px 0">
         <label><input type="radio" name="tph-bm" class="tph-bm" value="session" ${STORE.settings.badgeMode === 'session' ? 'checked' : ''}> Recent form</label>
         &nbsp;<label><input type="radio" name="tph-bm" class="tph-bm" value="lifetime" ${STORE.settings.badgeMode !== 'session' ? 'checked' : ''}> Lifetime</label>
         &nbsp;<label>over <input type="number" class="tph-sw" min="5" max="40" value="${STORE.settings.sessionWindow}" style="width:48px"> hands</label>
       </div>
-      <div style="opacity:.7;margin:2px 0 10px">Recent form shows how they are playing NOW and falls back to lifetime
-        until enough hands are seen. 🤮 marks a player running ${TILT_VPIP_JUMP}+ points looser than their own norm (${TILT_VPIP_JUMP_AFTER_LOSS}+ if they just lost a ${BIG_LOSS_BB}bb pot). 🔥 marks someone winning a lot of recent pots. Both apply to you too — see the coach panel.</div>
+      <div style="opacity:.7;margin:2px 0 10px">Recent form shows how they are playing NOW, weighted against their own
+        longer-run baseline: a window with few hands in it reads close to that baseline and moves toward what it is
+        actually seeing as it fills, so the numbers never jump on one hand. The TYPE stays lifetime.
+        🤮 marks a player running ${TILT_VPIP_JUMP}+ points looser than their own norm (${TILT_VPIP_JUMP_AFTER_LOSS}+ if they just lost a ${BIG_LOSS_BB}bb pot). 🔥 marks someone winning a lot of recent pots. Both apply to you too — see the coach panel.</div>
       <div style="opacity:.7;margin:2px 0 10px">Small line under each seat, e.g. <b>STA 15h V74 P12 A16</b>:
         type · window · <b>V</b>PIP (hands played) · <b>P</b>FR (raised preflop) · <b>A</b>Fq (postflop aggression).
         "15h" means V and P cover your last 15 hands; A is always lifetime, since postflop samples are too scarce
@@ -5953,6 +6204,11 @@
     });
     panel.querySelector('.tph-selfbadge-toggle').addEventListener('change', (e) => {
       STORE.settings.showSelfBadge = e.target.checked;
+      saveStore();
+      renderBadges();
+    });
+    panel.querySelector('.tph-rolebadge-toggle').addEventListener('change', (e) => {
+      STORE.settings.showRoleBadges = e.target.checked;
       saveStore();
       renderBadges();
     });
@@ -6453,6 +6709,8 @@
       shrunkPct,
       POOL_AVG,
       PRIOR_WEIGHT,
+      RECENT_PRIOR_WEIGHT,
+      blendedRates,
       ARCHETYPE_RULES,
       POOL_SPREAD,
       deviation,
@@ -6488,6 +6746,8 @@
       FOLD_MIN_GAP_MS,
       get foldArmedAt() { return foldArmedAt; },
       set foldArmedAt(v) { foldArmedAt = v; },
+      handRoles,
+      roleTagText,
       handClassFromCards,
       noteShowdown,
       harvestShownCards,
@@ -6499,6 +6759,8 @@
       buildExploitPlan,
       trackStacks,
       stackSwingBB,
+      stackBarHtml,
+      BET_SIZE_MIN,
       tablesPlayed,
       recentTablesOf,
       noteRecentTable,

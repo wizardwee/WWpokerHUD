@@ -266,4 +266,58 @@ function withSeats(seats) {
   t.eq('previous table behind it', r[1].name, "Cat's Chance");
 }
 
+// --- The stack bar ----------------------------------------------------------
+//
+// Three cash rows collapsed into one bar. The whole content of the read is
+// where NOW sits between the low and the high, so that position has to be
+// right, and the degenerate cases have to render something rather than NaN.
+
+{
+  const T = load();
+  const pct = (html, cls) => {
+    const m = new RegExp(`class="${cls}" style="(?:width|left):([\\d.]+)%`).exec(html);
+    return m ? parseFloat(m[1]) : null;
+  };
+
+  const p = (stack) => ({ stack, hands: 0 });
+
+  {
+    const html = T.stackBarHtml(p({ now: 150, low: 100, high: 300, start: 200, bb: 10, at: 0 }));
+    t.near('the fill ends a quarter along the low..high range', pct(html, 'tph-stackbar-fill'), 25);
+    t.near('the now marker sits at the same point', pct(html, 'tph-stackbar-now'), 25);
+    t.near('the start tick sits where they sat down', pct(html, 'tph-stackbar-start'), 50);
+    t.ok('the low is labelled', /low \$100/.test(html));
+    t.ok('the high is labelled', /high \$300/.test(html));
+    t.ok('down from the high is called out', /off their high/.test(html));
+    t.ok('and so is the move since sitting', /since sitting down/.test(html));
+    t.ok('a loss since sitting is coloured as a loss', /tph-stack-down">−5bb since sitting/.test(html));
+  }
+
+  {
+    // Just sat down: low === high, so the position of `now` in the range is
+    // undefined. A full track is the honest rendering; NaN% is not.
+    const html = T.stackBarHtml(p({ now: 200, low: 200, high: 200, start: 200, bb: 10, at: 0 }));
+    t.eq('a player who has not swung yet gets a full track', pct(html, 'tph-stackbar-fill'), 100);
+    t.ok('and no start tick, which would sit under the end cap', !/tph-stackbar-start/.test(html));
+    t.ok('and no swing notes', !/off their high|since sitting/.test(html));
+  }
+
+  {
+    const html = T.stackBarHtml(p({ now: 400, low: 100, high: 400, start: 100, bb: 10, at: 0 }));
+    t.eq('at their high the fill is full', pct(html, 'tph-stackbar-fill'), 100);
+    t.ok('no "off high" note when they are at it', !/off their high/.test(html));
+    t.ok('up since sitting is coloured as a gain', /tph-stack-up">\+30bb/.test(html));
+  }
+
+  {
+    // No blind level known: the bb conversions must drop out, not print NaN.
+    const html = T.stackBarHtml(p({ now: 150, low: 100, high: 300, start: 200, bb: 0, at: 0 }));
+    t.ok('renders without a blind level', /tph-stackbar/.test(html));
+    t.ok('and prints no NaN', !/NaN/.test(html));
+  }
+
+  t.eq('no stack record renders nothing at all', T.stackBarHtml({ hands: 0, stack: null }), '');
+  t.eq('nor does a null player', T.stackBarHtml(null), '');
+}
+
 process.exit(t.report());
