@@ -85,10 +85,11 @@ no GitHub account needed.
 
 ## Issues / feedback
 
-Open a GitHub Issue on this repo. If something's misreading the table,
-**Settings → Calibration mode → run a deep scan → copy the report** and paste
-it into the issue — that's the fastest way to get a fix, since nobody
-maintaining this can log into Torn and see your table directly.
+Either works — a [GitHub Issue](https://github.com/wizardwee/WWpokerHUD/issues)
+on this repo, or a comment on the GreasyFork listing. If something's misreading
+the table, **Settings → Calibration mode → run a deep scan → copy the report**
+and paste it into whichever one you use — that's the fastest way to get a fix,
+since nobody maintaining this can log into Torn and see your table directly.
 
 ## License
 
