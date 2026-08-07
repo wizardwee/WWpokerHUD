@@ -3,6 +3,8 @@
 // @namespace    torn-poker-hud
 // @version      1.0.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
+// @author       wizardwee
+// @license      MIT
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
 // @updateURL    https://raw.githubusercontent.com/wizardwee/WWpokerHUD/main/torn-poker-hud.user.js
