@@ -2653,11 +2653,6 @@
       || Array.from(seat.classList || []).some((c) => /^folded[_-]/.test(c));
   }
 
-  // In the hand but not on action: pre-action controls are showing.
-  function heroCanPreAct() {
-    return findActionButtons().some((b) => b.__tphPreaction);
-  }
-
   function bootstrapTableWatchers() {
     heroXid = findHeroXid();
     const attached = attachLogObserver();
@@ -3644,8 +3639,16 @@
   // "defend roughly NaN%" on a live table.
   //
   // The DOM figure is authoritative when present; the log sum stays as fallback.
+  //
+  // Selectors come from SELECTORS.potDisplay, split on the comma and tried in
+  // order (most specific first — the wrapper holds side pots as well as the
+  // total). They used to be a hardcoded copy of that entry, which meant
+  // SELECTORS.potDisplay was declared, was the obvious place to edit after a
+  // Torn redeploy, and was read by nothing: updating it would have fixed
+  // nothing and the failure would have been silent. That is the same trap that
+  // left seatName unread for sixteen versions.
   function readDomPot() {
-    for (const sel of ['[class*="totalPotWrap_"]', '[class*="potsWrapper_"]']) {
+    for (const sel of SELECTORS.potDisplay.split(',').map((x) => x.trim())) {
       const el = document.querySelector(sel);
       if (!el) continue;
       const text = el.textContent || '';
