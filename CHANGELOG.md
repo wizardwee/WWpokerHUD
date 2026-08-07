@@ -9,6 +9,44 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 0.42.3
+
+A code review pass over 0.42.0-0.42.2, and two real bugs it found.
+  - The coach's idle line claimed "Waiting for the next hand", but
+    buildCoachAdvice() returns null for TWO things it can't tell
+    apart: no hand at all, and hero being OUT of one still running —
+    folded, so the hole cards it reads off the seat are gone. That
+    is most hands, not an edge case. Now "No read for this
+    decision.", true either way. test/coach-idle.test.js locks down
+    that a truthy currentHand can still produce no advice.
+  - makeResizable pinned the coach panel to a fixed left/top AND
+    wrote coachPos/coachSize on pointerdown/pointerup regardless of
+    whether the grip actually moved — so one stray tap on the
+    24x24 corner (right where a hand reaching for Hide or
+    scrolling the body could brush it) silently traded the panel's
+    default "always hugs the right edge" anchor for a fixed pixel
+    spot that would not re-hug the edge on the next rotate. Pin and
+    persist now both gate on real movement, same idea as
+    makeDraggable's DRAG_THRESHOLD_PX, which this never had.
+Compaction, no behaviour change intended beyond the two fixes above:
+  - Two dead CSS rules deleted — tph-self-heat (the coach's self-
+    HEAT line it styled was removed at 0.34.0) and tph-turn-flag
+    (the "▶ Your turn" text it styled was removed at 0.30.0).
+    test/no-orphans.test.js now checks CSS classes the same way it
+    already checks SELECTORS/DEFAULT_SETTINGS/functions — a class
+    nothing applies has no symptom at all, which is exactly why
+    these two survived eight and twelve versions unnoticed.
+  - dispatchLogEvent's `raise` and `allin` branches shared an exact
+    copy of five lines (VPIP/PFR/3-bet counting, markAggressor) —
+    not incidental, it IS open finding #3 (all-in counts as a
+    raise), so the two copies were one accidental edit away from
+    disagreeing about their own documented imprecision. Pulled into
+    markAsPreflopRaiseAction, one call site instead of two.
+  - pdaFetch's GET and POST branches were a copy of each other
+    wrapping different PDA_http* calls as a Promise — pulled into
+    pdaCall, which also makes the docstring's "single place to
+    patch" claim actually true.
+
 ## 0.42.2
 
 The seat badge was wide enough to reach the community cards.

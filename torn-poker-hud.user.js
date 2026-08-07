@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.42.2
+// @version      0.42.3
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -15,6 +15,42 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 0.42.3 - A code review pass over 0.42.0-0.42.2, and two real bugs it found.
+ *            - The coach's idle line claimed "Waiting for the next hand", but
+ *              buildCoachAdvice() returns null for TWO things it can't tell
+ *              apart: no hand at all, and hero being OUT of one still running —
+ *              folded, so the hole cards it reads off the seat are gone. That
+ *              is most hands, not an edge case. Now "No read for this
+ *              decision.", true either way. test/coach-idle.test.js locks down
+ *              that a truthy currentHand can still produce no advice.
+ *            - makeResizable pinned the coach panel to a fixed left/top AND
+ *              wrote coachPos/coachSize on pointerdown/pointerup regardless of
+ *              whether the grip actually moved — so one stray tap on the
+ *              24x24 corner (right where a hand reaching for Hide or
+ *              scrolling the body could brush it) silently traded the panel's
+ *              default "always hugs the right edge" anchor for a fixed pixel
+ *              spot that would not re-hug the edge on the next rotate. Pin and
+ *              persist now both gate on real movement, same idea as
+ *              makeDraggable's DRAG_THRESHOLD_PX, which this never had.
+ *          Compaction, no behaviour change intended beyond the two fixes above:
+ *            - Two dead CSS rules deleted — tph-self-heat (the coach's self-
+ *              HEAT line it styled was removed at 0.34.0) and tph-turn-flag
+ *              (the "▶ Your turn" text it styled was removed at 0.30.0).
+ *              test/no-orphans.test.js now checks CSS classes the same way it
+ *              already checks SELECTORS/DEFAULT_SETTINGS/functions — a class
+ *              nothing applies has no symptom at all, which is exactly why
+ *              these two survived eight and twelve versions unnoticed.
+ *            - dispatchLogEvent's `raise` and `allin` branches shared an exact
+ *              copy of five lines (VPIP/PFR/3-bet counting, markAggressor) —
+ *              not incidental, it IS open finding #3 (all-in counts as a
+ *              raise), so the two copies were one accidental edit away from
+ *              disagreeing about their own documented imprecision. Pulled into
+ *              markAsPreflopRaiseAction, one call site instead of two.
+ *            - pdaFetch's GET and POST branches were a copy of each other
+ *              wrapping different PDA_http* calls as a Promise — pulled into
+ *              pdaCall, which also makes the docstring's "single place to
+ *              patch" claim actually true.
  *
  * 0.42.2 - The seat badge was wide enough to reach the community cards.
  *          Reported from a live table at "3B 🤮 TAG V35 P23 A67" — ~168px, and
@@ -46,39 +82,6 @@
  *          Also: the changelog moved to CHANGELOG.md (780 lines above the first
  *          line of code, paid for by every read of this file from the top), and
  *          heroCanPreAct, declared at 0.26.1 and never called, is deleted.
- *
- * 0.42.0 - Five screen-real-estate and export changes, all requested from the
- *          table rather than inferred:
- *            - Hero's own badge is lifted SELF_BADGE_LIFT_PX (four badge-lines)
- *              so it sits ABOVE the name instead of under it. Every other seat
- *              has empty felt below it; yours has the name plate, the stack and
- *              whatever Torn draws around the acting seat, so the one position
- *              that works for an opponent is the one that doesn't work for you.
- *            - The coach panel resizes. A real ◢ grip with pointer handlers,
- *              not CSS `resize: both` — the native handle is mouse-only in
- *              practice and this only ever runs in a touch webview. Size
- *              persists to settings.coachSize, is clamped on rotate, and the
- *              body scrolls so the header (the only drag handle, and the Hide
- *              button) can never be sized away.
- *            - The coach STAYS MOUNTED between hands, showing "Waiting for the
- *              next hand" instead of being torn down. You cannot park something
- *              on screen that disappears several times a minute. The reason for
- *              the original teardown is untouched and still honoured: what must
- *              never sit there is STALE advice looking current.
- *            - History tab exports. `playerHistoryExport` writes EVERY recorded
- *              hand against that player to a text file via the same PDA share
- *              handler as Backup — the tab renders 40 and Copy takes those 40,
- *              and an export that silently stopped at the same cap would be a
- *              loss you'd only find much later. Both buttons now state their
- *              count. Falls back to the clipboard where the share sheet isn't
- *              available, rather than appearing to work and producing nothing.
- *            - The HUD button is 32px, down from 44px. It floats over the table
- *              permanently; the red fill and the label are what make it
- *              findable, not the size.
- *            - Player panel tab order is Stats · Range · Exploit · Report:
- *              Exploit and Report are the two written-out reads on one player
- *              and are read together, so they sit beside each other, with the
- *              raw numbers they derive from leading.
  *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
@@ -142,7 +145,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '0.42.2';
+  const HUD_VERSION = '0.42.3';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -215,6 +218,21 @@
     }
   }
 
+  // Wrap a PDA_http* call — a plain (..args, callback) function — as a
+  // Promise. Pulled out of pdaFetch below because GET and POST were an exact
+  // copy of each other but for which function and args they called, which
+  // quietly contradicted the "single place to patch" claim in pdaFetch's own
+  // docstring: the real call shape would have needed patching in two places.
+  function pdaCall(fn, args) {
+    return new Promise((resolve, reject) => {
+      try {
+        fn(...args, (result) => resolve(normalizePdaResponse(result)));
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
+
   /**
    * Torn PDA exposes PDA_httpGet / PDA_httpPost for cross-origin requests
    * instead of fetch/XHR. Signature isn't fully documented publicly, so this
@@ -223,31 +241,11 @@
    * also be exercised in a normal desktop browser during development.
    */
   async function pdaFetch(method, url, { headers = {}, body } = {}) {
-    const hasPdaGet = typeof window.PDA_httpGet === 'function';
-    const hasPdaPost = typeof window.PDA_httpPost === 'function';
-
-    if (method === 'GET' && hasPdaGet) {
-      return new Promise((resolve, reject) => {
-        try {
-          window.PDA_httpGet(url, headers, (result) => {
-            resolve(normalizePdaResponse(result));
-          });
-        } catch (err) {
-          reject(err);
-        }
-      });
+    if (method === 'GET' && typeof window.PDA_httpGet === 'function') {
+      return pdaCall(window.PDA_httpGet, [url, headers]);
     }
-
-    if (method !== 'GET' && hasPdaPost) {
-      return new Promise((resolve, reject) => {
-        try {
-          window.PDA_httpPost(url, headers, body, (result) => {
-            resolve(normalizePdaResponse(result));
-          });
-        } catch (err) {
-          reject(err);
-        }
-      });
+    if (method !== 'GET' && typeof window.PDA_httpPost === 'function') {
+      return pdaCall(window.PDA_httpPost, [url, headers, body]);
     }
 
     const resp = await fetch(url, { method, headers, body });
@@ -1734,11 +1732,7 @@
       addContribution(hand, xid, amt);
       recordStreetAction(xid, 'raise', hand);
       logAction(hand, xid, 'raise', amt);
-      maybeCountVpip(xid, hand);
-      if (hand.street === 'preflop') hand.preflopRaiseEvents += 1;
-      maybeCountPfr(xid, hand);
-      maybeCountThreeBet(xid, hand);
-      markAggressor(xid, hand);
+      markAsPreflopRaiseAction(xid, hand);
       return;
     }
 
@@ -1748,11 +1742,7 @@
       if (amt) { noteBetSizing(xid, amt, hand.pot); addContribution(hand, xid, amt); }
       recordStreetAction(xid, 'raise', hand);
       logAction(hand, xid, 'all-in', amt);
-      maybeCountVpip(xid, hand);
-      if (hand.street === 'preflop') hand.preflopRaiseEvents += 1;
-      maybeCountPfr(xid, hand);
-      maybeCountThreeBet(xid, hand);
-      markAggressor(xid, hand);
+      markAsPreflopRaiseAction(xid, hand);
       return;
     }
 
@@ -1904,6 +1894,21 @@
       });
       saveStore();
     }
+  }
+
+  // The bookkeeping a preflop RAISE and an ALL-IN share: both count as a raise
+  // event for VPIP/PFR/3-bet purposes and both take the aggressor lead. Shared
+  // by both dispatchLogEvent branches rather than duplicated, because they were
+  // an exact copy of each other and the codebase's own open finding #3 is that
+  // this equivalence is imprecise (a short-stack all-in CALL still counts as a
+  // raise here) — one call site for that behaviour beats two that could drift
+  // out of sync if it's ever fixed in only one of them.
+  function markAsPreflopRaiseAction(xid, hand) {
+    maybeCountVpip(xid, hand);
+    if (hand.street === 'preflop') hand.preflopRaiseEvents += 1;
+    maybeCountPfr(xid, hand);
+    maybeCountThreeBet(xid, hand);
+    markAggressor(xid, hand);
   }
 
   function maybeCountCbet(xid, hand) {
@@ -4525,7 +4530,6 @@
     .tph-state-note { color: #ffd9a0 !important; font-size: 11px; line-height: 1.35;
                       background: rgba(255,192,70,.10); border-bottom: none !important; }
     .tph-self-tilt { color: #ffb3a0 !important; display: block; }
-    .tph-self-heat { color: #ffd98a !important; display: block; }
     /* background/color pinned: we inject into Torn's page, so an inherited or
        lower-specificity colour can be overridden by their stylesheet and leave
        dark text on a dark panel. */
@@ -4727,7 +4731,6 @@
     .tph-gear.tph-turn { background: #1e7d51; animation: tph-turn-pulse 1.25s ease-in-out infinite; }
     .tph-gear.tph-next { background: #7a5a12; }
     .tph-coach-head.tph-turn { background: #1e7d51 !important; }
-    .tph-turn-flag { color: #d6ffe9 !important; font-weight: bold; }
 
     /* Fold misclick guard prompt. Bottom-centre and above everything, but
        pointer-events:none so it can never sit between you and the button you
@@ -5252,12 +5255,20 @@
     let el = document.querySelector('.tph-coach');
     let pill = document.querySelector('.tph-coach-pill');
     const advice = buildCoachAdvice();
-    // Between hands there is nothing to advise on. The panel used to be torn
-    // down entirely at that point, which meant it vanished and reappeared
-    // several times a minute — you cannot park something on screen that keeps
-    // leaving. It now stays mounted and says it is waiting. The reason for the
-    // original teardown still holds and is honoured: what must never happen is
-    // STALE advice sitting there looking current, and the idle line is not that.
+    // buildCoachAdvice() returns null in two situations it cannot tell apart:
+    // no hand in progress, OR hero is out of the current one — folded, so the
+    // hole cards it reads off the seat are gone, and it is nobody's decision to
+    // advise on. The idle line therefore can't claim "next hand" is coming; it
+    // says only that there is nothing to advise right now, which is true either
+    // way. (An earlier version of this line said "Waiting for the next hand" —
+    // wrong on every hand hero folds early, which is most of them.)
+    //
+    // The panel used to be torn down entirely whenever advice was empty, which
+    // meant it vanished and reappeared several times a minute — you cannot park
+    // something on screen that keeps leaving. It now stays mounted and shows
+    // this line instead. The reason for the original teardown still holds and
+    // is honoured: what must never happen is STALE advice sitting there looking
+    // current, and a neutral idle line is not that.
     const idle = !advice || advice.length === 0;
 
     if (STORE.settings.coachHidden) {
@@ -5346,7 +5357,7 @@
 
     const coachBody = el.querySelector('.tph-coach-body');
     coachBody.innerHTML = idle
-      ? '<div class="tph-coach-idle">Waiting for the next hand.</div>'
+      ? '<div class="tph-coach-idle">No read for this decision.</div>'
       : advice.map((line) => `<div>${line}</div>`).join('');
     pinTextColor(coachBody);
   }
@@ -6365,27 +6376,34 @@
   // (see below), so a resize that saved only the size would leave the element
   // sitting somewhere the store has no record of, and the next rebuild would
   // put it back at the default corner at its new size.
+  //
+  // Pin-and-persist only happen once real movement is seen — same threshold
+  // idea as makeDraggable's DRAG_THRESHOLD_PX, applied here for a different
+  // reason. The grip is a 24x24 thumb target sitting right where a hand
+  // reaching for Hide or scrolling the body can brush it; a zero-movement tap
+  // used to pin the panel to a fixed pixel position anyway (harmless-looking,
+  // since the coordinates matched wherever it already was) and PERSIST that —
+  // silently trading its "always hugs the right edge" default anchor for a
+  // position that would not re-hug the edge on the next rotate. Gating both
+  // the pin and the write on `moved` makes a stray tap a true no-op.
   function makeResizable(handle, box, opts) {
     const { sizeKey, posKey, minW = 160, minH = 90, keepVisiblePx } = opts || {};
     let active = false;
+    let moved = false;
     let pid = null;
-    let startX = 0, startY = 0, startW = 0, startH = 0;
+    let startX = 0, startY = 0, startW = 0, startH = 0, startLeft = 0, startTop = 0;
 
     handle.addEventListener('pointerdown', (e) => {
       active = true;
+      moved = false;
       pid = e.pointerId;
       const rect = box.getBoundingClientRect();
       startX = e.clientX;
       startY = e.clientY;
       startW = rect.width;
       startH = rect.height;
-      // Pin to left/top BEFORE resizing. Until it has been dragged the panel is
-      // anchored by right/bottom, and growing a right-anchored box from its
-      // bottom-right corner pushes its left edge across the screen: the corner
-      // under your finger stays put and the panel appears to slide rather than
-      // grow.
-      setFixedPos(box, rect.left, rect.top, keepVisiblePx);
-      box.classList.add('tph-sizing');
+      startLeft = rect.left;
+      startTop = rect.top;
       if (handle.setPointerCapture) { try { handle.setPointerCapture(pid); } catch (err) { /* ignore */ } }
       e.preventDefault();
       e.stopPropagation();
@@ -6393,6 +6411,19 @@
 
     handle.addEventListener('pointermove', (e) => {
       if (!active || e.pointerId !== pid) return;
+      if (!moved) {
+        // Pin to left/top on the FIRST real movement, using the rect captured
+        // at pointerdown (unchanged since nothing has moved yet) — not on
+        // pointerdown itself. Until it has been dragged the panel is anchored
+        // by right/bottom, and growing a right-anchored box from its
+        // bottom-right corner pushes its left edge across the screen: the
+        // corner under your finger stays put and the panel appears to slide
+        // rather than grow. Pinning has to happen before the first size
+        // change reaches the DOM, or that first frame still slides.
+        setFixedPos(box, startLeft, startTop, keepVisiblePx);
+        box.classList.add('tph-sizing');
+        moved = true;
+      }
       applySize(box, startW + (e.clientX - startX), startH + (e.clientY - startY), minW, minH);
       e.preventDefault();
     });
@@ -6400,10 +6431,11 @@
     const endSize = (e) => {
       if (!active || (e.pointerId != null && e.pointerId !== pid)) return;
       active = false;
-      box.classList.remove('tph-sizing');
       if (handle.releasePointerCapture && pid != null) {
         try { handle.releasePointerCapture(pid); } catch (err) { /* ignore */ }
       }
+      if (!moved) return; // a tap with no drag changes nothing
+      box.classList.remove('tph-sizing');
       const rect = box.getBoundingClientRect();
       STORE.settings[sizeKey] = { w: Math.round(rect.width), h: Math.round(rect.height) };
       if (posKey) STORE.settings[posKey] = { left: rect.left, top: rect.top };
@@ -6616,6 +6648,7 @@
       shownRange,
       buildRangeHtml,
       buildExploitPlan,
+      buildCoachAdvice,
       trackStacks,
       stackSwingBB,
       stackBarHtml,

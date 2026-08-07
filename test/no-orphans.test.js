@@ -84,6 +84,37 @@ function keysOf(name) {
   t.ok('and the scan actually found the functions', declared.length > 150);
 }
 
+// --- CSS classes ---------------------------------------------------------
+//
+// Same failure, quieter still: an unused SELECTORS entry or setting at least
+// LOOKS like it should do something. A stray CSS rule looks like nothing —
+// there is no control to tap, no code path to trace — so it survives forever.
+// Two ripped-out features left theirs behind: the coach's self-HEAT line
+// (replaced by 🔥 on the badge, v0.34.0) and "▶ Your turn" (replaced by the
+// pulsing border, v0.30.0). Fixed at 0.42.2, eight and twelve versions late.
+//
+// Some classes are built at runtime by concatenation rather than written as a
+// literal anywhere ('tph-glow-' + state, `tph-store-${s.level}`), so an exact
+// string search flags them as false positives. DYNAMIC_PREFIXES is the short,
+// explicit list of those — same shape as the ALLOWED set above, and just as
+// easy to extend if a new one is added.
+
+{
+  const cssStart = src.indexOf('const CSS = `');
+  const cssEnd = src.indexOf('\n  `;', cssStart);
+  t.ok('the CSS block is findable', cssStart !== -1 && cssEnd !== -1);
+  const css = src.slice(cssStart, cssEnd);
+  const outside = src.slice(0, cssStart) + src.slice(cssEnd);
+
+  const DYNAMIC_PREFIXES = ['tph-glow-', 'tph-dev-', 'tph-row-', 'tph-store-'];
+  const classes = [...new Set([...css.matchAll(/\.(tph-[\w-]+)/g)].map((m) => m[1]))];
+  const orphans = classes.filter((c) => !DYNAMIC_PREFIXES.some((p) => c.startsWith(p))
+    && !new RegExp(`\\b${c}\\b`).test(outside));
+  t.eq(`every CSS class is applied somewhere outside its own rule${orphans.length ? ' — orphans: ' + orphans.join(', ') : ''}`,
+    orphans.length, 0);
+  t.ok('and there are classes to check at all', classes.length > 50);
+}
+
 // --- The test is not vacuous -------------------------------------------------
 //
 // Checked against the bug it was written for: potDisplay was an orphan until
