@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.43.0
+// @version      1.0.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -16,7 +16,7 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
- * 0.43.0 - Four ideas pulled from HopesG's HUD and Torn Poker Helper, adapted
+ * 1.0.0 - Four ideas pulled from HopesG's HUD and Torn Poker Helper, adapted
  *          to this file's own conventions rather than copied wholesale:
  *            - Equity is range-weighted once the pot is raised.
  *              estimateEquity() took an optional raiseLevel argument; a raised
@@ -186,7 +186,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '0.43.0';
+  const HUD_VERSION = '1.0.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -1097,7 +1097,7 @@
   // device: $1,000,000 (River Wizard) and $2,500,000 (Cat's Chance). Everything
   // else here is borrowed, not measured — same status as POOL_AVG.
   //
-  // v0.43.0 folded in the rest of HopesG's default map ($5,000,000, previously
+  // v1.0.0 folded in the rest of HopesG's default map ($5,000,000, previously
   // missing entirely) and surfaced something their SECOND map exposes that this
   // one-name-per-level shape hides: at three stakes — $100,000, $1,000,000 and
   // $5,000,000 — their texture-keyed map lists MULTIPLE distinct table names

@@ -192,7 +192,7 @@ routing hazard is noted in the code — `preflopRaiseEvents` counts an all-in as
 raise, so a short-stack all-in *call* can make the coach read the spot as facing
 a 3-bet.
 
-## Equity: random hands, or a range proxy once the pot is raised (v0.43.0)
+## Equity: random hands, or a range proxy once the pot is raised (v1.0.0)
 
 `estimateEquity(heroCards, boardCards, nOpp, raiseLevel)` took an optional 4th
 argument for how many preflop raise events the hand has seen. Omitted (or 0),
@@ -538,7 +538,7 @@ switch is a real event: `noteBlindLevel` notices a change rather than letting
 `lastSeenBB` carry a stale level onto a different table.
 
 **The ladder assumes blind level identifies the table, and that assumption is
-not solid (v0.43.0).** HopesG's HUD carries a second map keyed by a CSS
+not solid (v1.0.0).** HopesG's HUD carries a second map keyed by a CSS
 "table texture" class instead of blind level, and that map lists **multiple
 distinct table names at the same blind** for three levels: $100k, $1M and
 $5M — e.g. $1M alone covers "River Wizard", "Tripod" and "Comatose Cove".

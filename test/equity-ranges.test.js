@@ -1,4 +1,4 @@
-// Range-weighted opponents in Monte Carlo equity (v0.43.0).
+// Range-weighted opponents in Monte Carlo equity (v1.0.0).
 //
 // estimateEquity() used to deal every opponent a uniformly random hand, which
 // the UI already admitted ("Eq vs random") reads pessimistically against tight

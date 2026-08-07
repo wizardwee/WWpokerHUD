@@ -1,4 +1,4 @@
-// Notable-hand pinning in history storage (v0.43.0).
+// Notable-hand pinning in history storage (v1.0.0).
 //
 // STORE.hands used to be a flat recency cap: anything past historyLimit got
 // evicted, oldest first, with no regard for what the hand actually was. That

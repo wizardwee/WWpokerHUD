@@ -9,7 +9,7 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
-## 0.43.0
+## 1.0.0
 
 Four ideas pulled from HopesG's HUD and Torn Poker Helper, adapted
 to this file's own conventions rather than copied wholesale:

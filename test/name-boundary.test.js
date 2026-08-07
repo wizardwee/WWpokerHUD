@@ -1,4 +1,4 @@
-// The substring-name bug, and where it was actually still live (v0.43.0).
+// The substring-name bug, and where it was actually still live (v1.0.0).
 //
 // nameToXidGuess()'s own comment already warned "a substring test alone would
 // resolve 'Joe' to a 'Joey' seat" — but that warning described the EXACT-match
