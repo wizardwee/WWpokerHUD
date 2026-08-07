@@ -203,7 +203,8 @@ a 3-bet.
 ## Review findings still open (v0.14.0)
 
 Reviewed and deliberately left, in rough priority order. Also listed in the
-script header so they're visible while editing.
+script header, under the same numbers, so they're visible while editing —
+change one and change the other.
 
 1. ~~**The pot has no cross-check.**~~ **CLOSED in v0.18.0.** The live scan
    showed `DIV.potsWrapper_ > DIV.totalPotWrap_` rendering `POT:$7,000,000`, so
@@ -288,8 +289,21 @@ only because the second pass finds nothing to drop and returns false.
 
 **Not into modules.** There is no build step and the install model is "fetch one
 file whole" — splitting it would mean adding a bundler, which breaks the thing
-that makes this deployable to Torn PDA at all. 3000 lines in one file is a
+that makes this deployable to Torn PDA at all. ~6,600 lines in one file is a
 consequence of the constraint, not neglect.
+
+**The changelog lives in `CHANGELOG.md` (v0.42.0).** It used to be 780 lines at
+the top of the script — larger than this file, and ahead of the first line of
+code, so anything reading the source from the top paid ~15k tokens of history
+first. The script keeps the last three entries; the archive keeps everything,
+and git keeps it a second time. When you bump `@version`, write the entry in
+**both**: the full one in `CHANGELOG.md`, and the same text at the top of the
+script, dropping the entry that falls off the end of three.
+
+That is the only file in the repo that is prose-only. Don't start a second one:
+the reason this one earns its keep is that it is never loaded unless someone
+asks for it, and a doc that has to be read to be trusted belongs in CLAUDE.md
+instead.
 
 **The testability seam is built (v0.21.0).** It used to be the open item here:
 every harness recovered functions by slicing the source with `indexOf`/`eval`
