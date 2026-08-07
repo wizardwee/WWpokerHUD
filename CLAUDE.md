@@ -353,6 +353,57 @@ has a genuinely different lifecycle.
 Leave alone: the numbered section scheme itself (renumbering churns the whole
 file for no behavioural gain), and the single-file structure.
 
+## Screen real estate (v0.42.0)
+
+Three things the phone forced, all reported from a live table.
+
+**Hero's seat is not shaped like an opponent's.** Badges sit at `rect.bottom + 1`
+— under the name, on empty felt. That space is *not* empty under your own seat:
+it carries the name plate, the stack and whatever Torn draws around the acting
+seat. Hero's badge alone is lifted `SELF_BADGE_LIFT_PX` (four badge-lines) so it
+lands above the name. Don't unify the two positions; the asymmetry is the point.
+
+**The coach panel resizes, and stays mounted between hands.**
+
+- The grip is a real element (`.tph-coach-size`) with pointer handlers, **not**
+  CSS `resize`. The native handle is mouse-only in practice, and this only ever
+  runs in a touch webview.
+- Resizing **pins the panel to left/top first**. While it is still anchored by
+  right/bottom (its default), growing from the bottom-right corner pushes the
+  left edge across the screen — the corner under your finger stays put and the
+  panel appears to slide rather than grow. `makeResizable` therefore persists
+  `coachPos` as well as `coachSize`; saving only the size would leave the
+  element somewhere the store has no record of.
+- `applySize` clamps at **both** ends. The grip lives inside the panel, so a
+  panel draggable to nothing takes its own grip with it.
+- The panel used to be torn down whenever there was no advice — i.e. several
+  times a minute. You cannot park something on screen that keeps leaving. It now
+  shows an idle line instead. **The original reason for the teardown still
+  stands**: what must never sit there is *stale* advice looking current. An idle
+  line is not that; restoring last hand's advice would be.
+- `.tph-coach` is a flex column with the body as the scrolling child, so the
+  header — the only drag handle, and the Hide button — can't be sized away.
+
+**The gear is 32px, down from 44.** The red fill and the "HUD" label are what
+make it findable, not the size. It floats over the table permanently, so it is
+also the one element that always costs screen.
+
+## Exporting the history (v0.42.0)
+
+`playerHistoryExport(xid)` writes **every** recorded hand against a player, not
+the 40 the History tab renders. The tab's cap exists because scrolling hundreds
+of hand cards on a phone is useless; a file has no such constraint, and an
+export that quietly inherited the display cap is a loss you find months later
+looking for a hand that was never in it. Both buttons state their count for the
+same reason, and the header names the store-wide `historyLimit` so the file
+can't read as complete when it isn't.
+
+It reuses `formatHand`, deliberately — the tab, the clipboard and the file must
+not drift into three descriptions of the same hand. Delivery is
+`downloadTextFile` (PDA share sheet, falling back to `<a download>`, falling
+back to the clipboard); a button that appears to work and produces no file is
+worse than one that says it can't.
+
 ## P/L attribution, and why hero identity matters (v0.17.0)
 
 Per-opponent P/L lives on the **opponent**, from hero's perspective:
@@ -803,6 +854,13 @@ is attributed.
 - **No build step.** One file, pasted/fetched whole. No imports, no bundler.
 - **Torn PDA runtime is limited**: no `GM_xmlhttpRequest`, no IndexedDB. Use the
   `pdaFetch` adapter (`PDA_httpGet`/`PDA_httpPost`, falling back to `fetch`).
+- **Commit and push immediately, every time.** Don't leave finished work sitting
+  in the working tree waiting to be asked about. The install model is "Torn PDA
+  re-fetches the raw file from GitHub `main`", so an uncommitted change is a
+  change that does not exist as far as the phone is concerned — there is no
+  local build to test against. Sequence: `node test/run.js`, bump `@version` and
+  `HUD_VERSION` together, commit, push. One commit per change, message naming
+  what changed for the user, not the diff.
 - **Verify before pushing.** `node` IS available (this claim used to say
   otherwise). Run **`node test/run.js`** on every edit — it syntax-checks the
   script and runs the suite. Add a `test/*.test.js` for anything with an

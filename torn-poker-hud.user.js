@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.41.0
+// @version      0.42.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -15,6 +15,39 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 0.42.0 - Five screen-real-estate and export changes, all requested from the
+ *          table rather than inferred:
+ *            - Hero's own badge is lifted SELF_BADGE_LIFT_PX (four badge-lines)
+ *              so it sits ABOVE the name instead of under it. Every other seat
+ *              has empty felt below it; yours has the name plate, the stack and
+ *              whatever Torn draws around the acting seat, so the one position
+ *              that works for an opponent is the one that doesn't work for you.
+ *            - The coach panel resizes. A real ◢ grip with pointer handlers,
+ *              not CSS `resize: both` — the native handle is mouse-only in
+ *              practice and this only ever runs in a touch webview. Size
+ *              persists to settings.coachSize, is clamped on rotate, and the
+ *              body scrolls so the header (the only drag handle, and the Hide
+ *              button) can never be sized away.
+ *            - The coach STAYS MOUNTED between hands, showing "Waiting for the
+ *              next hand" instead of being torn down. You cannot park something
+ *              on screen that disappears several times a minute. The reason for
+ *              the original teardown is untouched and still honoured: what must
+ *              never sit there is STALE advice looking current.
+ *            - History tab exports. `playerHistoryExport` writes EVERY recorded
+ *              hand against that player to a text file via the same PDA share
+ *              handler as Backup — the tab renders 40 and Copy takes those 40,
+ *              and an export that silently stopped at the same cap would be a
+ *              loss you'd only find much later. Both buttons now state their
+ *              count. Falls back to the clipboard where the share sheet isn't
+ *              available, rather than appearing to work and producing nothing.
+ *            - The HUD button is 32px, down from 44px. It floats over the table
+ *              permanently; the red fill and the label are what make it
+ *              findable, not the size.
+ *            - Player panel tab order is Stats · Range · Exploit · Report:
+ *              Exploit and Report are the two written-out reads on one player
+ *              and are read together, so they sit beside each other, with the
+ *              raw numbers they derive from leading.
  *
  * 0.41.0 - STORE.players is bounded. Open finding #2 is CLOSED.
  *          The shape follows a measurement, not a preference: a fresh one-hand
@@ -823,7 +856,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '0.41.0';
+  const HUD_VERSION = '0.42.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -967,6 +1000,10 @@
     calibrationMode: false,
     gearPos: null, // {left, top} once you've dragged the HUD button somewhere
     coachPos: null,      // {left, top} once you've dragged the coach panel
+    coachSize: null,     // {w, h} once you've dragged its resize grip — the panel
+                         // is meant to be parked open for a session, and one
+                         // fixed size can't serve both "a thin strip out of the
+                         // way" and "the whole read"
     coachPillPos: null,  // {left, top} for the collapsed pill — tracked separately
                          // from coachPos so collapsing doesn't teleport the pill
                          // to wherever the big panel happened to be parked
@@ -2918,6 +2955,44 @@
   function handsInvolving(xid) {
     return (STORE.hands || []).filter((h) => (h.players || []).includes(xid)
       || (h.actions || []).some((a) => a.x === xid));
+  }
+
+  // The whole recorded history against one player, as a plain-text file.
+  //
+  // EVERY hand, not the 40 the History tab renders. The on-screen cap exists
+  // because scrolling hundreds of hand cards on a phone is useless; a file has
+  // no such constraint, and an export that silently stopped at 40 would be the
+  // exact kind of quiet loss you only discover when you go looking for a hand
+  // that isn't there.
+  //
+  // Newest first, matching the tab and the store's own order, with the cut-off
+  // stated in the header — a history file that doesn't say what it is missing
+  // reads as complete.
+  //
+  // Plain text, and it reuses formatHand rather than reimplementing it: the
+  // clipboard, the tab and the file must never drift into three descriptions of
+  // the same hand.
+  function playerHistoryExport(xid) {
+    const hands = handsInvolving(xid);
+    const p = STORE.players[xid];
+    const limit = STORE.settings.historyLimit || 200;
+    const header = [
+      `Torn Poker HUD — hand history vs ${playerDisplayName(xid)} (xid ${xid})`,
+      `Exported ${new Date().toISOString()}`,
+      `${hands.length} hand(s) with this player, newest first.`,
+      `Only the most recent ${limit} hands are kept overall, so anything older is already gone.`,
+      p ? `Seen in ${p.hands} hand(s) total; * marks their actions.` : '* marks their actions.',
+      '',
+    ].join('\n');
+    if (!hands.length) return header + '(no hands recorded)\n';
+    return header + hands.map((h) => formatHand(h, xid)).join('\n\n') + '\n';
+  }
+
+  // Safe for a filename on any platform the share sheet might hand this to:
+  // Torn usernames are free text, and `[` or `/` in one would either break the
+  // download or be silently dropped.
+  function fileSafeName(s) {
+    return String(s).replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40) || 'player';
   }
 
   function finalizeHand() {
@@ -5288,12 +5363,16 @@
       border-radius: 5px; padding: 7px 9px; margin: 6px 0 10px; font-size: 12px; line-height: 1.45; }
     .tph-ok { color: #7ed957 !important; font-size: 12px; margin: 2px 0 10px; }
     /* Raised well above the bottom edge so it doesn't sit under Torn PDA's own
-       native controls, enlarged and labelled so it's unmistakably OUR button. */
+       native controls, and still labelled so it's unmistakably OUR button.
+       Shrunk from 44px to 32px: it floats permanently over the table, and the
+       red-on-white label makes it findable without the size. It keeps its own
+       colour and border rather than going icon-only, because those are what
+       identify it — an unlabelled grey circle over a poker table is noise. */
     /* touch-action:none so dragging the button doesn't scroll the page under it */
     .tph-gear { position: fixed; z-index: 100000; bottom: 96px; right: 12px; background: #b8342e; color: #fff;
-      border: 2px solid #fff; border-radius: 22px; height: 44px; min-width: 44px; padding: 0 12px;
-      display: flex; align-items: center; gap: 5px; font: bold 13px/1 -apple-system, sans-serif;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.5); cursor: grab;
+      border: 1px solid #fff; border-radius: 16px; height: 32px; min-width: 32px; padding: 0 9px;
+      display: flex; align-items: center; gap: 4px; font: bold 11px/1 -apple-system, sans-serif;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.5); cursor: grab;
       touch-action: none; user-select: none; -webkit-user-select: none; }
     .tph-gear.tph-dragging { cursor: grabbing; opacity: 0.85; }
     /* Storage-full banner. pointer-events:none is NOT optional — it sits over
@@ -5355,21 +5434,39 @@
       .tph-turn-glow, .tph-gear.tph-turn { animation: none; opacity: 1; }
     }
     /* Width is capped rather than left/right-anchored so the panel keeps a
-       sensible size once dragging switches it to left/top positioning. */
+       sensible size once dragging switches it to left/top positioning.
+       Column flex so that once a height is set by the resize grip, the body is
+       what absorbs it and scrolls — the header must stay put, since it carries
+       the only drag handle and the Hide button. */
     .tph-coach { position: fixed; z-index: 99998; bottom: 150px; right: 12px;
       width: min(420px, calc(100vw - 24px)); background: rgba(20,20,24,0.95);
       color: #cde; border: 1px solid #556; border-radius: 8px; font: 12px/1.4 -apple-system, sans-serif;
-      box-shadow: 0 2px 10px rgba(0,0,0,0.5); }
+      box-shadow: 0 2px 10px rgba(0,0,0,0.5);
+      display: flex; flex-direction: column; overflow: hidden; }
     .tph-coach-head { display: flex; align-items: center; gap: 6px; padding: 6px 8px;
       border-bottom: 1px solid #445; cursor: grab; touch-action: none;
-      user-select: none; -webkit-user-select: none; font-weight: 600; color: #9bd; }
+      user-select: none; -webkit-user-select: none; font-weight: 600; color: #9bd;
+      flex: 0 0 auto; }
     .tph-coach-head .tph-grip { opacity: 0.5; letter-spacing: 1px; }
     .tph-coach-head .tph-coach-hide { margin-left: auto; cursor: pointer; color: #f88;
       border: 1px solid #a44; border-radius: 4px; padding: 1px 7px; font-weight: 400; }
     .tph-coach.tph-dragging { opacity: 0.85; }
     .tph-coach.tph-dragging .tph-coach-head { cursor: grabbing; }
-    .tph-coach-body { padding: 8px; }
+    .tph-coach-body { padding: 8px; flex: 1 1 auto; min-height: 0;
+      overflow-y: auto; -webkit-overflow-scrolling: touch; }
     .tph-coach-body b { color: #fff; }
+    /* Between hands. Says the panel is alive rather than leaving a blank box —
+       the panel now stays mounted so it can be parked open all session. */
+    .tph-coach-idle { color: #8d959c !important; font-style: italic; }
+    /* Resize grip, bottom-right. A real element with pointer handlers rather
+       than the CSS resize property: the native handle is mouse-only in practice
+       and this only ever runs in a touch webview. Sized for a thumb, and its own
+       touch-action:none so the drag resizes instead of scrolling the table. */
+    .tph-coach-size { position: absolute; right: 0; bottom: 0; width: 24px; height: 24px;
+      display: flex; align-items: flex-end; justify-content: flex-end; padding: 2px 3px;
+      color: #7e8a99 !important; font: 11px/1 -apple-system, sans-serif;
+      cursor: nwse-resize; touch-action: none; user-select: none; -webkit-user-select: none; }
+    .tph-coach.tph-sizing { opacity: 0.85; }
     /* touch-action:none so dragging the pill moves it instead of scrolling the
        table underneath — without it the pointermove handler never gets to run. */
     .tph-coach-pill { position: fixed; z-index: 99998; bottom: 150px; right: 12px;
@@ -5475,6 +5572,14 @@
   // Roughly the badge's own height, used to keep it inside the viewport when a
   // seat sits right at the bottom edge.
   const BADGE_HEIGHT_PX = 14;
+
+  // How far hero's own badge is lifted above where every other badge sits.
+  // Four badge-lines, so it clears the name plate and the chip figure under
+  // hero's seat and lands on the felt above them. Hero's seat is the crowded
+  // one — it carries the hole cards, the stack and whatever Torn draws around
+  // the acting seat — so the space that is empty on an opponent's seat is not
+  // empty on yours, and the badge was landing on top of that furniture.
+  const SELF_BADGE_LIFT_PX = 4 * BADGE_HEIGHT_PX;
 
   // One place each, so the badge tooltip, the players list, the Stats tab and
   // the coach all describe these the same way.
@@ -5711,13 +5816,17 @@
         + (roleTag ? ' tph-badge-wide' : '');
       // Below the seat — i.e. under the name and chip stack — rather than over
       // the top of it. Clamped so a bottom-row seat doesn't push it off screen.
+      // Hero's own badge is the exception: it is lifted SELF_BADGE_LIFT_PX so it
+      // sits ABOVE the name rather than under it. See the constant for why your
+      // seat needs that and an opponent's doesn't.
       const maxTop = Math.max(0, window.innerHeight - BADGE_HEIGHT_PX);
-      badge.style.top = Math.min(Math.max(0, rect.bottom + 1), maxTop) + 'px';
+      const top = rect.bottom + 1 - (isSelf ? SELF_BADGE_LIFT_PX : 0);
+      badge.style.top = Math.min(Math.max(0, top), maxTop) + 'px';
       if (isSelf) {
-        // Centred on the seat rather than left-aligned, so it sits under the
-        // chip pile instead of hanging off toward the edge. Same vertical
-        // position as every other badge. translateX(-50%) does the centring
-        // because the badge's own width isn't known until it is in the DOM.
+        // Centred on the seat rather than left-aligned, so it sits over the
+        // chip pile instead of hanging off toward the edge. translateX(-50%)
+        // does the centring because the badge's own width isn't known until it
+        // is in the DOM.
         badge.style.left = Math.max(0, rect.left + rect.width / 2) + 'px';
         badge.style.transform = 'translateX(-50%)';
       } else {
@@ -5800,6 +5909,12 @@
   // beyond the default — named for symmetry with the panel above.
   const PILL_KEEP_VISIBLE_PX = 0;
 
+  // Floors for the resize grip. Below these the panel stops being a panel: the
+  // header alone is about 26px, and under ~170px wide the advice lines wrap to
+  // one or two words each and become unreadable rather than merely small.
+  const COACH_MIN_W = 170;
+  const COACH_MIN_H = 76;
+
   function setCoachHidden(hidden) {
     STORE.settings.coachHidden = hidden;
     saveStore();
@@ -5810,14 +5925,13 @@
     let el = document.querySelector('.tph-coach');
     let pill = document.querySelector('.tph-coach-pill');
     const advice = buildCoachAdvice();
-
-    // Nothing to advise on (not in a hand): tear both down rather than leaving a
-    // stale panel or an orphan pill sitting over the table.
-    if (!advice || advice.length === 0) {
-      if (el) el.remove();
-      if (pill) pill.remove();
-      return;
-    }
+    // Between hands there is nothing to advise on. The panel used to be torn
+    // down entirely at that point, which meant it vanished and reappeared
+    // several times a minute — you cannot park something on screen that keeps
+    // leaving. It now stays mounted and says it is waiting. The reason for the
+    // original teardown still holds and is honoured: what must never happen is
+    // STALE advice sitting there looking current, and the idle line is not that.
+    const idle = !advice || advice.length === 0;
 
     if (STORE.settings.coachHidden) {
       if (el) el.remove();
@@ -5879,7 +5993,8 @@
       // broken — which is the only time that caveat changes anything.
       el.innerHTML = '<div class="tph-coach-head"><span class="tph-grip">⠿</span>'
         + '<span>Coach</span><span class="tph-coach-hide">Hide</span></div>'
-        + '<div class="tph-coach-body"></div>';
+        + '<div class="tph-coach-body"></div>'
+        + '<div class="tph-coach-size" title="Drag to resize">◢</div>';
       document.body.appendChild(el);
 
       const head = el.querySelector('.tph-coach-head');
@@ -5888,11 +6003,24 @@
       // Drag the whole panel by its header; no tap action, so a stray tap on the
       // bar does nothing rather than firing something unexpected.
       makeDraggable(head, { posKey: 'coachPos', moveEl: el, keepVisiblePx: COACH_KEEP_VISIBLE_PX });
+      // Size before position: setFixedPos clamps against the element's own
+      // measured width and height, so a stored size has to be on the element
+      // before the stored position is judged against the viewport.
+      applyStoredSize(el, 'coachSize', COACH_MIN_W, COACH_MIN_H);
       applyStoredPos(el, 'coachPos', COACH_KEEP_VISIBLE_PX);
+      makeResizable(el.querySelector('.tph-coach-size'), el, {
+        sizeKey: 'coachSize',
+        posKey: 'coachPos',
+        minW: COACH_MIN_W,
+        minH: COACH_MIN_H,
+        keepVisiblePx: COACH_KEEP_VISIBLE_PX,
+      });
     }
 
     const coachBody = el.querySelector('.tph-coach-body');
-    coachBody.innerHTML = advice.map((line) => `<div>${line}</div>`).join('');
+    coachBody.innerHTML = idle
+      ? '<div class="tph-coach-idle">Waiting for the next hand.</div>'
+      : advice.map((line) => `<div>${line}</div>`).join('');
     pinTextColor(coachBody);
   }
 
@@ -5986,10 +6114,14 @@
       html: !p ? '' : `
       <span class="tph-close">✕</span>
       <h3>${escapeHtml(p.name)} — ${classify(p)}</h3>
+      <!-- Exploit sits directly beside Report on purpose: they are the two
+           written-out reads on the same player, one ranked and actionable, the
+           other prose, and they are read together. Stats and Range are the raw
+           numbers those two are derived from, so they lead. -->
       <div class="tph-tabs">
         <div class="tph-tab ${openPlayerTab === 'stats' ? 'active' : ''}" data-tab="stats">Stats</div>
-        <div class="tph-tab ${openPlayerTab === 'plan' ? 'active' : ''}" data-tab="plan">Exploit</div>
         <div class="tph-tab ${openPlayerTab === 'range' ? 'active' : ''}" data-tab="range">Range</div>
+        <div class="tph-tab ${openPlayerTab === 'plan' ? 'active' : ''}" data-tab="plan">Exploit</div>
         <div class="tph-tab ${openPlayerTab === 'report' ? 'active' : ''}" data-tab="report">Report</div>
         <div class="tph-tab ${openPlayerTab === 'history' ? 'active' : ''}" data-tab="history">History</div>
         <div class="tph-tab ${openPlayerTab === 'notes' ? 'active' : ''}" data-tab="notes">Notes</div>
@@ -6119,13 +6251,33 @@
         const shown = hands.slice(0, 40);
         // Clipboard stays plain text; only the on-screen rendering is markup.
         const text = shown.map((h) => formatHand(h, openPlayerXid)).join('\n\n');
+        // Copy takes what is on screen; Export takes everything. The two buttons
+        // say which is which, because "Copy history" quietly giving you 40 of
+        // 300 hands is the kind of thing you only notice much later.
         body.innerHTML = `<div style="color:#c9d1d9 !important;margin-bottom:8px">${hands.length} hand(s) recorded`
           + `${hands.length > shown.length ? `, showing ${shown.length}` : ''} — `
           + `<span style="${HH.me}">their actions highlighted</span></div>`
           + shown.map((h) => formatHandHtml(h, openPlayerXid)).join('')
-          + `<button class="tph-copy-hist">Copy history</button>`;
+          + `<button class="tph-copy-hist">Copy shown (${shown.length})</button>`
+          + `<button class="tph-export-hist">${isPDA() ? 'Save / share all' : 'Download all'}`
+          + ` (${hands.length})</button>`;
         body.querySelector('.tph-copy-hist').addEventListener('click', () => {
           navigator.clipboard && navigator.clipboard.writeText(text);
+        });
+        body.querySelector('.tph-export-hist').addEventListener('click', (e) => {
+          const stamp = new Date().toISOString().slice(0, 10);
+          const file = `torn-poker-hud-history-${fileSafeName(playerDisplayName(openPlayerXid))}-${stamp}.txt`;
+          const full = playerHistoryExport(openPlayerXid);
+          // Same fallback as the Backup button: `<a download>` does nothing in
+          // some webviews, and a button that appears to work and produces no
+          // file is worse than one that says it can't.
+          const ok = downloadTextFile(full, file, 'text/plain');
+          if (ok) {
+            e.target.textContent = 'Sent ✓';
+          } else {
+            e.target.textContent = 'Copied instead ✓';
+            if (navigator.clipboard) navigator.clipboard.writeText(full);
+          }
         });
       }
     } else if (openPlayerTab === 'notes') {
@@ -6336,7 +6488,9 @@
       <label><input type="checkbox" class="tph-coach-toggle" ${STORE.settings.coachHidden ? '' : 'checked'}> Show coach panel</label><br>
       <label>Full table size: <input type="number" class="tph-table-max" min="2" max="10" value="${STORE.settings.tableMax}" style="width:60px"></label>
       <div style="opacity:.7;margin:2px 0 6px">Equity is always quoted against a full ring of this size, plus the live and heads-up counts.</div>
-      <button class="tph-coach-reset">Reset coach position</button><br><br>
+      <button class="tph-coach-reset">Reset coach position &amp; size</button>
+      <div style="opacity:.7;margin:2px 0 10px">Drag the ◢ corner to resize the coach panel — it stays where you put
+        it, at the size you set, and now stays on screen between hands instead of disappearing.</div>
       <label><input type="checkbox" class="tph-calib-toggle" ${STORE.settings.calibrationMode ? 'checked' : ''}> Calibration mode</label><br><br>
       <h4>GitHub Gist sync</h4>
       <label>OAuth App Client ID: <input type="text" class="tph-client-id" value="${escapeHtml(STORE.settings.githubClientId)}" style="width:70%"></label><br>
@@ -6495,6 +6649,8 @@
       STORE.settings.coachPos = null;
       STORE.settings.coachPillPos = null; // the pill is draggable too, and can be
                                           // parked out of reach just as easily
+      STORE.settings.coachSize = null;    // and a panel shrunk to its floor is as
+                                          // unusable as one parked off screen
       saveStore();
       const coach = document.querySelector('.tph-coach');
       if (coach) coach.remove(); // rebuilt at the default anchor on the next tick
@@ -6843,6 +6999,86 @@
     }
   }
 
+  // Clamp a size to something usable: never smaller than the caller's floor,
+  // never bigger than the viewport it has to live inside. Both ends matter —
+  // dragging the grip up and left could otherwise collapse the panel to nothing
+  // and take its own grip with it, leaving no way to get the size back.
+  function applySize(el, w, h, minW, minH) {
+    const W = Math.max(minW, Math.min(Math.round(w), window.innerWidth - 8));
+    const H = Math.max(minH, Math.min(Math.round(h), window.innerHeight - 8));
+    el.style.width = W + 'px';
+    el.style.height = H + 'px';
+    return { w: W, h: H };
+  }
+
+  function applyStoredSize(el, sizeKey, minW, minH) {
+    const s = STORE.settings[sizeKey];
+    if (s && typeof s.w === 'number' && typeof s.h === 'number') {
+      applySize(el, s.w, s.h, minW, minH);
+    }
+  }
+
+  // Drag a corner grip to resize `box`, persisting to settings[sizeKey].
+  //
+  // opts: { sizeKey, posKey, minW, minH, keepVisiblePx }
+  //
+  // Deliberately a separate handle from makeDraggable's, on a separate element:
+  // a single pointer stream can't mean both, and a resize that sometimes moved
+  // the panel instead would be worse than no resize at all.
+  //
+  // `posKey` is not optional in practice. Resizing pins the panel to left/top
+  // (see below), so a resize that saved only the size would leave the element
+  // sitting somewhere the store has no record of, and the next rebuild would
+  // put it back at the default corner at its new size.
+  function makeResizable(handle, box, opts) {
+    const { sizeKey, posKey, minW = 160, minH = 90, keepVisiblePx } = opts || {};
+    let active = false;
+    let pid = null;
+    let startX = 0, startY = 0, startW = 0, startH = 0;
+
+    handle.addEventListener('pointerdown', (e) => {
+      active = true;
+      pid = e.pointerId;
+      const rect = box.getBoundingClientRect();
+      startX = e.clientX;
+      startY = e.clientY;
+      startW = rect.width;
+      startH = rect.height;
+      // Pin to left/top BEFORE resizing. Until it has been dragged the panel is
+      // anchored by right/bottom, and growing a right-anchored box from its
+      // bottom-right corner pushes its left edge across the screen: the corner
+      // under your finger stays put and the panel appears to slide rather than
+      // grow.
+      setFixedPos(box, rect.left, rect.top, keepVisiblePx);
+      box.classList.add('tph-sizing');
+      if (handle.setPointerCapture) { try { handle.setPointerCapture(pid); } catch (err) { /* ignore */ } }
+      e.preventDefault();
+      e.stopPropagation();
+    });
+
+    handle.addEventListener('pointermove', (e) => {
+      if (!active || e.pointerId !== pid) return;
+      applySize(box, startW + (e.clientX - startX), startH + (e.clientY - startY), minW, minH);
+      e.preventDefault();
+    });
+
+    const endSize = (e) => {
+      if (!active || (e.pointerId != null && e.pointerId !== pid)) return;
+      active = false;
+      box.classList.remove('tph-sizing');
+      if (handle.releasePointerCapture && pid != null) {
+        try { handle.releasePointerCapture(pid); } catch (err) { /* ignore */ }
+      }
+      const rect = box.getBoundingClientRect();
+      STORE.settings[sizeKey] = { w: Math.round(rect.width), h: Math.round(rect.height) };
+      if (posKey) STORE.settings[posKey] = { left: rect.left, top: rect.top };
+      saveStore();
+    };
+
+    handle.addEventListener('pointerup', endSize);
+    handle.addEventListener('pointercancel', endSize);
+  }
+
   // Drag to move, tap to open settings. A small movement threshold separates the
   // two, so a slightly-imprecise tap still opens the panel instead of nudging
   // the button and doing nothing.
@@ -6938,9 +7174,16 @@
       const rect = gear.getBoundingClientRect();
       setFixedPos(gear, rect.left, rect.top);
       const coach = document.querySelector('.tph-coach');
-      if (coach && STORE.settings.coachPos) {
-        const cr = coach.getBoundingClientRect();
-        setFixedPos(coach, cr.left, cr.top, COACH_KEEP_VISIBLE_PX);
+      if (coach) {
+        // Size first, then position — a panel sized for landscape is wider than
+        // a portrait viewport, and setFixedPos measures the element it is
+        // clamping. Not gated on coachPos: a resized panel needs re-clamping on
+        // rotate whether or not it was ever dragged.
+        if (STORE.settings.coachSize) applyStoredSize(coach, 'coachSize', COACH_MIN_W, COACH_MIN_H);
+        if (STORE.settings.coachPos) {
+          const cr = coach.getBoundingClientRect();
+          setFixedPos(coach, cr.left, cr.top, COACH_KEEP_VISIBLE_PX);
+        }
       }
       const pill = document.querySelector('.tph-coach-pill');
       if (pill && STORE.settings.coachPillPos) {
@@ -7094,8 +7337,17 @@
       PREACTION_BTN_RE,
       findActionButtons,
       findTurnButtons,
+      fileSafeName,
+      applySize,
+      SELF_BADGE_LIFT_PX,
+      BADGE_HEIGHT_PX,
+      COACH_MIN_W,
+      COACH_MIN_H,
 
       // --- stateful: reads or writes module-level STORE / heroXid ---
+      playerHistoryExport,
+      handsInvolving,
+      formatHand,
       // Exposed as accessors because STORE and heroXid are rebound, not
       // mutated — a plain reference would freeze at whatever loaded first.
       applyHandResults,
