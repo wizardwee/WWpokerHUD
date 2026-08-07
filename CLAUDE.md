@@ -192,6 +192,54 @@ routing hazard is noted in the code — `preflopRaiseEvents` counts an all-in as
 raise, so a short-stack all-in *call* can make the coach read the spot as facing
 a 3-bet.
 
+## Equity: random hands, or a range proxy once the pot is raised (v0.43.0)
+
+`estimateEquity(heroCards, boardCards, nOpp, raiseLevel)` took an optional 4th
+argument for how many preflop raise events the hand has seen. Omitted (or 0),
+opponents are still dealt a uniformly random hand from the deck — the original
+behaviour, and the honest one for an unopened or limped pot. Once the pot HAS
+been raised, opponents are drawn from `opponentRangeProxy(raiseLevel)` instead:
+`RFI_RANGES.SHORT.CO` for a single open, `THREE_BET_RANGES.IP` for a 3-bet,
+`FOUR_BET_RANGE` for a 4-bet or more — reusing chart data this file has already
+sourced and combo-weighted for the coach, not new percentages invented for
+this (the same idea Torn Poker Helper, GreasyFork 538541, implements with flat
+35%/12%/5% figures).
+
+**One flat proxy per tier, not conditioned on seat count or the real opener's
+position.** That identity isn't threaded through to the equity call, and
+adding it would mean trusting position detection (already flagged elsewhere as
+imperfect) inside the equity engine too. `RFI_RANGES.SHORT.CO` (26.4%) sits
+roughly in the middle of the real spread across positions (full-ring UTG
+~11.6% to short BTN ~42%) — a coarse stand-in, but a materially better one
+than treating every opponent as holding any two cards.
+
+**The first implementation was ~16x too slow to ship.** Rejecting a random
+guess-and-recheck loop per opponent per Monte Carlo iteration measured ~350ms
+for a single call at 8 opponents against `FOUR_BET_RANGE` (vs ~20ms
+unweighted) — late opponents in a full field kept missing against an
+increasingly depleted narrow pool. A second attempt that enumerated every
+valid pair fresh each time wasn't meaningfully better, because it did the same
+amount of work regardless of match rate. The fix that actually worked:
+precompute the full list of in-range card pairs **once per call**, outside the
+1200-iteration loop, then just pick from that short fixed list per opponent
+per iteration (retrying against a small `usedIds` Set on a collision, not
+against the whole deck). That took the worst case (8 opponents, the narrowest
+range) from ~350ms to ~57ms. `test/equity-ranges.test.js` asserts a budget
+tight enough that the first two approaches would fail it outright.
+
+**A range this narrow cannot supply 8 non-conflicting hands, and that's
+correct, not a bug.** `FOUR_BET_RANGE` touches on the order of a dozen
+physical cards; a big field falls through to a uniform-random draw for
+whichever opponents the range genuinely has nothing left to give. A table
+with eight live QQ+/AK hands facing a 4-bet doesn't reflect anything real
+either, so silently thinning the simulated field there is the honest outcome.
+
+`estimateEquityCached`'s cache key includes `raiseLevel` — without it, the
+same hero cards/board/opponent-count would keep serving a pre-raise figure
+straight through the raise that should have changed it. The UI's basis label
+(`equityBasisLabel`) tracks the same tiers as `opponentRangeProxy`: "vs
+random" only when it actually is; "vs open/3-bet/4-bet range" once it isn't.
+
 ## Review findings still open (v0.14.0)
 
 Reviewed and deliberately left, in rough priority order. Also listed in the
@@ -488,6 +536,18 @@ identifies the table. Two entries are corroborated by scans from this device —
 $1M River Wizard, $2.5M Cat's Chance — and **the user plays both**, so a table
 switch is a real event: `noteBlindLevel` notices a change rather than letting
 `lastSeenBB` carry a stale level onto a different table.
+
+**The ladder assumes blind level identifies the table, and that assumption is
+not solid (v0.43.0).** HopesG's HUD carries a second map keyed by a CSS
+"table texture" class instead of blind level, and that map lists **multiple
+distinct table names at the same blind** for three levels: $100k, $1M and
+$5M — e.g. $1M alone covers "River Wizard", "Tripod" and "Comatose Cove".
+Torn evidently runs more than one differently-named room at some stakes. We
+have no scan confirming a texture selector on this layout, so `TORN_STAKES`
+still shows one name per level (including the confirmed "River Wizard"), but
+that name is a best guess at three specific levels, not a fact — worth
+knowing before trusting "Usually plays" at exactly $100k, $1M or $5M. A scan
+that lands at a $1M table that ISN'T River Wizard is this, not a bug.
 
 **The hazard the ladder exists to catch:** Torn can render amounts as
 `181.00 BB` instead of `$181,000,000`. In that mode every parsed figure is six
@@ -894,8 +954,9 @@ is attributed.
   error, and intercepting nothing but Fold. Any future feature near the game's
   controls has to meet the same three rules, and `test/fold-guard.test.js` is
   the shape of the evidence required.
-- **Say when a number is an estimate.** Multiway P/L is modelled, not exact, and
-  equity is vs random hands rather than real ranges. The UI says so; keep it
+- **Say when a number is an estimate.** Multiway P/L is modelled, not exact,
+  and equity is vs a range PROXY once the pot is raised, still vs random
+  hands otherwise — see "Equity" below. The UI says which one it is; keep it
   that way.
 
 ## Data

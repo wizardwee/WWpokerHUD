@@ -11,6 +11,8 @@ T.STORE = T.emptyStore();
 t.eq('a known level names its table', T.tableNameForBB(2500000), "Cat's Chance");
 t.eq('another known level', T.tableNameForBB(1000000), 'River Wizard');
 t.eq('an unknown level names nothing', T.tableNameForBB(1234), null);
+// $5,000,000 was missing from the ladder entirely until v0.43.0.
+t.eq('the $5M level is now on the ladder', T.tableNameForBB(5000000), 'Juan on Juan');
 
 t.eq('tiny stakes are Nano', T.stakeTierForBB(100), 'Nano');
 t.eq('mid stakes top out below 1M', T.stakeTierForBB(500000), 'Mid');

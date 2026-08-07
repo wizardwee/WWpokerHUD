@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.42.3
+// @version      0.43.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -15,6 +15,60 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 0.43.0 - Four ideas pulled from HopesG's HUD and Torn Poker Helper, adapted
+ *          to this file's own conventions rather than copied wholesale:
+ *            - Equity is range-weighted once the pot is raised.
+ *              estimateEquity() took an optional raiseLevel argument; a raised
+ *              pot now deals opponents from opponentRangeProxy(raiseLevel) —
+ *              RFI_RANGES.SHORT.CO / THREE_BET_RANGES.IP / FOUR_BET_RANGE,
+ *              charts this file already sourced and combo-weighted, not new
+ *              percentages. An unraised pot is untouched (still "vs random").
+ *              First implementation measured ~350ms for a single 8-opponent
+ *              call against FOUR_BET_RANGE (~20ms unweighted) — a ~16x
+ *              regression that would have stalled the coach panel. Fixed by
+ *              precomputing the in-range combo list ONCE per call instead of
+ *              re-deriving it inside the 1200-iteration loop: ~57ms worst
+ *              case. See "Equity" in CLAUDE.md for the full account.
+ *              estimateEquityCached's key now includes raiseLevel, so a hand
+ *              that goes from unraised to a 3-bet doesn't keep serving the
+ *              pre-raise number. equityBasisLabel replaces the hardcoded
+ *              "Eq vs random" text with whichever tier actually applied.
+ *            - Notable hands survive the history cap. isNotableHand flags a
+ *              pot at NOTABLE_POT_BB_THRESHOLD (40bb) or a preflop raise at
+ *              NOTABLE_PREFLOP_RAISE_BB (4bb); trimHandHistory evicts oldest
+ *              UNPINNED entries first, pinned ones surviving past the normal
+ *              historyLimit up to a hard HISTORY_PINNED_CEILING (500) —
+ *              "notable" still can't grow unbounded. Wired into both
+ *              recordHandHistory and mergeHands, so a hand pinned on one
+ *              device isn't silently unpinned by an import from another. 📌
+ *              marks a pinned hand in the History tab and its plain-text
+ *              export.
+ *            - TORN_STAKES gained the $5,000,000 level, previously missing
+ *              entirely. More consequential: HopesG's HUD carries a SECOND
+ *              table map keyed by CSS texture class rather than blind level,
+ *              and it reveals that three stakes ($100k, $1M, $5M) have
+ *              MULTIPLE distinct table names sharing one blind — Torn runs
+ *              more than one differently-named room at some stakes. The
+ *              single name shown for those three levels (including the
+ *              device-confirmed "River Wizard" at $1M) is a best guess, not a
+ *              fact; documented in both the code and CLAUDE.md rather than
+ *              claimed as more certain than it is.
+ *            - A real substring-name bug, found while auditing for the class
+ *              nameToXidGuess's own comment already warned about ("Joe" would
+ *              resolve to a "Joey" seat) but hadn't actually fixed: the
+ *              fallback pass used `.includes(name)` with no boundary at all,
+ *              and a live scan already established that pass runs on 5 of 6
+ *              seats (SELECTORS.seatNameLink resolves on only 1). "Al" could
+ *              silently resolve to "AlexTheGreat"'s seat, misattributing every
+ *              one of Al's actions — and stats, and P/L — to Alex's record.
+ *              Fixed with a boundary check against the actual username
+ *              character class (not regex \\b, which treats the hyphens
+ *              USERNAME_RE allows as delimiters — \\bAl\\b still matches
+ *              inside "Al-Qaeda"). escapeRegexLiteral added alongside it,
+ *              since nameToXidGuess is also reachable with the free-typed
+ *              Settings → heroName field, not just a scraped (and therefore
+ *              already-constrained) log name.
  *
  * 0.42.3 - A code review pass over 0.42.0-0.42.2, and two real bugs it found.
  *            - The coach's idle line claimed "Waiting for the next hand", but
@@ -69,19 +123,6 @@
  *          are one tap away in Stats.
  *          SELF_BADGE_LIFT_PX 4 -> 5 badge-lines: four cleared hero's name plate
  *          but still landed on the chip figure.
- *
- * 0.42.1 - SELECTORS.potDisplay was declared and read by NOTHING — readDomPot()
- *          carried its own hardcoded copy of the same two selectors, so the one
- *          obvious place to edit after a Torn redeploy would have fixed nothing,
- *          silently. Third time: seatName sat unread for twelve versions while
- *          every player record stored "#3722665", and dealerButton was written
- *          up as "a red herring" when the real problem was that nothing read it.
- *          test/no-orphans.test.js now fails on any SELECTORS or
- *          DEFAULT_SETTINGS key, or any top-level function, that nothing uses.
- *          Verified non-vacuous against all three historical cases.
- *          Also: the changelog moved to CHANGELOG.md (780 lines above the first
- *          line of code, paid for by every read of this file from the top), and
- *          heroCanPreAct, declared at 0.26.1 and never called, is deleted.
  *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
@@ -145,7 +186,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '0.42.3';
+  const HUD_VERSION = '0.43.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -716,9 +757,14 @@
   // hand at different local timestamps, so a timestamp key let every shared hand
   // through twice. Fall back to timestamp+pot for records written before hands
   // carried an id.
+  // trimHandHistory rather than a flat slice, so a notable hand (big pot, big
+  // preflop raise — see isNotableHand) pinned on one device survives an import
+  // from another the same way it survives the normal recording path. A plain
+  // slice(0, limit) here would silently unpin nothing — the field would still
+  // say `pinned: true`, but a hand past `limit` gets cut regardless of it.
   function mergeHands(a, b, limit) {
     const seen = new Set();
-    return a.concat(b)
+    const merged = a.concat(b)
       .filter((h) => {
         if (!h) return false;
         const k = h.g ? 'g:' + h.g : 't:' + h.t + ':' + (h.pot || 0);
@@ -726,8 +772,8 @@
         seen.add(k);
         return true;
       })
-      .sort((x, y) => y.t - x.t)
-      .slice(0, limit || 200);
+      .sort((x, y) => y.t - x.t);
+    return trimHandHistory(merged, limit || 200, HISTORY_PINNED_CEILING);
   }
 
   // ===========================================================================
@@ -1021,6 +1067,13 @@
     return String(n || '').replace(/^[^\w]+/, '').replace(/[^\w]+$/, '').trim();
   }
 
+  // Escape a string for literal interpolation into `new RegExp(...)`. Needed
+  // wherever a dynamic value — a scraped name, a user-typed setting — becomes
+  // part of a pattern rather than being matched BY one.
+  function escapeRegexLiteral(s) {
+    return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
   let heroXid = null;
   let currentHand = null;
   const seenUnmatchedLines = []; // for calibration panel
@@ -1034,20 +1087,39 @@
   let lastSeenBB = 0;
 
   // Torn's poker tables, by big blind. Blind levels are fixed per table, so the
-  // blind read off the log identifies which table you are sitting at.
+  // blind read off the log identifies which table you are sitting at — with one
+  // caveat below.
   //
-  // Taken from HopesG's HUD (MIT, GreasyFork 569933), which carries the ladder
-  // as data. Not independently verified, but two levels are corroborated by
-  // scans from this device: $1,000,000 (River Wizard) and $2,500,000 (Cat's
-  // Chance). An unknown level is reported rather than treated as an error —
-  // Torn adds tables, and this list will go stale before the code does.
+  // Taken from HopesG's HUD (MIT, GreasyFork 569933), which carries TWO ladders:
+  // a default bb->name map (used here), and a second map keyed by a CSS "table
+  // texture" class HopesG reads from the DOM that we have no scan confirming on
+  // this layout. Two levels are independently corroborated by scans from THIS
+  // device: $1,000,000 (River Wizard) and $2,500,000 (Cat's Chance). Everything
+  // else here is borrowed, not measured — same status as POOL_AVG.
+  //
+  // v0.43.0 folded in the rest of HopesG's default map ($5,000,000, previously
+  // missing entirely) and surfaced something their SECOND map exposes that this
+  // one-name-per-level shape hides: at three stakes — $100,000, $1,000,000 and
+  // $5,000,000 — their texture-keyed map lists MULTIPLE distinct table names
+  // sharing that same blind level (e.g. $100,000 alone covers "Old 'n Slow",
+  // "Periodic", "Fourplay" and "Duel at Dawn"). Torn evidently runs more than
+  // one differently-named room at some stakes, which breaks the "blind level
+  // identifies the table" assumption this whole lookup rests on — just not
+  // reliably enough to prove from a texture class we cannot read. The single
+  // name shown for those three levels (including the confirmed "River Wizard"
+  // at $1M) is therefore a best guess, not a confirmed one: if a future scan
+  // lands at a $1M table that ISN'T River Wizard, this is why, and "Tripod" /
+  // "Comatose Cove" are the other two names on record for that level.
+  // An unknown level is reported rather than treated as an error — Torn adds
+  // tables, and this list will go stale before the code does.
   const TORN_STAKES = {
     10: 'Newbie Corner', 25: 'Hobo Holdem', 50: 'Broke Jokes', 100: '8-bit',
     250: 'Sprinkles', 500: 'E-asy Street', 1000: 'Gatling Gun', 2500: 'Quickdraw',
     5000: 'Tight Knit', 10000: 'Six of the Best', 25000: 'Ballsy',
     50000: 'Boom or Bust', 100000: "Old 'n Slow", 250000: 'Pound It',
     500000: 'Old Folks Home', 1000000: 'River Wizard', 2500000: "Cat's Chance",
-    10000000: 'High Rollers', 25000000: 'Fire Pit', 100000000: 'Oligarch',
+    5000000: 'Juan on Juan', 10000000: 'High Rollers', 25000000: 'Fire Pit',
+    100000000: 'Oligarch',
   };
 
   // The smallest real blind on Torn. Anything below this is not a stake.
@@ -1506,9 +1578,26 @@
   function nameToXidGuess(name) {
     // Resolve a log line's display name to a stable numeric XID by finding the
     // matching seat. Two passes so an exact name match always beats a loose one:
-    // a substring test alone would resolve "Joe" to a "Joey" seat, or match a
-    // name that happens to appear inside a stat overlay rather than the seat's
-    // own profile link.
+    // a plain substring test would resolve "Joe" to a "Joey" seat.
+    //
+    // The FALLBACK pass is the one that matters here, not the exact one — a live
+    // scan found SELECTORS.seatNameLink (a profile-link anchor) present on only
+    // 1 of 6 seats, so most resolutions run through this second pass on most
+    // tables. Until this was boundary-anchored, `.includes(name)` had the exact
+    // "Joe"/"Joey" bug the comment above already warned about, just one pass
+    // later than the warning implied: "Al" would match a seat whose only
+    // occupant is "AlexTheGreat", misattributing every one of Al's real actions
+    // (and stats, and P/L) to Alex's record, and vice versa.
+    //
+    // Not plain `\b` — regex word boundaries treat `-` as a NON-word character,
+    // but USERNAME_RE allows hyphens in a real username, so `\bAl\b` still
+    // false-matches inside "Al-Qaeda" (the boundary sits right at the hyphen).
+    // The lookaround below instead requires whatever is adjacent to NOT be a
+    // valid username character at all, which is the actual thing that needs to
+    // be true for `name` to be a distinct token rather than part of a longer
+    // one. escapeRegexLiteral is used even though USERNAME_RE forbids regex
+    // metacharacters, so this doesn't quietly become unsafe if `name` is ever
+    // passed in from somewhere less constrained.
     const seats = Array.from(document.querySelectorAll(SELECTORS.seatContainer));
 
     for (const seat of seats) {
@@ -1518,8 +1607,9 @@
         if (xid) { noteResolvedName(xid, name); return xid; }
       }
     }
+    const nameRe = new RegExp('(?<![A-Za-z0-9_-])' + escapeRegexLiteral(name) + '(?![A-Za-z0-9_-])');
     for (const seat of seats) {
-      if ((seat.textContent || '').includes(name)) {
+      if (nameRe.test(seat.textContent || '')) {
         const xid = resolveXidFromSeat(seat);
         if (xid) { noteResolvedName(xid, name); return xid; }
       }
@@ -2088,6 +2178,51 @@
     finalizeHand();
   }
 
+  // A hand that survives the recency cap rather than being evicted with
+  // everything else its age — see trimHandHistory. Two triggers, both in big
+  // blinds since a raw chip figure means nothing across stakes:
+  //   - the pot reached NOTABLE_POT_BB_THRESHOLD, a judgement call (borrowed
+  //     from HopesG's HUD, GreasyFork 569933, same status as POOL_AVG — not
+  //     independently measured), or
+  //   - a preflop raise reached NOTABLE_PREFLOP_RAISE_BB, sized big enough
+  //     that it was a real preflop decision rather than a min-raise.
+  // Needs hand.bbAmount to mean anything; with no readable blind (bb <= 0)
+  // neither check can fire, so an unpriceable hand is never pinned — an
+  // unknown size is not evidence of a big one.
+  const NOTABLE_POT_BB_THRESHOLD = 40;
+  const NOTABLE_PREFLOP_RAISE_BB = 4;
+  function isNotableHand(hand) {
+    const bb = hand.bbAmount;
+    if (!plausibleBB(bb)) return false;
+    if (hand.pot / bb >= NOTABLE_POT_BB_THRESHOLD) return true;
+    return (hand.actions || []).some((a) => a.s === 'preflop' && a.a === 'raise'
+      && a.amt >= NOTABLE_PREFLOP_RAISE_BB * bb);
+  }
+
+  // Hard ceiling on total stored hands, pinned or not — see trimHandHistory.
+  // Measured cost is ~1.3KB/hand at historyLimit's 200 (CLAUDE.md "Storage,
+  // and what it costs"), so 500 tops out around 650KB — small next to the 5MB
+  // estimated quota, and prunePlayers/the storage-warning banner are the
+  // independent backstop if it ever isn't.
+  const HISTORY_PINNED_CEILING = 500;
+
+  // Evict oldest UNPINNED entries first once over `limit`; pinned entries
+  // survive past that, up to the hard `pinnedCeiling` — beyond which even a
+  // pinned hand is evicted, oldest first, same as prunePlayers' cap.
+  // `hands` is newest-first throughout (recordHandHistory unshifts, mergeHands
+  // sorts by t descending), so a single left-to-right walk keeps everything in
+  // its original relative order without needing to re-sort.
+  function trimHandHistory(hands, limit, pinnedCeiling) {
+    if (hands.length <= limit) return hands;
+    const kept = [];
+    let unpinnedKept = 0;
+    for (const h of hands) {
+      if (h.pinned) { kept.push(h); continue; }
+      if (unpinnedKept < limit) { kept.push(h); unpinnedKept++; }
+    }
+    return kept.length > pinnedCeiling ? kept.slice(0, pinnedCeiling) : kept;
+  }
+
   // Keep one global newest-first list rather than a per-player copy: a hand
   // involves several players, and the History tab just filters this list.
   function recordHandHistory(hand) {
@@ -2103,9 +2238,10 @@
       winners: hand.winners,
       shown: hand.shown,
       heroCards: hand.heroCards || null,
+      pinned: isNotableHand(hand),
     });
     const limit = STORE.settings.historyLimit || 200;
-    if (STORE.hands.length > limit) STORE.hands.length = limit;
+    STORE.hands = trimHandHistory(STORE.hands, limit, HISTORY_PINNED_CEILING);
   }
 
   // Has this Torn game id already been written to history? Only the newest few
@@ -2168,7 +2304,8 @@
   // Render one stored hand as a compact, readable summary.
   function formatHand(h, focusXid) {
     const when = new Date(h.t).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-    const lines = [`[${when}] pot ${fmtMoney(h.pot)} — reached ${h.street}`];
+    const pin = h.pinned ? ' 📌' : '';
+    const lines = [`[${when}] pot ${fmtMoney(h.pot)} — reached ${h.street}${pin}`];
     const byStreet = {};
     (h.actions || []).forEach((a) => { (byStreet[a.s] = byStreet[a.s] || []).push(a); });
     ['preflop', 'flop', 'turn', 'river'].forEach((street) => {
@@ -2219,8 +2356,13 @@
   // text — so the two must be changed together if the content changes.
   function formatHandHtml(h, focusXid) {
     const when = new Date(h.t).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    // Same 📌 formatHand prints in plain text — the tab, the clipboard and the
+    // file must never drift into three descriptions of the same hand. Marks a
+    // notable hand (see isNotableHand) that survives the history cap longer
+    // than an ordinary one, so it not being just another card in the list.
+    const pin = h.pinned ? ' <span title="Notable — kept longer than the usual cap">📌</span>' : '';
     const parts = [`<div class="tph-hh-head" style="${HH.head}">${escapeHtml(when)} · pot ${fmtMoney(h.pot)}`
-      + ` · reached ${escapeHtml(h.street || 'preflop')}</div>`];
+      + ` · reached ${escapeHtml(h.street || 'preflop')}${pin}</div>`];
 
     const byStreet = {};
     (h.actions || []).forEach((a) => { (byStreet[a.s] = byStreet[a.s] || []).push(a); });
@@ -2275,7 +2417,10 @@
       `Torn Poker HUD — hand history vs ${playerDisplayName(xid)} (xid ${xid})`,
       `Exported ${new Date().toISOString()}`,
       `${hands.length} hand(s) with this player, newest first.`,
-      `Only the most recent ${limit} hands are kept overall, so anything older is already gone.`,
+      `Only the most recent ${limit} hands are kept overall, plus any notable ones `
+        + `(big pot, or a preflop raise of ${NOTABLE_PREFLOP_RAISE_BB}bb+) kept longer — `
+        + `so a specific old hand may survive even past the ${limit} figure, but anything `
+        + `not notable and older than that is already gone.`,
       p ? `Seen in ${p.hands} hand(s) total; * marks their actions.` : '* marks their actions.',
       '',
     ].join('\n');
@@ -3397,6 +3542,43 @@
     return range.has(handToShorthand(cardA, cardB));
   }
 
+  // Range proxy for a Monte Carlo opponent, keyed by how many preflop raise
+  // events the hand has seen — 0 (unopened/limped), 1 (a single open), 2 (a
+  // 3-bet), 3+ (a 4-bet or more). Reuses chart data this project has already
+  // sourced and combo-weighted for the coach (see "Preflop charts" in
+  // CLAUDE.md) instead of inventing new percentages — the same approach
+  // Torn Poker Helper (GreasyFork 538541) uses with flat 35%/12%/5% figures,
+  // but grounded in ranges this repo has already verified.
+  //
+  // One flat proxy per tier, not conditioned on seat count or the specific
+  // opener's real position — that identity isn't threaded through to the
+  // equity call. RFI_RANGES.SHORT.CO (26.4%) sits roughly in the middle of the
+  // real spread across positions (full-ring UTG ~11.6% to short BTN ~42%),
+  // which is a materially better stand-in for "this pot was opened" than
+  // treating every opponent as a uniformly random hand — the status quo this
+  // replaces. Returns null for an unopened/limped pot: Torn Poker Helper only
+  // narrows ranges once the pot IS raised, and there is no single "limping
+  // range" chart in this file to borrow from.
+  function opponentRangeProxy(raiseLevel) {
+    const n = Number(raiseLevel) || 0;
+    if (n <= 0) return null;
+    if (n === 1) return RFI_RANGES.SHORT.CO; // ~26.4% — someone opened
+    if (n === 2) return THREE_BET_RANGES.IP; // ~9.7% — someone 3-bet
+    return FOUR_BET_RANGE;                    // ~2.9% — a 4-bet or more
+  }
+
+  // What the equity quote's opponents actually are, in a few words — has to
+  // track opponentRangeProxy exactly, since it is describing that function's
+  // choice, not the hand generically. "vs random" undersells a raised pot
+  // (opponents are narrowed); anything else would oversell an unopened one.
+  function equityBasisLabel(raiseLevel) {
+    const n = Number(raiseLevel) || 0;
+    if (n <= 0) return 'vs random';
+    if (n === 1) return 'vs open range';
+    if (n === 2) return 'vs 3-bet range';
+    return 'vs 4-bet range';
+  }
+
   // Fraction of the time the defender must continue. Returns null when the pot
   // isn't known: 0/(0+0) is NaN, and "defend roughly NaN% of your range" was
   // reaching the live coach panel whenever the script loaded mid-hand, because
@@ -3784,10 +3966,27 @@
     return 0;
   }
 
-  // Monte Carlo equity against N random hands. "Random" is deliberate and
-  // stated in the UI: real opponents have ranges, so this reads pessimistically
-  // against tight players and optimistically against loose ones.
-  function estimateEquity(heroCards, boardCards, nOpp) {
+  // Same shorthand as handToShorthand, for the numeric {r,s} cards this deck
+  // deals rather than the {rank,suit} letter cards the range charts are
+  // written against. RANKS[r-2] inverts cardToNum's rankIdx(c.rank)+2.
+  function numericHandShorthand(a, b) {
+    const hi = a.r >= b.r ? a : b;
+    const lo = a.r >= b.r ? b : a;
+    if (hi.r === lo.r) return RANKS[hi.r - 2] + RANKS[lo.r - 2];
+    return RANKS[hi.r - 2] + RANKS[lo.r - 2] + (hi.s === lo.s ? 's' : 'o');
+  }
+
+  // Monte Carlo equity against N opponents. `raiseLevel` (preflop raise events
+  // this hand has seen: 0 unopened/limped, 1 an open, 2 a 3-bet, 3+ a 4-bet+)
+  // is optional — omit it, or pass 0, for the original "vs N random hands"
+  // behaviour, still the honest answer for an unopened pot. When a raise HAS
+  // happened, opponents are drawn from opponentRangeProxy(raiseLevel) instead
+  // of the full 52-card pool: a real raiser does not hold 72o, and quoting
+  // equity as if they might reads pessimistically against tight players and
+  // optimistically against loose ones — the exact caveat "Eq vs random" was
+  // already printed on this figure to admit. The UI wording is updated
+  // alongside this to say what it now means for a raised pot.
+  function estimateEquity(heroCards, boardCards, nOpp, raiseLevel) {
     if (!heroCards || heroCards.length !== 2) return null;
     const hero = heroCards.map(cardToNum);
     const board = (boardCards || []).map(cardToNum).filter((c) => c.s >= 0 && c.r >= 2);
@@ -3804,20 +4003,87 @@
     const take = need + 2 * nOpp;
     if (take > deck.length) return null;
 
+    const rangeStr = opponentRangeProxy(raiseLevel);
+    const rangeSet = rangeStr ? parseRange(rangeStr) : null;
+
+    // Every in-range pair still possible from this deck, computed ONCE per
+    // call rather than rediscovered inside the iteration loop. A range like
+    // FOUR_BET_RANGE only touches a handful of ranks, so this list stays
+    // short (tens of combos, not hundreds) — a first version that instead
+    // re-enumerated candidates from scratch for every opponent on every one
+    // of 1200 iterations measured ~350ms for a single call at 8 opponents
+    // (vs ~20ms unweighted), a regression that would visibly stall the coach
+    // panel, which asks for two of these every render. Picking from a small
+    // fixed list is what actually makes this affordable.
+    let rangeCombos = null;
+    if (rangeSet) {
+      rangeCombos = [];
+      for (let a = 0; a < deck.length; a++) {
+        for (let b = a + 1; b < deck.length; b++) {
+          if (rangeSet.has(numericHandShorthand(deck[a], deck[b]))) rangeCombos.push([deck[a], deck[b]]);
+        }
+      }
+    }
+
     const iters = STORE.settings.equityIters || 1200;
     let win = 0;
     let tie = 0;
     for (let it = 0; it < iters; it++) {
-      // Partial Fisher–Yates: only shuffle the cards this trial consumes.
-      for (let i = 0; i < take; i++) {
+      // Board completion cards only, drawn first so range-weighted opponent
+      // hands below always avoid whatever the board turned out to be.
+      for (let i = 0; i < need; i++) {
         const j = i + Math.floor(Math.random() * (deck.length - i));
         const tmp = deck[i]; deck[i] = deck[j]; deck[j] = tmp;
       }
+      const usedIds = new Set();
+      for (let i = 0; i < need; i++) usedIds.add(deck[i].r * 4 + deck[i].s);
+
+      // Range-weighted opponents: pick a random entry from the precomputed
+      // combo list and accept it unless a card in it is already spoken for
+      // (the board, or an earlier opponent this same iteration) — retried
+      // against that same short list, not against the whole deck, so this
+      // stays cheap even late in a full field. A range this narrow genuinely
+      // cannot supply 8 non-conflicting hands (FOUR_BET_RANGE touches maybe a
+      // dozen physical cards total), so some opponents in a big field will
+      // legitimately fall through to the random fallback below — that is the
+      // honest outcome, not a bug: a table with eight live QQ+/AK hands
+      // facing a 4-bet does not reflect anything real either.
+      const oppHands = new Array(nOpp).fill(null);
+      if (rangeSet && rangeCombos.length) {
+        for (let o = 0; o < nOpp; o++) {
+          for (let attempt = 0; attempt < 40; attempt++) {
+            const [a, b] = rangeCombos[Math.floor(Math.random() * rangeCombos.length)];
+            const idA = a.r * 4 + a.s;
+            const idB = b.r * 4 + b.s;
+            if (!usedIds.has(idA) && !usedIds.has(idB)) {
+              oppHands[o] = [a, b];
+              usedIds.add(idA);
+              usedIds.add(idB);
+              break;
+            }
+          }
+        }
+      }
+      // Everyone still unfilled — raiseLevel 0, or a range the field has
+      // already exhausted — draws uniformly from whatever real cards are
+      // left, the original behaviour and the only honest option once the
+      // range has nothing left to give.
+      const remaining = deck.slice(need).filter((c) => !usedIds.has(c.r * 4 + c.s));
+      let ri = 0;
+      for (let o = 0; o < nOpp; o++) {
+        if (oppHands[o]) continue;
+        const j1 = ri + Math.floor(Math.random() * (remaining.length - ri));
+        const t1 = remaining[ri]; remaining[ri] = remaining[j1]; remaining[j1] = t1; ri++;
+        const j2 = ri + Math.floor(Math.random() * (remaining.length - ri));
+        const t2 = remaining[ri]; remaining[ri] = remaining[j2]; remaining[j2] = t2; ri++;
+        oppHands[o] = [remaining[ri - 2], remaining[ri - 1]];
+      }
+
       const full = board.concat(deck.slice(0, need));
       const hv = evaluate7(hero.concat(full));
       let best = null;
       for (let o = 0; o < nOpp; o++) {
-        const ov = evaluate7([deck[need + 2 * o], deck[need + 2 * o + 1]].concat(full));
+        const ov = evaluate7(oppHands[o].concat(full));
         if (best === null || cmpHand(ov, best) > 0) best = ov;
       }
       const c = cmpHand(hv, best);
@@ -3833,14 +4099,18 @@
   // for several opponent counts for the same board (full ring, live, heads-up).
   // With a single slot each lookup evicted the previous one and nothing ever hit
   // cache — every render recomputed every figure from scratch.
+  // raiseLevel is part of the key, not just an argument: the same hero cards,
+  // board and opponent count mean something different once someone 3-bets, and
+  // a cache keyed on the first three alone would keep serving a pre-raise
+  // figure straight through the raise that should have changed it.
   const EQUITY_CACHE_MAX = 12;
   const equityCache = new Map();
-  function estimateEquityCached(heroCards, boardCards, nOpp) {
+  function estimateEquityCached(heroCards, boardCards, nOpp, raiseLevel) {
     const key = heroCards.map((c) => c.rank + c.suit).join('')
       + '|' + (boardCards || []).map((c) => c.rank + c.suit).join('')
-      + '|' + nOpp;
+      + '|' + nOpp + '|' + (Number(raiseLevel) || 0);
     if (equityCache.has(key)) return equityCache.get(key);
-    const v = estimateEquity(heroCards, boardCards, nOpp);
+    const v = estimateEquity(heroCards, boardCards, nOpp, raiseLevel);
     equityCache.set(key, v);
     // Board changes make old entries unreachable; cap the map so a long session
     // doesn't accumulate one entry per hand forever.
@@ -4151,13 +4421,16 @@
       });
 
       const quotes = wanted
-        .map((w) => ({ ...w, eq: estimateEquityCached(heroCards, board, w.n) }))
+        .map((w) => ({ ...w, eq: estimateEquityCached(heroCards, board, w.n, hand.preflopRaiseEvents) }))
         .filter((w) => w.eq != null);
 
       if (quotes.length) {
-        // Pot odds folded into the same line rather than its own. "vs random"
-        // stays as the honesty marker now that the footnote is gone.
-        const parts = ['Eq vs random ' + quotes.map((w) => `<b>${fmtEquity(w.eq)}</b> ${w.label}`).join(' · ')];
+        // Pot odds folded into the same line rather than its own. The basis
+        // label is the honesty marker now that the footnote is gone — it has
+        // to change alongside the number: once a raise narrows the simulated
+        // opponents (see opponentRangeProxy), quoting it as "vs random" would
+        // be stating the OLD caveat about a number that no longer deserves it.
+        const parts = [`Eq ${equityBasisLabel(hand.preflopRaiseEvents)} ` + quotes.map((w) => `<b>${fmtEquity(w.eq)}</b> ${w.label}`).join(' · ')];
         const liveEq = quotes.find((w) => w.n === live);
         if (betFacing > 0 && liveEq) {
           const need = (100 * betFacing) / (pot + betFacing);
@@ -6584,6 +6857,7 @@
       LOG_NOISE_RE,
       cleanLogLine,
       cleanName,
+      escapeRegexLiteral,
       parseAmount,
       RFI_RANGES,
       THREE_BET_RANGES,
@@ -6593,6 +6867,13 @@
       preflopBaseline,
       evaluate7,
       estimateEquity,
+      estimateEquityCached,
+      opponentRangeProxy,
+      equityBasisLabel,
+      numericHandShorthand,
+      cardToNum,
+      handToShorthand,
+      parseRange,
       rotateToBlinds,
       seatLabel,
       computeRates,
@@ -6718,6 +6999,13 @@
       playerHistoryExport,
       handsInvolving,
       formatHand,
+      recordHandHistory,
+      isNotableHand,
+      trimHandHistory,
+      mergeHands,
+      NOTABLE_POT_BB_THRESHOLD,
+      NOTABLE_PREFLOP_RAISE_BB,
+      HISTORY_PINNED_CEILING,
       // Exposed as accessors because STORE and heroXid are rebound, not
       // mutated — a plain reference would freeze at whatever loaded first.
       applyHandResults,

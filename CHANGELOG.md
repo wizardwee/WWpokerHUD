@@ -9,6 +9,62 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 0.43.0
+
+Four ideas pulled from HopesG's HUD and Torn Poker Helper, adapted
+to this file's own conventions rather than copied wholesale:
+  - Equity is range-weighted once the pot is raised.
+    estimateEquity() took an optional raiseLevel argument; a raised
+    pot now deals opponents from opponentRangeProxy(raiseLevel) —
+    RFI_RANGES.SHORT.CO / THREE_BET_RANGES.IP / FOUR_BET_RANGE,
+    charts this file already sourced and combo-weighted, not new
+    percentages. An unraised pot is untouched (still "vs random").
+    First implementation measured ~350ms for a single 8-opponent
+    call against FOUR_BET_RANGE (~20ms unweighted) — a ~16x
+    regression that would have stalled the coach panel. Fixed by
+    precomputing the in-range combo list ONCE per call instead of
+    re-deriving it inside the 1200-iteration loop: ~57ms worst
+    case. See "Equity" in CLAUDE.md for the full account.
+    estimateEquityCached's key now includes raiseLevel, so a hand
+    that goes from unraised to a 3-bet doesn't keep serving the
+    pre-raise number. equityBasisLabel replaces the hardcoded
+    "Eq vs random" text with whichever tier actually applied.
+  - Notable hands survive the history cap. isNotableHand flags a
+    pot at NOTABLE_POT_BB_THRESHOLD (40bb) or a preflop raise at
+    NOTABLE_PREFLOP_RAISE_BB (4bb); trimHandHistory evicts oldest
+    UNPINNED entries first, pinned ones surviving past the normal
+    historyLimit up to a hard HISTORY_PINNED_CEILING (500) —
+    "notable" still can't grow unbounded. Wired into both
+    recordHandHistory and mergeHands, so a hand pinned on one
+    device isn't silently unpinned by an import from another. 📌
+    marks a pinned hand in the History tab and its plain-text
+    export.
+  - TORN_STAKES gained the $5,000,000 level, previously missing
+    entirely. More consequential: HopesG's HUD carries a SECOND
+    table map keyed by CSS texture class rather than blind level,
+    and it reveals that three stakes ($100k, $1M, $5M) have
+    MULTIPLE distinct table names sharing one blind — Torn runs
+    more than one differently-named room at some stakes. The
+    single name shown for those three levels (including the
+    device-confirmed "River Wizard" at $1M) is a best guess, not a
+    fact; documented in both the code and CLAUDE.md rather than
+    claimed as more certain than it is.
+  - A real substring-name bug, found while auditing for the class
+    nameToXidGuess's own comment already warned about ("Joe" would
+    resolve to a "Joey" seat) but hadn't actually fixed: the
+    fallback pass used `.includes(name)` with no boundary at all,
+    and a live scan already established that pass runs on 5 of 6
+    seats (SELECTORS.seatNameLink resolves on only 1). "Al" could
+    silently resolve to "AlexTheGreat"'s seat, misattributing every
+    one of Al's actions — and stats, and P/L — to Alex's record.
+    Fixed with a boundary check against the actual username
+    character class (not regex \\b, which treats the hyphens
+    USERNAME_RE allows as delimiters — \\bAl\\b still matches
+    inside "Al-Qaeda"). escapeRegexLiteral added alongside it,
+    since nameToXidGuess is also reachable with the free-typed
+    Settings → heroName field, not just a scraped (and therefore
+    already-constrained) log name.
+
 ## 0.42.3
 
 A code review pass over 0.42.0-0.42.2, and two real bugs it found.
