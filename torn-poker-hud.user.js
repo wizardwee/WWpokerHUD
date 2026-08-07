@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      0.42.0
+// @version      0.42.2
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @match        *://www.torn.com/page.php?sid=holdem*
 // @match        *://torn.com/page.php?sid=holdem*
@@ -15,6 +15,37 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 0.42.2 - The seat badge was wide enough to reach the community cards.
+ *          Reported from a live table at "3B 🤮 TAG V35 P23 A67" — ~168px, and
+ *          the flop is behind it. Everything shed is punctuation, not content:
+ *          no spaces inside V35P23A67 (the letters already delimit the groups),
+ *          the "15h" window marker moves to the tooltip, badgePct caps a figure
+ *          at two characters (100 renders 99 — same read, one less glyph), the
+ *          type/number gap is a margin not a space, and padding, letter-spacing
+ *          and the emoji size all come down. ~168px -> ~116px, 31% narrower.
+ *          The LABELLED numbers stay. "74/12/16" is three unexplained figures on
+ *          an element with no room for a legend, which is exactly why they were
+ *          labelled; width is not a reason to undo that.
+ *          Settings gained "Numbers (V/P/A) on the labels" as the escape hatch
+ *          if it still doesn't fit — 64px, 62% narrower, keeping type, role and
+ *          🤮/🔥, which are the read. The numbers are the evidence for it and
+ *          are one tap away in Stats.
+ *          SELF_BADGE_LIFT_PX 4 -> 5 badge-lines: four cleared hero's name plate
+ *          but still landed on the chip figure.
+ *
+ * 0.42.1 - SELECTORS.potDisplay was declared and read by NOTHING — readDomPot()
+ *          carried its own hardcoded copy of the same two selectors, so the one
+ *          obvious place to edit after a Torn redeploy would have fixed nothing,
+ *          silently. Third time: seatName sat unread for twelve versions while
+ *          every player record stored "#3722665", and dealerButton was written
+ *          up as "a red herring" when the real problem was that nothing read it.
+ *          test/no-orphans.test.js now fails on any SELECTORS or
+ *          DEFAULT_SETTINGS key, or any top-level function, that nothing uses.
+ *          Verified non-vacuous against all three historical cases.
+ *          Also: the changelog moved to CHANGELOG.md (780 lines above the first
+ *          line of code, paid for by every read of this file from the top), and
+ *          heroCanPreAct, declared at 0.26.1 and never called, is deleted.
  *
  * 0.42.0 - Five screen-real-estate and export changes, all requested from the
  *          table rather than inferred:
@@ -48,61 +79,6 @@
  *              Exploit and Report are the two written-out reads on one player
  *              and are read together, so they sit beside each other, with the
  *              raw numbers they derive from leading.
- *
- * 0.41.0 - STORE.players is bounded. Open finding #2 is CLOSED.
- *          The shape follows a measurement, not a preference: a fresh one-hand
- *          record is 562 bytes and a five-hundred-hand one is 1,076. A thin
- *          record costs HALF what a thick one does for essentially none of the
- *          value — under minHands classify() returns "Unrated" anyway, and
- *          shrinkage pulls a three-hand player to the pool average regardless.
- *          So thin goes before old, and age is the tiebreaker, never the lead:
- *          a flat "drop everything over 60 days" rule deletes a weekly regular
- *          with 400 hands and keeps yesterday's one-hand stranger.
- *            1. Under 10 hands AND not seen in 30 days.
- *            2. Not seen in 180 days, any sample.
- *            3. Least recently seen, down to 2000 players.
- *          Rule 3 is the only part that is an INVARIANT rather than a
- *          heuristic. Rules 1 and 2 might free nothing; "the store cannot hold
- *          more than PRUNE_PLAYER_CAP" is what makes the ceiling unreachable
- *          rather than merely further off.
- *          Runs off the back of a save (writing is what makes it bigger), and
- *          only past STORAGE_WARN_PCT — nothing is deleted on a day it was not
- *          needed. A REFUSED save forces a pass immediately and retries once;
- *          that terminates because the second pass has nothing left to drop.
- *          Every run is reported in Settings → Storage and persisted, because
- *          "we dropped 2,900 records last Tuesday" must not be deniable.
- *          Two things deliberately survive everything: hero's own record, and
- *          any record with NO lastSeen — an unknown age is not an infinite one,
- *          and reading epoch-0 as "very old" would let a gist import delete a
- *          year of good data on the first save after it. Those are stamped and
- *          judged on a real timestamp next time.
- *
- * 0.40.0 - A full localStorage is no longer silent. saveStore caught the quota
- *          error and console.warn'd, which on a phone is no warning at all —
- *          and it is the worst failure in the file precisely because it has no
- *          symptom: the HUD keeps working perfectly off the in-memory STORE for
- *          the rest of the session, then loses everything recorded since the
- *          first refusal on reload.
- *            - A refusal now sets `saveFailure` and raises a banner. It is
- *              pointer-events:none, per the rule that nothing the HUD draws
- *              over the table may swallow a tap on Fold or Call.
- *            - Settings gained a Storage section: a meter, the size, the player
- *              and history counts, and the per-player cost. Placed directly
- *              above Backup, because copying one is the remedy for every state
- *              it can report. Amber past 75%.
- *            - The players list footer carries the same figure, since that is
- *              where the player count is visible.
- *          A successful save clears the state; the FIRST failure's timestamp is
- *          kept, since it marks how far back the memory-only data goes.
- *          The quota is an ESTIMATE (5MB) — the Storage Manager API is absent
- *          in the PDA webview. It renders a proportion and warns early; it
- *          never gates a write, because guessing low would refuse data that
- *          would have fitted.
- *          test/harness.js now QUEUES setTimeout instead of dropping it, with
- *          runTimers() to drain. saveStore's write lives inside a 250ms
- *          debounce, so a dropped timer meant any test of it passed vacuously.
- *          Open finding #2 is half closed: this is the "surface it" half. The
- *          store still grows without bound.
  *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
@@ -166,7 +142,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '0.42.0';
+  const HUD_VERSION = '0.42.2';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -327,6 +303,10 @@
     badgeMode: 'session',
     sessionWindow: 15,
     showSelfBadge: true, // badge your own seat too — see renderBadges
+    badgeStats: true,  // V/P/A on the seat badge. Off leaves type + role + state
+                       // emoji, which is the read; the numbers are the evidence
+                       // for it and are one tap away. The escape hatch for a
+                       // badge still wide enough to reach the community cards.
     showRoleBadges: true, // PFR/3B/DONK/RR chips for THIS hand — see handRoles
     turnCues: true,       // pulsing border + green gear when it's your turn
     nextToActCue: true,   // quieter amber border when you're one seat away
@@ -2714,6 +2694,18 @@
     return v == null ? '–' : v.toFixed(0);
   }
 
+  // A percentage for a seat badge: always at most two characters.
+  //
+  // 100 is clamped to 99. On a badge that floats over the community cards, the
+  // third digit costs real width and buys nothing — "played 99% of hands" and
+  // "played 100% of hands" are the same read, and anyone who wants the true
+  // figure has the Stats tab, which prints it raw. Everywhere else keeps
+  // fmtNum; this is only for the badge face.
+  function badgePct(v) {
+    if (v == null) return '–';
+    return String(Math.min(99, Math.max(0, Math.round(v))));
+  }
+
   // Equity rounded to whole percent printed a flat "0%" for anything under 0.5,
   // which reads as "this hand cannot win" when it means "under one percent".
   // Against 8 random hands a weak holding genuinely lands there, so the
@@ -4498,30 +4490,38 @@
        border sitting above the seat it covered the player's name, which is the
        one thing on a seat you always need to read. */
     .tph-badge { position: fixed; z-index: 99998; background: rgba(10,10,14,0.82) !important;
-      color: #cfd6dd !important; border: none; border-radius: 3px; padding: 1px 4px;
+      color: #cfd6dd !important; border: none; border-radius: 3px; padding: 1px 3px;
       font: 10px/1.45 -apple-system, sans-serif !important;
-      letter-spacing: 0.2px; white-space: nowrap; cursor: pointer; pointer-events: auto;
-      max-width: 140px; overflow: hidden; }
-    .tph-badge b { color: #ffc94d !important; font-weight: 700; }
+      letter-spacing: 0; white-space: nowrap; cursor: pointer; pointer-events: auto;
+      max-width: 118px; overflow: hidden; }
+    /* The gap between the type and the numbers is a margin, not a space
+       character: a space is ~3px of nothing at the one place the badge is
+       already at its widest. Same reasoning behind the tightened padding and
+       the dropped letter-spacing above — this element floats over the table,
+       and at full width it reaches the community cards. */
+    .tph-badge b { color: #ffc94d !important; font-weight: 700; margin-right: 2px; }
     /* Your own seat, tinted so it reads as "this one is me" at a glance rather
        than needing to be located by position. */
     .tph-badge-self { background: rgba(14,42,32,0.88) !important;
                       box-shadow: inset 0 0 0 1px rgba(53,208,127,.55); }
     .tph-badge-self b { color: #7ee0a6 !important; }
     .tph-badge .tph-badge-dim { color: #9fb0bf !important; }
-    .tph-badge .tph-badge-tilt, .tph-badge .tph-badge-heat { margin-right: 2px; }
+    /* Emoji render wider than the 10px text around them, so they are pulled
+       down a size and given the minimum gap that still keeps 🤮🔥 apart. */
+    .tph-badge .tph-badge-tilt, .tph-badge .tph-badge-heat {
+      margin-right: 1px; font-size: 9px; }
     /* This-hand role markers. Deliberately a filled chip rather than more text
        in the badge's own voice — these describe the hand in front of you, not
        the player, and they disappear at settlement. Colour is declared here
        because pinTextColor leaves any tph- element alone, so one that declares
        none is left to Torn's own bare-element rules. */
-    .tph-badge .tph-badge-role { border-radius: 2px; padding: 0 3px; margin-right: 3px;
+    .tph-badge .tph-badge-role { border-radius: 2px; padding: 0 2px; margin-right: 2px;
       font-weight: 700; letter-spacing: 0; color: #0d1117 !important; }
     .tph-badge .tph-role-pre { background: #ffc94d; }
     .tph-badge .tph-role-post { background: #7fd4ff; }
     /* Must come after .tph-badge (same specificity, later wins) — without the
        extra room the role chip pushes V/P/A past the clip. */
-    .tph-badge-wide { max-width: 178px; }
+    .tph-badge-wide { max-width: 146px; }
     .tph-state-note { color: #ffd9a0 !important; font-size: 11px; line-height: 1.35;
                       background: rgba(255,192,70,.10); border-bottom: none !important; }
     .tph-self-tilt { color: #ffb3a0 !important; display: block; }
@@ -4887,12 +4887,12 @@
   const BADGE_HEIGHT_PX = 14;
 
   // How far hero's own badge is lifted above where every other badge sits.
-  // Four badge-lines, so it clears the name plate and the chip figure under
-  // hero's seat and lands on the felt above them. Hero's seat is the crowded
+  // Five badge-lines: four cleared the name plate but still landed on the chip
+  // figure, reported from a live table. Hero's seat is the crowded
   // one — it carries the hole cards, the stack and whatever Torn draws around
   // the acting seat — so the space that is empty on an opponent's seat is not
   // empty on yours, and the badge was landing on top of that furniture.
-  const SELF_BADGE_LIFT_PX = 4 * BADGE_HEIGHT_PX;
+  const SELF_BADGE_LIFT_PX = 5 * BADGE_HEIGHT_PX;
 
   // One place each, so the badge tooltip, the players list, the Stats tab and
   // the coach all describe these the same way.
@@ -5174,22 +5174,36 @@
       // used to change between session and lifetime mode — two numbers or three
       // depending on a setting, which is worse than either.
       //
+      // But the SPACES are gone: "V35P23A67" instead of "V35 P23 A67". The
+      // letters already delimit the groups, so the spaces bought nothing and
+      // cost ~6px each on an element that floats over the table — a badge wide
+      // enough to reach the community cards is worse than one that's dense.
+      // Same reason the "15h" window marker moved to the tooltip: it says how
+      // much is behind V and P, which matters when you interrogate the badge,
+      // not while you are scanning six of them.
+      //
       // V and P follow the selected window. A (postflop aggression) is always
       // LIFETIME: postflop samples are scarce, so a 15-hand window would be
-      // mostly noise. The window marker ("15h") sits before V and P only.
+      // mostly noise.
       // The role marker leads, and is shown even for an unseen player: someone
       // you have never met who has just 3-bet is exactly the seat you need
       // flagged, and "NEW" alone doesn't say that.
       const roleHtml = roleTag
         ? `<span class="tph-badge-role ${roles.post[xid] ? 'tph-role-post' : 'tph-role-pre'}">${roleTag}</span>`
         : '';
+      // The numbers are the widest part and the first thing to go when the badge
+      // still won't fit — Settings → "Numbers on seat labels". Type, role and
+      // the state emoji survive, because those are the read; V/P/A are the
+      // evidence for it and are one tap away in the Stats tab.
+      const statsHtml = STORE.settings.badgeStats === false ? ''
+        : `<span class="tph-badge-dim">V${badgePct(shown.vpip)}`
+          + `P${badgePct(shown.pfr)}A${badgePct(r.afq)}</span>`;
       badge.innerHTML = hands === 0
         ? `${roleHtml}<b>NEW</b>`
         : roleHtml
           + `${tilt ? '<span class="tph-badge-tilt">🤮</span>' : ''}`
-          + `${heat ? '<span class="tph-badge-heat">🔥</span>' : ''}<b>${type}</b> `
-          + `<span class="tph-badge-dim">${useSession ? sess.hands + 'h ' : ''}`
-          + `V${fmtNum(shown.vpip)} P${fmtNum(shown.pfr)} A${fmtNum(r.afq)}</span>`;
+          + `${heat ? '<span class="tph-badge-heat">🔥</span>' : ''}<b>${type}</b>`
+          + statsHtml;
       badge.title = `${isSelf ? 'You' : playerDisplayName(xid)} — ${hands} hand(s) seen. `
         + (roleTag ? roleTagText(roleTag) + ' ' : '')
         + 'V = VPIP (hands played), P = PFR (raised preflop), A = AFq (postflop aggression). '
@@ -5765,6 +5779,9 @@
       <h4>Seat labels</h4>
       <label><input type="checkbox" class="tph-badge-toggle" ${STORE.settings.showBadges ? 'checked' : ''}> Show tendency labels on seats</label><br>
       <label><input type="checkbox" class="tph-selfbadge-toggle" ${STORE.settings.showSelfBadge ? 'checked' : ''}> Include your own seat (green)</label><br>
+      <label><input type="checkbox" class="tph-badgestats-toggle" ${STORE.settings.badgeStats !== false ? 'checked' : ''}> Numbers (V/P/A) on the labels</label>
+      <div style="opacity:.7;margin:2px 0 10px">Turn off if a label still reaches the community cards. You keep the
+        type, the this-hand marker and 🤮/🔥 — the read itself. The numbers behind it are one tap away in Stats.</div>
       <label><input type="checkbox" class="tph-rolebadge-toggle" ${STORE.settings.showRoleBadges !== false ? 'checked' : ''}> Mark this hand's raiser and postflop leads</label>
       <div style="opacity:.7;margin:2px 0 10px">Gold <b>PFR</b> / <b>3B</b> / <b>4B</b> marks whoever made the last preflop raise.
         Blue <b>DONK</b> (led out) or <b>RR</b> (check-raised or raised the c-bet) marks anyone taking the lead postflop who wasn't
@@ -5946,6 +5963,11 @@
       STORE.settings.showBadges = e.target.checked;
       saveStore();
       renderBadges(); // clears them immediately rather than waiting for the tick
+    });
+    panel.querySelector('.tph-badgestats-toggle').addEventListener('change', (e) => {
+      STORE.settings.badgeStats = e.target.checked;
+      saveStore();
+      renderBadges(); // the point is to see the narrower badge straight away
     });
     panel.querySelector('.tph-coach-toggle').addEventListener('change', (e) => {
       setCoachHidden(!e.target.checked);
@@ -6638,6 +6660,8 @@
       fmtMoney,
       fmtSignedMoney,
       fmtBB,
+      fmtNum,
+      badgePct,
       fmtBB100,
       streetRates,
       ensureHeroShape,

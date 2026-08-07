@@ -213,4 +213,24 @@ const wt = player({ hands: 100, wtsd: 30 });
 t.eq('WTSD is reported raw', T.computeRates(wt).wtsd, 30);
 t.eq('and stays raw when shrunk rates are taken', T.computeShrunkRates(wt).wtsd, 30);
 
+// --- badgePct (v0.42.2) ------------------------------------------------------
+//
+// The seat badge floats over the table and a wide one reaches the community
+// cards, so its numbers are capped at two characters. This is a DISPLAY cap for
+// the badge face only — the Stats tab must keep printing the observed figure,
+// which is why fmtNum is untouched and this is a separate function.
+
+t.eq('an ordinary figure is unchanged', T.badgePct(35), '35');
+t.eq('and is rounded, not truncated', T.badgePct(34.7), '35');
+t.eq('100 is clamped to two characters', T.badgePct(100), '99');
+t.eq('as is anything above it', T.badgePct(140), '99');
+t.eq('a negative can never render', T.badgePct(-5), '0');
+t.eq('and null is still the dash', T.badgePct(null), '–');
+t.ok('nothing on the badge face is ever 3 chars',
+  [0, 1, 49.5, 99, 99.6, 100].every((v) => T.badgePct(v).length <= 2));
+// fmtNum is what the tooltip and the panels use, and it must NOT clamp — the
+// Stats tab saying "99%" for a player who really played every hand would be a
+// display cap silently becoming a wrong number.
+t.eq('fmtNum still tells the truth at 100', T.fmtNum(100), '100');
+
 process.exit(t.report());

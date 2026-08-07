@@ -9,6 +9,41 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 0.42.2
+
+The seat badge was wide enough to reach the community cards.
+Reported from a live table at "3B 🤮 TAG V35 P23 A67" — ~168px, and
+the flop is behind it. Everything shed is punctuation, not content:
+no spaces inside V35P23A67 (the letters already delimit the groups),
+the "15h" window marker moves to the tooltip, badgePct caps a figure
+at two characters (100 renders 99 — same read, one less glyph), the
+type/number gap is a margin not a space, and padding, letter-spacing
+and the emoji size all come down. ~168px -> ~116px, 31% narrower.
+The LABELLED numbers stay. "74/12/16" is three unexplained figures on
+an element with no room for a legend, which is exactly why they were
+labelled; width is not a reason to undo that.
+Settings gained "Numbers (V/P/A) on the labels" as the escape hatch
+if it still doesn't fit — 64px, 62% narrower, keeping type, role and
+🤮/🔥, which are the read. The numbers are the evidence for it and
+are one tap away in Stats.
+SELF_BADGE_LIFT_PX 4 -> 5 badge-lines: four cleared hero's name plate
+but still landed on the chip figure.
+
+## 0.42.1
+
+SELECTORS.potDisplay was declared and read by NOTHING — readDomPot()
+carried its own hardcoded copy of the same two selectors, so the one
+obvious place to edit after a Torn redeploy would have fixed nothing,
+silently. Third time: seatName sat unread for twelve versions while
+every player record stored "#3722665", and dealerButton was written
+up as "a red herring" when the real problem was that nothing read it.
+test/no-orphans.test.js now fails on any SELECTORS or
+DEFAULT_SETTINGS key, or any top-level function, that nothing uses.
+Verified non-vacuous against all three historical cases.
+Also: the changelog moved to CHANGELOG.md (780 lines above the first
+line of code, paid for by every read of this file from the top), and
+heroCanPreAct, declared at 0.26.1 and never called, is deleted.
+
 ## 0.42.0
 
 Five screen-real-estate and export changes, all requested from the

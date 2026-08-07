@@ -19,31 +19,23 @@ single hand-edited file. Userscript managers compare `@version` to decide
 whether an update exists, so leaving it stale means a reinstall elsewhere won't
 see new code as newer. Bump it in the same commit as the change.
 
-## Current status (v0.20.0)
+## Current status (v0.42.2)
 
-Selectors and log wording are **calibrated against real scans**. A live deep scan
-at v0.18.2 confirmed the log parser is working: 40 rows read, zero unmatched
-lines, action/blind/raise wording all landing. Positions and stat *values* have
-still not been confirmed correct at a live table.
-
-**P/L produced nothing at all up to v0.19.0**, and the same scan proved it. See
-the hero-identity section below — the cause was a truthy pseudo-id defeating a
-retry guard, not the log parsing. v0.20.0 wipes P/L once (store schema 2) and
-lets it reaccumulate.
-
-**Stats gathered before v0.11.0 are inflated and should be reset.** Log ingestion
-used to read MutationObserver `addedNodes`; the user reported one real hand
-appearing several times in the History tab, which means old lines were being
-re-parsed as new events every time Torn re-rendered the list. Everything derived
-from those lines — hand counts, VPIP, PFR, P/L — was over-counted by the same
-mechanism, so the existing numbers can't be repaired, only discarded
-(Settings → Reset all data).
+Selectors, log wording, positions, stats and P/L are all **confirmed working at
+a live table**. The deep scan that was the standing next task has been run and
+came back clean, so the questions this section used to carry are closed. Their
+history is in `CHANGELOG.md`.
 
 Built: per-player stats (VPIP/PFR/AFq/3-bet/fold-to-3-bet/C-bet/WTSD), archetype
 tags, plain-language tendency reports, per-opponent P/L (proportional multiway
-attribution, explicitly an estimate), hand history, a tracked-players browser,
-GTO-inspired coach prompts, a verified Monte Carlo equity engine, position
-inference, session tracking, bet-sizing tells, and optional GitHub Gist sync.
+attribution, explicitly an estimate), hand history with file export, a
+tracked-players browser, coach prompts in a resizable panel, a verified Monte
+Carlo equity engine, position from the seat ring, session tracking, bet-sizing
+tells, showdown ranges, and optional GitHub Gist sync.
+
+What is still unverified is called out where it lives: the `POOL_AVG` figures
+are borrowed rather than measured, `POOL_SPREAD` is a judgement call, and the
+v0.22.0 identity/ring markers are read out of someone else's source.
 
 ## The critical constraint
 
@@ -206,16 +198,13 @@ Reviewed and deliberately left, in rough priority order. Also listed in the
 script header, under the same numbers, so they're visible while editing —
 change one and change the other.
 
-1. ~~**The pot has no cross-check.**~~ **CLOSED in v0.18.0.** The live scan
-   showed `DIV.potsWrapper_ > DIV.totalPotWrap_` rendering `POT:$7,000,000`, so
-   `readDomPot()` parses it and `effectivePot()` prefers it over the running log
-   sum. The deep scan prints both and flags a mismatch over 2%. Remaining
-   exposure: `hand.pot` (log-summed) is still what P/L falls back to when a
-   winner line carries no amount.
-2. ~~**`STORE.players` grows forever.**~~ **CLOSED across v0.40.0–v0.41.0.**
-   The silent half went first (a refused save raises a banner and fills a
-   Storage section in Settings), then the growth itself — `prunePlayers` bounds
-   the map at `PRUNE_PLAYER_CAP`. See "Storage, and what it costs" below.
+Findings 1 (the pot had no cross-check) and 2 (`STORE.players` grew forever)
+were closed in v0.18.0 and v0.40.0–v0.41.0; `CHANGELOG.md` has the detail. The
+numbering below is kept as-is rather than renumbered, because the script header
+and several code comments cite these by number. One residue of #1 is still true
+and worth knowing: `hand.pot` (log-summed, not the DOM figure) is what P/L falls
+back to when a winner line carries no amount.
+
 3. **All-in is counted as a raise** (`preflopRaiseEvents`), so a short-stack
    all-in *call* can make the coach read the spot as facing a 3-bet. Needs the
    all-in amount compared against the current bet, which the log doesn't always
@@ -374,8 +363,21 @@ Three things the phone forced, all reported from a live table.
 **Hero's seat is not shaped like an opponent's.** Badges sit at `rect.bottom + 1`
 — under the name, on empty felt. That space is *not* empty under your own seat:
 it carries the name plate, the stack and whatever Torn draws around the acting
-seat. Hero's badge alone is lifted `SELF_BADGE_LIFT_PX` (four badge-lines) so it
-lands above the name. Don't unify the two positions; the asymmetry is the point.
+seat. Hero's badge alone is lifted `SELF_BADGE_LIFT_PX` (five badge-lines, after
+four was reported as still landing on the chip figure) so it clears them. Don't
+unify the two positions; the asymmetry is the point.
+
+**The badge is width-constrained, not information-constrained.** It floats over
+the table, and at full width — role chip, 🤮, 🔥, type, three numbers — it
+reached the community cards. Everything shed to fix that was punctuation, not
+content: no spaces inside `V35P23A67` (the letters already delimit), no `15h`
+window marker on the face (it is in the tooltip), `badgePct` caps at two
+characters, and the type/number gap is a margin rather than a space. **The
+labelled numbers stay** — `74/12/16` is three unexplained figures on an element
+with no room for a legend, which is why they were labelled in the first place.
+`badgeStats: false` drops the numbers entirely and is the escape hatch if it
+still doesn't fit; type, role and state emoji survive it because those are the
+read, and the numbers are one tap away in Stats.
 
 **The coach panel resizes, and stays mounted between hands.**
 
@@ -835,21 +837,17 @@ unshrunk because no published pool figure exists for it.
 
 ## Next task
 
-**One deep scan settles most of the open questions.** Run it at a live table,
-**on your turn** so the action buttons are on screen, and read the new
-`IDENTITY / RING MARKERS` block. It reports, in order: whether `self___` found
-your seat and which XID it resolved to, whether `dealer___` resolved, who is
-sitting out, how many action buttons matched by text and what they say, whether
-stacks were read, and whether the PDA bridge is present. Every v0.22.0 claim
-above is confirmed or refuted by that one block.
+**The deep scan is done and came back good** (confirmed 2026-08-07). Identity,
+positions, stats and P/L all check out at a live table, so don't re-litigate
+them — if something looks wrong, it is a regression, not an unverified claim.
 
-Then confirm at a live table that **P/L moves at all** (v0.20.0). The check is in
-the players list footer: `Lifetime: N hands, $X` with N tracking History rather
-than sitting at `0 hands, $0`. If it still reads zero, read the `heroXid:` line
-in the scan first — it should show a bare numeric XID, not `name:...`.
-
-Then confirm that stats populate and that positions are right now that they come
-from the seat ring rather than the action.
+The live work now is **screen real estate**, and it is reported from the table
+rather than reasoned about. The badge floats over the felt at a fixed size and
+the table does not: a badge that fits at six-handed reaches the community cards
+at nine. `badgeStats: false` is the escape hatch and the constants are gathered
+(`SELF_BADGE_LIFT_PX`, `.tph-badge` max-widths) — but the honest position is
+that nobody working on this can see the layout, so **each adjustment needs one
+report back before the next one.**
 
 An unexploited find worth considering: `SPAN[class*="srOnly_"]` carries the full
 sentence in plain text — `"GhostNote420 checked The river: 4 of hearts"` — with
