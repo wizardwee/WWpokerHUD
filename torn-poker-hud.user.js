@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.0.0
+// @version      1.0.1
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,36 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.0.1 - Role badges (PFR/3B/DONK/RR) — and the stats and P/L behind them —
+ *          stopped working for most seats in 1.0.0. Two faults in one line: the
+ *          boundary check added to nameToXidGuess's fallback pass.
+ *            - It was a regex LOOKBEHIND, which is a SyntaxError at CONSTRUCTION
+ *              time on JavaScriptCore before Safari 16.4 — the engine behind
+ *              Torn PDA's WKWebView on older iOS. It sits in the log-parse hot
+ *              path with no try/catch above it, so the whole parse tick died
+ *              rather than merely failing to match. Replaced by
+ *              containsNameToken, an index scan: same semantics, no engine
+ *              dependency. test/name-boundary.test.js now scans the source to
+ *              stop a lookaround coming back, since no device here can catch it.
+ *            - It tested seat.textContent, which concatenates child elements
+ *              with NO separator ("Bob$41,200,000Sitting out"). A boundary check
+ *              then correctly rejects a name glued to a following letter —
+ *              correct, and still a failed resolution. nameToXidGuess now tries
+ *              seatDisplayName (the seat's own name element, USERNAME_RE
+ *              validated) BEFORE the fuzzy pass, so the blob is a last resort
+ *              rather than the path most seats take.
+ *          Both faults returned the 'name:' pseudo-id, which never equals the
+ *          numeric XID renderBadges reads off the seat — so the chip silently
+ *          never rendered and stats/P/L accrued to pseudo-records. Same failure
+ *          mode as 0.20.0's, reached by a different route.
+ *          The 1.0.0 test could not have caught either: it re-implemented the
+ *          regex and tested that copy, so it could not fail when the original
+ *          was wrong. It now drives the real exported function, and the fixtures
+ *          that were all helpfully delimited by '$' or a space are joined by
+ *          ones that aren't.
+ *          escapeRegexLiteral is deleted — it existed only to feed the pattern
+ *          that is now gone.
  *
  * 1.0.0 - Four ideas pulled from HopesG's HUD and Torn Poker Helper, adapted
  *          to this file's own conventions rather than copied wholesale:
@@ -108,24 +138,6 @@
  *              pdaCall, which also makes the docstring's "single place to
  *              patch" claim actually true.
  *
- * 0.42.2 - The seat badge was wide enough to reach the community cards.
- *          Reported from a live table at "3B 🤮 TAG V35 P23 A67" — ~168px, and
- *          the flop is behind it. Everything shed is punctuation, not content:
- *          no spaces inside V35P23A67 (the letters already delimit the groups),
- *          the "15h" window marker moves to the tooltip, badgePct caps a figure
- *          at two characters (100 renders 99 — same read, one less glyph), the
- *          type/number gap is a margin not a space, and padding, letter-spacing
- *          and the emoji size all come down. ~168px -> ~116px, 31% narrower.
- *          The LABELLED numbers stay. "74/12/16" is three unexplained figures on
- *          an element with no room for a legend, which is exactly why they were
- *          labelled; width is not a reason to undo that.
- *          Settings gained "Numbers (V/P/A) on the labels" as the escape hatch
- *          if it still doesn't fit — 64px, 62% narrower, keeping type, role and
- *          🤮/🔥, which are the read. The numbers are the evidence for it and
- *          are one tap away in Stats.
- *          SELF_BADGE_LIFT_PX 4 -> 5 badge-lines: four cleared hero's name plate
- *          but still landed on the chip figure.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -188,7 +200,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.0.0';
+  const HUD_VERSION = '1.0.1';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -1069,11 +1081,39 @@
     return String(n || '').replace(/^[^\w]+/, '').replace(/[^\w]+$/, '').trim();
   }
 
-  // Escape a string for literal interpolation into `new RegExp(...)`. Needed
-  // wherever a dynamic value — a scraped name, a user-typed setting — becomes
-  // part of a pattern rather than being matched BY one.
-  function escapeRegexLiteral(s) {
-    return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // The characters that can appear inside a real username — mirrors the class in
+  // USERNAME_RE. Kept as its own constant because containsNameToken has to ask
+  // "is this character part of a name?" one character at a time.
+  const USERNAME_CHAR_RE = /[A-Za-z0-9_\-]/;
+
+  // True when `name` appears in `text` as a whole token rather than buried inside
+  // a longer username: "Al" occurs in "AlexTheGreat" but is not a token of it.
+  //
+  // Deliberately an index scan, and deliberately NOT the regex lookbehind it
+  // replaces (v1.0.1). A negative-lookbehind assertion is a SyntaxError at
+  // CONSTRUCTION time on JavaScriptCore before Safari 16.4 — the engine behind
+  // Torn PDA's WKWebView on older iOS. This sits in the log-parse hot path with
+  // no try/catch above it, so that threw the whole parse tick away rather than
+  // merely failing to match. Don't reintroduce a lookaround here; the scan costs
+  // nothing and runs everywhere. test/name-boundary.test.js scans the source to
+  // enforce that, which is why this comment describes the syntax without
+  // spelling it — the assertion cannot tell code from prose.
+  //
+  // Not plain `\b` either: word boundaries treat `-` as a non-word character,
+  // but USERNAME_RE allows hyphens, so `\bAl\b` still false-matches inside
+  // "Al-Qaeda". Testing the adjacent character against the username class is the
+  // thing that actually needs to be true.
+  //
+  // An out-of-range charAt returns '', which tests false against the class — and
+  // that is what lets a name at the very start or end of the text match.
+  function containsNameToken(text, name) {
+    if (!text || !name) return false;
+    for (let i = text.indexOf(name); i !== -1; i = text.indexOf(name, i + 1)) {
+      const before = i > 0 ? text.charAt(i - 1) : '';
+      const after = text.charAt(i + name.length);
+      if (!USERNAME_CHAR_RE.test(before) && !USERNAME_CHAR_RE.test(after)) return true;
+    }
+    return false;
   }
 
   let heroXid = null;
@@ -1591,15 +1631,21 @@
     // occupant is "AlexTheGreat", misattributing every one of Al's real actions
     // (and stats, and P/L) to Alex's record, and vice versa.
     //
-    // Not plain `\b` — regex word boundaries treat `-` as a NON-word character,
-    // but USERNAME_RE allows hyphens in a real username, so `\bAl\b` still
-    // false-matches inside "Al-Qaeda" (the boundary sits right at the hyphen).
-    // The lookaround below instead requires whatever is adjacent to NOT be a
-    // valid username character at all, which is the actual thing that needs to
-    // be true for `name` to be a distinct token rather than part of a longer
-    // one. escapeRegexLiteral is used even though USERNAME_RE forbids regex
-    // metacharacters, so this doesn't quietly become unsafe if `name` is ever
-    // passed in from somewhere less constrained.
+    // The boundary check lives in containsNameToken — see there for why it is an
+    // index scan rather than a lookbehind, and why plain `\b` is not enough.
+    //
+    // v1.0.1 also inserted the seatDisplayName pass below, because matching
+    // against seat.textContent AT ALL is fragile: textContent concatenates child
+    // elements with no separator, so a seat reads as "Bob$41,200,000Sitting out".
+    // A boundary check is then correct to reject a name glued to a following
+    // letter — correct, and still a failed resolution. Reading the seat's own
+    // name element sidesteps the blob entirely, so the fuzzy pass is now a last
+    // resort rather than the path most seats take.
+    //
+    // Both faults returned the 'name:' pseudo-id. That is never equal to the
+    // numeric XID renderBadges reads off the seat, so the PFR/3B chip silently
+    // stopped rendering and stats/P/L landed on pseudo-records — the same
+    // failure mode CLAUDE.md documents under "The pseudo-id is not a resolution".
     const seats = Array.from(document.querySelectorAll(SELECTORS.seatContainer));
 
     for (const seat of seats) {
@@ -1609,9 +1655,18 @@
         if (xid) { noteResolvedName(xid, name); return xid; }
       }
     }
-    const nameRe = new RegExp('(?<![A-Za-z0-9_-])' + escapeRegexLiteral(name) + '(?![A-Za-z0-9_-])');
+    // The seat's own name element, matched exactly. seatDisplayName validates
+    // against USERNAME_RE, so this can't bind to a chip stack the way a raw
+    // `[class*="name_"]` read can.
     for (const seat of seats) {
-      if (nameRe.test(seat.textContent || '')) {
+      if (seatDisplayName(seat) === name) {
+        const xid = resolveXidFromSeat(seat);
+        if (xid) { noteResolvedName(xid, name); return xid; }
+      }
+    }
+    // Last resort: the whole seat blob, token-boundary checked.
+    for (const seat of seats) {
+      if (containsNameToken(seat.textContent || '', name)) {
         const xid = resolveXidFromSeat(seat);
         if (xid) { noteResolvedName(xid, name); return xid; }
       }
@@ -6859,7 +6914,7 @@
       LOG_NOISE_RE,
       cleanLogLine,
       cleanName,
-      escapeRegexLiteral,
+      containsNameToken,
       parseAmount,
       RFI_RANGES,
       THREE_BET_RANGES,

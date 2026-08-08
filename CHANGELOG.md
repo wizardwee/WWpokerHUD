@@ -9,6 +9,57 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.0.1
+
+Role badges (PFR/3B/DONK/RR) — and the stats and P/L behind them —
+stopped working for most seats in 1.0.0. Reported from a live table:
+the chips simply never appeared, with the setting on.
+
+Two faults in a single line, the boundary check 1.0.0 added to
+nameToXidGuess's fallback pass:
+
+  - **It was a regex lookbehind.** A negative-lookbehind assertion is
+    a SyntaxError at CONSTRUCTION time on JavaScriptCore before
+    Safari 16.4 — the engine behind Torn PDA's WKWebView on older
+    iOS. It sits in the log-parse hot path with no try/catch above
+    it, so rather than merely failing to match, it threw the entire
+    parse tick away. Replaced by containsNameToken, an index scan
+    over indexOf with the adjacent character tested against the
+    username class: identical semantics, no engine dependency.
+    Android's Chrome-based WebView was never affected, which is
+    exactly what makes this the kind of bug that ships.
+  - **It tested seat.textContent.** textContent concatenates child
+    elements with NO separator, so a seat reads as
+    "Bob$41,200,000Sitting out". A boundary check then correctly
+    rejects a name glued to a following letter — correct, and still
+    a failed resolution. nameToXidGuess now tries seatDisplayName
+    (the seat's own name element, USERNAME_RE-validated) BEFORE the
+    fuzzy pass, so the blob is a last resort rather than the path
+    most seats take. The 1.0.0 collision fix it protects — "Al"
+    resolving to "AlexTheGreat"'s seat — is retained in full.
+
+Both faults returned the 'name:' pseudo-id. That never equals the
+numeric XID renderBadges reads off the seat, so `roles.pfr === xid`
+was never true and the chip was silently never emitted, while stats
+and P/L accrued to pseudo-records. Identical failure mode to 0.20.0,
+reached by a different route — see "The pseudo-id is not a
+resolution" in CLAUDE.md. The fastest tell is unchanged: Lifetime
+reads 0 hands / $0 while History fills up.
+
+Why the 1.0.0 test suite passed anyway: test/name-boundary.test.js
+re-implemented the regex locally and asserted against that copy,
+because nameToXidGuess can't be driven end-to-end through the
+harness (it walks an attribute-substring selector the class-DOM stub
+refuses). **A test of a copy cannot fail when the original is
+wrong.** It now drives the real exported containsNameToken, every
+fixture that was helpfully delimited by '$' or a space is joined by
+one that isn't, and a source-level assertion rejects any lookaround
+reintroduced anywhere in the script — the only way to catch an
+engine fault on a device nobody working on this repo can run.
+
+escapeRegexLiteral is deleted. It existed solely to feed the pattern
+that is now gone, and its own tests went with it.
+
 ## 1.0.0
 
 Four ideas pulled from HopesG's HUD and Torn Poker Helper, adapted

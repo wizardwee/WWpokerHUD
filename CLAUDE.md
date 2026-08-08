@@ -19,12 +19,22 @@ single hand-edited file. Userscript managers compare `@version` to decide
 whether an update exists, so leaving it stale means a reinstall elsewhere won't
 see new code as newer. Bump it in the same commit as the change.
 
-## Current status (v0.42.2)
+## Current status (v1.0.1)
 
 Selectors, log wording, positions, stats and P/L are all **confirmed working at
 a live table**. The deep scan that was the standing next task has been run and
 came back clean, so the questions this section used to carry are closed. Their
 history is in `CHANGELOG.md`.
+
+**v1.0.0 broke role badges, stats and P/L for most seats, and v1.0.1 fixes it.**
+Worth reading as a pattern rather than a one-off: a hardening change to
+`nameToXidGuess` used a regex lookbehind (a `SyntaxError` on older iOS JSC —
+see Conventions) tested against `seat.textContent` (which concatenates children
+with no separator). Both faults returned the `name:` pseudo-id, which never
+equals the numeric XID `renderBadges` reads off a seat, so the failure was
+total and silent. The suite passed throughout, because the test re-implemented
+the regex and asserted against its own copy. **A test of a copy cannot fail
+when the original is wrong** — drive the real exported function.
 
 Built: per-player stats (VPIP/PFR/AFq/3-bet/fold-to-3-bet/C-bet/WTSD), archetype
 tags, plain-language tendency reports, per-opponent P/L (proportional multiway
@@ -926,6 +936,18 @@ is attributed.
 - **No build step.** One file, pasted/fetched whole. No imports, no bundler.
 - **Torn PDA runtime is limited**: no `GM_xmlhttpRequest`, no IndexedDB. Use the
   `pdaFetch` adapter (`PDA_httpGet`/`PDA_httpPost`, falling back to `fetch`).
+- **Target an old JS engine, not Node's.** Torn PDA is a Flutter
+  `inappwebview`: a Chrome-based WebView on Android, but WKWebView →
+  **JavaScriptCore** on iOS, capped at whatever Safari the phone is running.
+  Regex **lookbehind** is the one that has already bitten (v1.0.0 → v1.0.1):
+  JSC gained it only in Safari 16.4, and an unsupported lookbehind is a
+  `SyntaxError` at **construction** time — so it throws from wherever the
+  pattern is built rather than quietly failing to match. In a hot path with no
+  `try/catch` above it, that takes the whole tick down.
+  `test/name-boundary.test.js` scans the entire script for lookarounds and
+  fails if one comes back. **A feature test passing locally proves nothing**:
+  Node runs everything, Android runs everything, and the device that broke is
+  the one nobody here can run.
 - **Commit and push immediately, every time.** Don't leave finished work sitting
   in the working tree waiting to be asked about. The install model is "Torn PDA
   re-fetches the raw file from GitHub `main`", so an uncommitted change is a
