@@ -681,6 +681,61 @@ confidently wrong holding is worse than none, and Torn's own hand descriptions
 The UI must keep saying showdowns are a **floor** on a range, never the whole of
 it — a pot that ends in a fold reveals nothing.
 
+### Split by raise TIER, not just raised/called (v1.1.0)
+
+`hand.preflopTier[xid]` records 1 = opened, 2 = 3-bet, 3+ = 4-bet, read off
+`preflopRaiseEvents` **at the moment the player raises**. That is the same
+counter `maybeCountThreeBet` keys off, so a tier filed against a showdown can
+never disagree with the 3-bet stat — don't give it independent detection.
+
+`shownHands[cls]` gained `r3`/`r4`/`lr` alongside the existing `raised`. Two
+properties depend on `open` being derived by subtraction rather than stored:
+`open + 3bet + 4bet` reconstructs `raised` exactly, and a pre-v1.1.0 record has
+no `r3`/`r4` so its raises read as opens — the honest reading of data with no
+tier, and why no migration was needed. `test/preflop-tiers.test.js` asserts both.
+
+**Limp-3bet overlaps 3-bet on purpose.** A limp-reraise *is* a 3-bet; carving it
+out of `r3` would understate the 3-bet range. The UI labels it a subset instead.
+
+**`limpRaised` cannot false-fire.** `maybeCountLimp` bails once
+`preflopRaiseEvents > 0`, so `countedLimp` only ever holds players who acted
+before any raise — an ordinary raiser is never in it.
+
+### Postflop re-raise was already collected (v1.1.0)
+
+`streetRates.rr` is `raise / (raise + call + fold)`, and needs no new storage:
+postflop, facing a bet is the **only** state in which those three are possible,
+because a check or a bet means nobody had bet yet. So that ratio is exactly "how
+often do they raise when bet into". It withholds (null) rather than reporting 0%
+when the denominator is empty — "never re-raises" is a claim, and never having
+faced a bet is no evidence for it.
+
+Not split into check-raise vs raise-of-c-bet: that needs to know whether they
+checked first, which `streetActions` does not record.
+
+**That is the third stat in this file found already-collected and merely
+unreported** (after fold-to-c-bet and per-street aggression). Check before
+adding collection — the rule keeps paying.
+
+### Recent form sits in the lifetime cell, not a fourth column (v1.1.0)
+
+The Stats tab prints recent form beside the lifetime figure **in the same cell**.
+A fourth column would need width a phone panel doesn't have, and would mean
+changing 12 `colspan="3"` sites — one of which is in the *players list* table,
+where a bulk replace would have broken it silently.
+
+Only VPIP and PFR get one, because `player.recent` stores three bits per hand.
+Everything else shows lifetime alone rather than repeating it under a "recent"
+heading, which would be a quiet lie. The value shown is the **blended** figure,
+matching the badge in Recent-form mode — a table reading 60 next to a badge
+reading 40 is a worse failure than a slightly less direct number. Raw
+observation and sample size are in the tooltip.
+
+`.tph-stat-rec` declares its own colour so it does **not** inherit the
+`.tph-dev-*` shading on the parent cell: that shading is computed from the
+lifetime figure, and letting it bleed onto the recent number would assert a
+verdict about a number it wasn't calculated from.
+
 ## Money formatting (v0.17.0)
 
 `fmtMoney` / `fmtSignedMoney` are the only places money is rendered. Torn poker

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.0.1
+// @version      1.1.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,38 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.1.0 - Preflop ranges are split by RAISE TIER, plus two new stats.
+ *            - shownHands.raised was set from countedPfr — "raised at some
+ *              point preflop" — so an open and a 3-bet were recorded
+ *              identically and averaged into one range that described neither.
+ *              hand.preflopTier now records the tier off preflopRaiseEvents at
+ *              the moment a player raises (1 open, 2 three-bet, 3+ four-bet),
+ *              which is the SAME counter maybeCountThreeBet keys off, so the
+ *              tier filed against a showdown cannot disagree with the 3-bet
+ *              stat. The Range tab shows Opened / 3-bet / 4-bet+ / Limp-3bet /
+ *              Called separately. open is derived by subtraction, so
+ *              open+3bet+4bet reconstructs the old "raised" group exactly and
+ *              records written before this read wholly as "Opened".
+ *            - Limp-3bet: limped and then re-raised the same hand. countedLimp
+ *              only ever holds players who acted before any raise, so a raise
+ *              from someone in it is unambiguously the trap line. Shown with
+ *              its raw count beside the percentage, because it is rare by
+ *              nature and "2%" off three hands is not the same claim as off
+ *              three hundred. No pool figure exists, so no tick and no verdict.
+ *            - Postflop re-raise, with NO new collection: facing a bet is the
+ *              only state in which raise/call/fold are possible, so
+ *              raise/(raise+call+fold) over streetActions is exactly how often
+ *              they raise when bet into. Not split into check-raise vs
+ *              raise-of-c-bet — that needs to know whether they checked first,
+ *              which streetActions does not record. Withholds rather than
+ *              reporting 0% when they have never faced a bet.
+ *            - The Stats tab shows recent form beside each lifetime figure, in
+ *              the same cell rather than a fourth column (a phone panel has no
+ *              room, and 12 colspans would have had to change). Only VPIP and
+ *              PFR carry one: player.recent stores three bits per hand, so
+ *              nothing else can be windowed, and those rows show lifetime alone
+ *              rather than repeating it under a "recent" heading.
  *
  * 1.0.1 - Role badges (PFR/3B/DONK/RR) — and the stats and P/L behind them —
  *          stopped working for most seats in 1.0.0. Two faults in one line: the
@@ -102,42 +134,6 @@
  *              Settings → heroName field, not just a scraped (and therefore
  *              already-constrained) log name.
  *
- * 0.42.3 - A code review pass over 0.42.0-0.42.2, and two real bugs it found.
- *            - The coach's idle line claimed "Waiting for the next hand", but
- *              buildCoachAdvice() returns null for TWO things it can't tell
- *              apart: no hand at all, and hero being OUT of one still running —
- *              folded, so the hole cards it reads off the seat are gone. That
- *              is most hands, not an edge case. Now "No read for this
- *              decision.", true either way. test/coach-idle.test.js locks down
- *              that a truthy currentHand can still produce no advice.
- *            - makeResizable pinned the coach panel to a fixed left/top AND
- *              wrote coachPos/coachSize on pointerdown/pointerup regardless of
- *              whether the grip actually moved — so one stray tap on the
- *              24x24 corner (right where a hand reaching for Hide or
- *              scrolling the body could brush it) silently traded the panel's
- *              default "always hugs the right edge" anchor for a fixed pixel
- *              spot that would not re-hug the edge on the next rotate. Pin and
- *              persist now both gate on real movement, same idea as
- *              makeDraggable's DRAG_THRESHOLD_PX, which this never had.
- *          Compaction, no behaviour change intended beyond the two fixes above:
- *            - Two dead CSS rules deleted — tph-self-heat (the coach's self-
- *              HEAT line it styled was removed at 0.34.0) and tph-turn-flag
- *              (the "▶ Your turn" text it styled was removed at 0.30.0).
- *              test/no-orphans.test.js now checks CSS classes the same way it
- *              already checks SELECTORS/DEFAULT_SETTINGS/functions — a class
- *              nothing applies has no symptom at all, which is exactly why
- *              these two survived eight and twelve versions unnoticed.
- *            - dispatchLogEvent's `raise` and `allin` branches shared an exact
- *              copy of five lines (VPIP/PFR/3-bet counting, markAggressor) —
- *              not incidental, it IS open finding #3 (all-in counts as a
- *              raise), so the two copies were one accidental edit away from
- *              disagreeing about their own documented imprecision. Pulled into
- *              markAsPreflopRaiseAction, one call site instead of two.
- *            - pdaFetch's GET and POST branches were a copy of each other
- *              wrapping different PDA_http* calls as a Promise — pulled into
- *              pdaCall, which also makes the docstring's "single place to
- *              patch" claim actually true.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -200,7 +196,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.0.1';
+  const HUD_VERSION = '1.1.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -408,9 +404,21 @@
       // voluntary money, a habitual limper is the most exploitable seat here and
       // was previously indistinguishable from a caller.
       limpMade: 0,
-      // Hand class -> { seen, raised, won }. What they have actually turned up
-      // with at showdown, which is the only direct evidence of anyone's range.
+      // Limped and then re-raised the SAME hand — the limp-3bet trap. Counted
+      // per hand against `hands`, like limpMade. Against a pool that limps ~45%
+      // of its voluntary money this is the strongest preflop signal available:
+      // a habitual limper who suddenly re-raises is rarely doing it light, and
+      // shownHands.lr records what they actually turned up with.
+      limpRaiseMade: 0,
+      // Hand class -> { seen, raised, won, r3, r4, lr }. What they have actually
+      // turned up with at showdown — the only direct evidence of anyone's range.
       // Showdowns are rare, so this stays small even over thousands of hands.
+      //
+      // `raised` is "raised at any point preflop" and is kept as-is for the
+      // existing raised/called split. r3/r4/lr are the tier breakdown added
+      // later: shown down having 3-bet, 4-bet+, or limp-reraised. They are
+      // written alongside `raised`, not instead of it, so old records keep
+      // working and no migration is needed — a missing key reads as 0.
       shownHands: {},
       // Rolling window of the most recent hands, newest LAST. One small integer
       // per hand, used as a bitfield:
@@ -1277,6 +1285,23 @@
       sbAmount: 0,
       countedPfr: new Set(),
       countedThreeBetOpp: new Set(),
+      // xid -> the raise TIER this player reached preflop this hand:
+      //   1 = opened (RFI)   2 = 3-bet   3+ = 4-bet or beyond
+      //
+      // Read off preflopRaiseEvents at the moment they raise, so it needs no
+      // separate detection and cannot drift from the 3-bet counter. Highest
+      // tier wins: a player who opens and is then 4-bet back and 5-bets is
+      // recorded at the top of their own range, which is the read that matters.
+      //
+      // This exists so a SHOWDOWN can be filed under the action that produced
+      // it. shownHands.raised was set from countedPfr, which is "raised at some
+      // point" — it cannot tell an open from a 3-bet, so the two ranges were
+      // averaged into one that describes neither.
+      preflopTier: {},
+      // Limped, then re-raised the same hand — the limp-3bet trap. Held per hand
+      // because it needs both halves: countedLimp records the limp, and the
+      // raise that follows is what makes it a trap rather than a limp.
+      limpRaised: new Set(),
     };
   }
 
@@ -2052,7 +2077,25 @@
   // out of sync if it's ever fixed in only one of them.
   function markAsPreflopRaiseAction(xid, hand) {
     maybeCountVpip(xid, hand);
-    if (hand.street === 'preflop') hand.preflopRaiseEvents += 1;
+    if (hand.street === 'preflop') {
+      hand.preflopRaiseEvents += 1;
+      // Tier is read AFTER the increment, so the hand's first raise is tier 1
+      // (an open), the second is 2 (a 3-bet), the third is 3 (a 4-bet). This is
+      // the same counter maybeCountThreeBet keys off, so the tier recorded
+      // against a showdown and the 3-bet stat can never disagree.
+      const tier = hand.preflopRaiseEvents;
+      if (!hand.preflopTier[xid] || tier > hand.preflopTier[xid]) hand.preflopTier[xid] = tier;
+      // A raise from a player already counted as a limper THIS hand is a
+      // limp-reraise. maybeCountLimp bails once preflopRaiseEvents > 0, so
+      // countedLimp only ever holds players who put money in before any raise —
+      // an ordinary raiser can never be in it, and this cannot false-fire.
+      if (hand.countedLimp.has(xid) && !hand.limpRaised.has(xid)) {
+        hand.limpRaised.add(xid);
+        const lp = getPlayer(xid);
+        lp.limpRaiseMade = (lp.limpRaiseMade || 0) + 1;
+        saveStore();
+      }
+    }
     maybeCountPfr(xid, hand);
     maybeCountThreeBet(xid, hand);
     markAggressor(xid, hand);
@@ -2987,13 +3030,24 @@
   // different opponent from one who barrels three streets, and that was
   // invisible.
   function streetRates(sa) {
-    if (!sa) return { afq: null, foldPct: null, actions: 0 };
+    if (!sa) return { afq: null, foldPct: null, rr: null, faced: 0, actions: 0 };
     const agg = sa.bet + sa.raise;
     const passive = sa.call;
     const total = agg + passive + sa.check + sa.fold;
+    // Postflop RE-RAISE frequency, and it needs no new collection: facing a bet
+    // is the ONLY state in which raise, call and fold are possible. A check or
+    // a bet means nobody had bet into them yet. So raise/(raise+call+fold) is
+    // exactly "how often do they raise when someone bets at them" — the
+    // check-raise and raise-of-the-c-bet lines combined.
+    //
+    // It is not split into check-raise vs raise-of-c-bet: that needs to know
+    // whether they checked first, which streetActions does not record.
+    const faced = sa.raise + sa.call + sa.fold;
     return {
       afq: pct(agg, agg + passive),
       foldPct: pct(sa.fold, total),
+      rr: pct(sa.raise, faced),
+      faced,
       actions: total,
     };
   }
@@ -3001,6 +3055,12 @@
   function computeRates(p) {
     const aggActions = POSTFLOP_STREETS.reduce((sum, s) => sum + p.streetActions[s].bet + p.streetActions[s].raise, 0);
     const passActions = POSTFLOP_STREETS.reduce((sum, s) => sum + p.streetActions[s].call, 0);
+    // Postflop re-raise, summed across streets. `rrFaced` counts only actions
+    // that require a bet to be facing them — see streetRates for why that makes
+    // raise/(raise+call+fold) the re-raise frequency without new collection.
+    const rrMade = POSTFLOP_STREETS.reduce((sum, s) => sum + p.streetActions[s].raise, 0);
+    const rrFaced = POSTFLOP_STREETS.reduce((sum, s) => sum
+      + p.streetActions[s].raise + p.streetActions[s].call + p.streetActions[s].fold, 0);
     const byStreet = {};
     POSTFLOP_STREETS.forEach((s) => { byStreet[s] = streetRates(p.streetActions[s]); });
     return {
@@ -3016,6 +3076,15 @@
       foldToCbet: pct(p.foldToCbetMade, p.foldToCbetOpp),
       limp: pct(p.limpMade, p.hands),
       limpShareOfVpip: pct(p.limpMade, p.vpip),
+      // Limped then re-raised the same hand. Rare by nature, so it is reported
+      // with its raw count beside it rather than as a bare percentage — "2%"
+      // off three hands and off three hundred are different claims.
+      limpRaise: pct(p.limpRaiseMade || 0, p.hands),
+      limpRaiseCount: p.limpRaiseMade || 0,
+      // Postflop re-raise: raises as a share of the times they faced a bet.
+      // Derived from streetActions, which has always held it — see streetRates.
+      postflopRR: pct(rrMade, rrFaced),
+      rrSample: rrFaced,
       wtsd: pct(p.wtsd, p.hands),
       avgBetPct: p.betSizeCount ? (p.betSizePctSum / p.betSizeCount) : null,
       byStreet,
@@ -3057,6 +3126,14 @@
     if (hand && hand.countedPfr && typeof hand.countedPfr.has === 'function'
         && hand.countedPfr.has(xid)) e.raised += 1;
     if (hand && Array.isArray(hand.winners) && hand.winners.some((w) => w.xid === xid)) e.won += 1;
+    // Tier breakdown. Defensive reads throughout, matching the rest of this
+    // function: a replayed or imported hand may predate preflopTier entirely,
+    // and losing a tier is a far better failure than losing the showdown.
+    const tier = (hand && hand.preflopTier && hand.preflopTier[xid]) || 0;
+    if (tier === 2) e.r3 = (e.r3 || 0) + 1;
+    else if (tier >= 3) e.r4 = (e.r4 || 0) + 1;
+    if (hand && hand.limpRaised && typeof hand.limpRaised.has === 'function'
+        && hand.limpRaised.has(xid)) e.lr = (e.lr || 0) + 1;
   }
 
   // Everything a player has shown down, newest counts first. Optionally split
@@ -3066,9 +3143,21 @@
     const out = [];
     Object.keys(src).forEach((cls) => {
       const e = src[cls] || {};
+      // `open` is raises that were NOT a 3-bet or 4-bet, i.e. tier 1 — derived
+      // by subtraction rather than stored, so it stays consistent with `raised`
+      // for records written before the tiers existed (r3/r4 absent = 0 = every
+      // raise reads as an open, which is the honest reading of old data).
+      //
+      // `limpraise` deliberately OVERLAPS the others: a limp-reraise is also a
+      // 3-bet, so it appears in both. Splitting it out of r3 would understate
+      // the 3-bet range; the UI labels it as a subset instead.
       const n = mode === 'raised' ? (e.raised || 0)
         : mode === 'called' ? Math.max(0, (e.seen || 0) - (e.raised || 0))
-          : (e.seen || 0);
+          : mode === 'open' ? Math.max(0, (e.raised || 0) - (e.r3 || 0) - (e.r4 || 0))
+            : mode === 'threebet' ? (e.r3 || 0)
+              : mode === 'fourbet' ? (e.r4 || 0)
+                : mode === 'limpraise' ? (e.lr || 0)
+                  : (e.seen || 0);
       if (n > 0) out.push({ cls, n, won: e.won || 0, seen: e.seen || 0 });
     });
     out.sort((a, b) => b.n - a.n || a.cls.localeCompare(b.cls));
@@ -4898,6 +4987,12 @@
        (No backticks in this block: the whole stylesheet is a template literal.) */
     .tph-stat-v { width: 27%; white-space: nowrap; color: #f2f4f6 !important; }
     .tph-stat-n { width: 40%; white-space: nowrap; font-size: 11px; color: #aeb6bd !important; }
+    /* The recent-form figure, shown beside the lifetime one. Declares its own
+       colour so it does NOT pick up the .tph-dev-* deviation shading on the
+       parent cell — that shading is computed from the lifetime figure, and
+       letting it bleed onto the recent number would assert a verdict about a
+       number it was not calculated from. */
+    .tph-stat-rec { color: #8ec5f0 !important; font-size: 11px; font-weight: 600; }
     .tph-stat-norm { color: #8d959c !important; font-size: 10px; }
     .tph-dev-n { font-size: 10px; opacity: .85; margin-left: 2px; }
     .tph-dev-typical { color: #9fb2c4 !important; }
@@ -5713,7 +5808,33 @@
   //
   // opts.key names the POOL_AVG / POOL_SPREAD entry. Omit it for stats with no
   // published pool figure — they render plain, with no verdict.
-  function statRow(label, rawValue, shrunkValue, key) {
+  // The "recent" figure shown beside each lifetime stat.
+  //
+  // Only VPIP and PFR can be windowed at all: `player.recent` stores three bits
+  // per hand (folded / played / played-and-raised), so AFq, 3-bet, c-bet, WTSD
+  // and the rest have no per-hand record to look back over. Returning null for
+  // those is deliberate — the cell then shows nothing, where repeating the
+  // lifetime figure in a column headed "recent" would be a quiet lie.
+  //
+  // Returns the BLENDED figure, not the raw window, so this agrees with the
+  // badge in Recent-form mode. A table saying 60 next to a badge saying 40 is a
+  // worse failure than a slightly less direct number; the raw observation and
+  // the sample size are both in the tooltip.
+  function recentStat(p, key) {
+    if (!p || (key !== 'vpip' && key !== 'pfr')) return null;
+    const sess = blendedRates(p, STORE.settings.sessionWindow || 15);
+    if (!sess || !sess.hands) return null;
+    const raw = key === 'vpip' ? sess.rawVpip : sess.rawPfr;
+    const base = key === 'vpip' ? sess.baseVpip : sess.basePfr;
+    return {
+      value: key === 'vpip' ? sess.vpip : sess.pfr,
+      note: `Last ${sess.hands} hand${sess.hands === 1 ? '' : 's'}: observed ${fmtNum(raw)}, `
+        + `weighted against their own baseline ${fmtNum(base)}. `
+        + 'Same figure the badge uses in Recent-form mode.',
+    };
+  }
+
+  function statRow(label, rawValue, shrunkValue, key, recent) {
     const norm = key ? POOL_AVG[key] : null;
     const dev = deviation(shrunkValue, norm, key ? POOL_SPREAD[key] : null);
 
@@ -5733,7 +5854,9 @@
 
     return `<tr class="${cls ? 'tph-row-' + dev.level : ''}">
       <td class="tph-stat-l">${escapeHtml(label)}</td>
-      <td class="tph-stat-v ${cls}"><b>${fmtPct(rawValue)}</b>${arrow}${delta}</td>
+      <td class="tph-stat-v ${cls}"><b>${fmtPct(rawValue)}</b>${arrow}${delta}${
+        recent ? ` <span class="tph-stat-rec" title="${escapeHtml(recent.note || '')}">· ${fmtPct(recent.value)}</span>` : ''
+      }</td>
       <td class="tph-stat-n">${bar}<span class="tph-stat-norm">${norm != null ? norm.toFixed(0) + '%' : '—'}</span></td>
     </tr>`;
   }
@@ -5764,11 +5887,24 @@
         + '</div></div>';
     };
 
+    // Split by RAISE TIER rather than the old raised/called pair. "What they
+    // open with" and "what they 3-bet with" are different ranges by a wide
+    // margin, and averaging them into one "raised" bucket described neither —
+    // the same reasoning that split raised from called in the first place, one
+    // level further down.
+    //
+    // open + 3-bet + 4-bet reconstructs the old "raised" group exactly, so
+    // nothing is lost by dropping it.
     return `<div class="tph-range-total">${total} showdown${total === 1 ? '' : 's'}`
       + `${total < 8 ? ' — thin sample' : ''}</div>`
-      + group('raised', 'Raised preflop', '')
+      + group('open', 'Opened the pot', '')
+      + group('threebet', '3-bet', '')
+      + group('fourbet', '4-bet or more', '')
+      + group('limpraise', 'Limp-3bet', ', also counted in 3-bet above')
       + group('called', 'Called / limped', '')
-      + `<div class="tph-stat-legend">Showdowns only — a floor on their range, not all of it.</div>`;
+      + `<div class="tph-stat-legend">Showdowns only — a floor on their range, not all of it.
+        Tiers come from the raise order within each hand; showdowns recorded before tiers
+        were tracked have no tier and read as "Opened".</div>`;
   }
 
   function renderPlayerPanel() {
@@ -5824,16 +5960,26 @@
               + (heat ? escapeHtml(heatText(heat)) : '')
               + '</td></tr>';
           })()}
-          <tr><th>Stat</th><th>Them</th><th>Pool</th></tr>
+          <tr><th>Stat</th><th>Lifetime · recent</th><th>Pool</th></tr>
           <tr><td class="tph-stat-l">Hands</td><td class="tph-stat-v"><b>${p.hands}</b></td><td class="tph-stat-n">${p.hands < STORE.settings.minHands ? '<span class="tph-stat-norm">low</span>' : ''}</td></tr>
-          ${statRow('VPIP', r.vpip, s.vpip, 'vpip')}
-          ${statRow('PFR', r.pfr, s.pfr, 'pfr')}
+          ${statRow('VPIP', r.vpip, s.vpip, 'vpip', recentStat(p, 'vpip'))}
+          ${statRow('PFR', r.pfr, s.pfr, 'pfr', recentStat(p, 'pfr'))}
           ${statRow('3-Bet', r.threeBet, s.threeBet, 'threeBet')}
           ${statRow('Fold v 3B', r.foldTo3Bet, s.foldTo3Bet, 'foldTo3Bet')}
           ${statRow('C-Bet', r.cbet, s.cbet, 'cbet')}
           ${statRow('Fold v CB', r.foldToCbet, s.foldToCbet, 'foldToCbet')}
           ${statRow('Limp', r.limpShareOfVpip, s.limpShareOfVpip, 'limpShareOfVpip')}
+          <tr title="Limped, then re-raised the SAME hand — the trap line. Almost nobody does this light, so treat it as the strongest preflop signal on the table. Rare by nature, which is why the raw count sits beside the percentage: 2% off three hands and off three hundred are different claims. No pool figure exists for it, so there is no tick and no verdict.">
+            <td class="tph-stat-l">Limp-3bet</td>
+            <td class="tph-stat-v"><b>${fmtPct(r.limpRaise)}</b></td>
+            <td class="tph-stat-n"><span class="tph-stat-norm">${r.limpRaiseCount} hand${r.limpRaiseCount === 1 ? '' : 's'}</span></td>
+          </tr>
           ${statRow('AFq', r.afq, r.afq, null)}
+          <tr title="Postflop re-raise: how often they raise when someone bets into them — check-raises and raises of a c-bet combined, since the log does not say whether they checked first. The denominator is the number of times they actually faced a bet, not hands played.">
+            <td class="tph-stat-l">Re-raise</td>
+            <td class="tph-stat-v"><b>${fmtPct(r.postflopRR)}</b></td>
+            <td class="tph-stat-n"><span class="tph-stat-norm">${r.rrSample} faced${r.rrSample > 0 && r.rrSample < 10 ? ', low' : ''}</span></td>
+          </tr>
           ${statRow('WTSD', r.wtsd, r.wtsd, null)}
           <tr title="Average bet or raise as a percentage of the pot as it stood BEFORE that bet. 100% is a pot-sized bet. Every bet and raise on every street counts, so it is a sizing habit, not a street-specific one.">
             <td class="tph-stat-l">Bet size</td>
@@ -5841,7 +5987,9 @@
             <td class="tph-stat-n"><span class="tph-stat-norm">of pot${p.betSizeCount ? ` · ${p.betSizeCount} bet${p.betSizeCount === 1 ? '' : 's'}` : ''}${p.betSizeCount && p.betSizeCount < BET_SIZE_MIN ? ', low' : ''}</span></td>
           </tr>
           <tr><td colspan="3" class="tph-stat-legend">Bet size = average bet/raise as a share of the pot before it; 100% is pot-sized.
-            Tick = pool average (reference figures, not measured here).</td></tr>
+            Tick = pool average (reference figures, not measured here).
+            The blue <span class="tph-stat-rec">· figure</span> is recent form over the last ${STORE.settings.sessionWindow || 15} hands —
+            only VPIP and PFR can be windowed, so the rest show lifetime only.</td></tr>
           ${stackBarHtml(p)}
           ${(() => {
             const tabs = tablesPlayed(p);
@@ -6935,6 +7083,9 @@
       seatLabel,
       computeRates,
       computeShrunkRates,
+      streetRates,
+      shownRange,
+      recordShownHand,
       shrunkPct,
       POOL_AVG,
       PRIOR_WEIGHT,

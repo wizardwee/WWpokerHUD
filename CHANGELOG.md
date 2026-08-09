@@ -9,6 +9,69 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.1.0
+
+Preflop ranges split by raise tier, plus two new stats and a recent-form
+column.
+
+**Ranges by raise tier.** `shownHands.raised` was set from `countedPfr`
+— "raised at some point preflop" — so an open-raise and a 3-bet were
+recorded identically, and the Range tab averaged them into a single
+"Raised preflop" group that described neither. `hand.preflopTier` now
+records the tier from `preflopRaiseEvents` at the moment a player
+raises: 1 = opened, 2 = 3-bet, 3+ = 4-bet. That is the same counter
+`maybeCountThreeBet` keys off, so the tier filed against a showdown and
+the 3-bet stat cannot drift apart. The tab now shows Opened / 3-bet /
+4-bet+ / Limp-3bet / Called separately.
+
+`open` is derived by subtraction (`raised - r3 - r4`) rather than
+stored, which gives two properties worth keeping: `open + 3bet + 4bet`
+reconstructs the old `raised` group exactly, and a record written
+before tiers existed has no `r3`/`r4`, so every one of its raises reads
+as an open — the honest reading of data with no tier. No migration.
+
+**Limp-3bet.** Limped, then re-raised the same hand. `maybeCountLimp`
+bails once `preflopRaiseEvents > 0`, so `countedLimp` only ever holds
+players who put money in before any raise — a raise from someone in it
+is unambiguously the trap line and cannot false-fire on an ordinary
+raiser. Against a pool that limps ~45% of its voluntary money this is
+the strongest preflop signal available. Reported with its raw count
+beside the percentage, because it is rare by nature: "2%" off three
+hands and off three hundred are different claims. No pool figure
+exists for it, so it gets no tick and no verdict.
+
+**Postflop re-raise, with no new collection.** Facing a bet is the only
+state in which raise, call and fold are possible — a check or a bet
+means nobody had bet into them yet. So `raise / (raise + call + fold)`
+over the existing `streetActions` is exactly "how often do they raise
+when someone bets at them", check-raises and raises of a c-bet
+combined. It is not split into those two, because that needs to know
+whether they checked first and `streetActions` does not record it.
+Withholds rather than reporting 0% when they have never faced a bet —
+"never re-raises" is a claim, and no evidence supports it there.
+
+This is the third time a stat in this file turned out to be already
+collected and merely unreported. Check before adding collection.
+
+**Recent form beside lifetime.** The Stats tab prints the recent figure
+in the same cell as the lifetime one rather than adding a fourth
+column: a phone panel has no width for one, and 12 `colspan="3"` sites
+would have had to change — one of them in a different table that would
+have broken silently. Only VPIP and PFR carry a recent figure, because
+`player.recent` stores three bits per hand and nothing else can be
+windowed; the other rows show lifetime alone rather than repeating it
+under a "recent" heading. The figure shown is the blended one, matching
+the badge in Recent-form mode — a table reading 60 beside a badge
+reading 40 is a worse failure than a slightly less direct number, and
+the raw observation and sample size are in the tooltip.
+
+Verified without Node (still not installed on this machine): the script
+parses clean in JavaScriptCore via JXA, and 12 assertions extracted
+from the real file cover the tier split, the reconstruction invariant,
+legacy records, and the re-raise denominator.
+`test/preflop-tiers.test.js` states all of it permanently. The full
+suite has NOT been run.
+
 ## 1.0.1
 
 Role badges (PFR/3B/DONK/RR) — and the stats and P/L behind them —
