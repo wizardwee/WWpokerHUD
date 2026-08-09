@@ -869,6 +869,24 @@ The general rule this produced: **only shrink toward a figure that measures the
 same thing the stat measures.** An anchor that is merely plausible is worse than
 no anchor, because shrinkage makes it invisible.
 
+### AFq excludes folds, on purpose (settled v1.1.0)
+
+`afq` is `(bet + raise) / (bet + raise + call)`. The commoner published
+definition puts folds in the denominator. **This was raised, reviewed and kept
+— don't "fix" it.**
+
+Excluding folds asks the narrower question "when they keep playing, do they lead
+or follow", which is the useful one here: folding is already separately visible
+in fold-to-c-bet and the per-street fold percentages, so putting it in AFq too
+would double-count it into a single blended number.
+
+The stronger argument is the cost of changing it. Every AFq already stored was
+computed this way, so moving the denominator would silently reprice thousands of
+banked hands and leave old and new figures incomparable with nothing on screen
+saying so. Consequence worth knowing: **this AFq reads higher than other HUDs'**
+for players who fold a lot, so don't compare it against a figure quoted
+elsewhere.
+
 ## Big blinds are the unit (v0.23.0)
 
 `hand.bbAmount` is read off the `postBB` line, seeded from a session-level

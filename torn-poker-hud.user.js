@@ -3053,6 +3053,22 @@
   }
 
   function computeRates(p) {
+    // AFq here is (bet + raise) / (bet + raise + call). Folds are DELIBERATELY
+    // excluded, and this is a settled decision — do not "fix" it.
+    //
+    // The commoner published definition puts folds in the denominator, which
+    // makes the stat answer "how aggressive are they across every postflop
+    // decision". Excluding them answers a narrower question — "when they keep
+    // playing, do they lead or follow" — and that is the one worth asking
+    // against this pool, where folding is separately visible in fold-to-c-bet
+    // and the per-street fold percentages.
+    //
+    // The cost of changing it now is the real argument: every AFq already
+    // banked was computed this way, so switching the denominator would silently
+    // reprice thousands of stored hands and make old and new figures
+    // incomparable with nothing on screen to say so. It also reads HIGHER than
+    // other HUDs for players who fold a lot, which is worth knowing before
+    // comparing a number here against one quoted elsewhere.
     const aggActions = POSTFLOP_STREETS.reduce((sum, s) => sum + p.streetActions[s].bet + p.streetActions[s].raise, 0);
     const passActions = POSTFLOP_STREETS.reduce((sum, s) => sum + p.streetActions[s].call, 0);
     // Postflop re-raise, summed across streets. `rrFaced` counts only actions
