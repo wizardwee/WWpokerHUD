@@ -250,6 +250,39 @@ straight through the raise that should have changed it. The UI's basis label
 (`equityBasisLabel`) tracks the same tiers as `opponentRangeProxy`: "vs
 random" only when it actually is; "vs open/3-bet/4-bet range" once it isn't.
 
+## The coach's villain tip is chosen for the SPOT (v1.2.0)
+
+`currentExploitTip()` used to take `buildExploitPlan(p)[0]` — the villain's
+highest-gain leak — and print it whatever hero was facing, so a river shove
+could be met with "c-bet every flop you take the lead in". It now scores
+**every** entry of every candidate villain, not each player's top one. Taking
+`[0]` was the whole bug; don't reintroduce it as an optimisation.
+
+Entries carry an optional `when` list of tokens from `handContextTokens`:
+`preflop` / `flop` / `turn` / `river` / `postflop` / `facing` / `lead`.
+**Untagged means "applies everywhere"**, so an untouched rule behaves exactly
+as before — that default is what made tagging incremental rather than a rewrite.
+
+Three things to preserve:
+
+- **Relevance boosts (+60), it does not filter.** A hard filter leaves the panel
+  silent in spots no rule covers, and a general read beats no read. The −45
+  penalty applies only to entries that *declared* a context and missed it.
+- **The two numbers are pinned from both sides.** A matched rule must win a
+  close call, or context is pointless; it must not bury a high-gain
+  always-relevant state read like tilt (110), which applies on every street.
+  `test/coach-relevance.test.js` asserts both directions — moving either number
+  to satisfy one will fail the other.
+- **A typo'd tag is invisible.** `entryRelevance` just returns −1 forever, so
+  the rule is permanently demoted and never errors. The test scans the source
+  for tokens `handContextTokens` cannot emit; that scan is the only thing that
+  catches it, and it carries its own guard against matching nothing.
+
+The context is deliberately coarse. SPR bands or heads-up-vs-multiway would
+depend on reads already flagged as imperfect (position, and whether an all-in
+was really a call), and a wrong token silently promotes wrong advice — worse
+than advice that is merely general.
+
 ## Review findings still open (v0.14.0)
 
 Reviewed and deliberately left, in rough priority order. Also listed in the

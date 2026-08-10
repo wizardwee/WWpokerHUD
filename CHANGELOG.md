@@ -9,6 +9,65 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.2.0
+
+The live coach now picks its line for the decision in front of you, not
+just for the player.
+
+**The problem.** `currentExploitTip()` took `buildExploitPlan(p)[0]` —
+the villain's highest-gain leak overall — and printed it regardless of
+what hero was facing. On the river against a shove it would still offer
+"c-bet every flop you take the lead in": a true statement about the
+player and a useless one about the decision. The villain-specific
+machinery was all there; it just had no idea what street it was on.
+
+**Context tokens.** Exploit entries take an optional `when` list, matched
+against tokens read off live hand state: `preflop` / `flop` / `turn` /
+`river` / `postflop` / `facing` (someone still in has put more into this
+street than hero) / `lead` (hero took the preflop lead, so the c-bet is
+theirs). Untagged entries apply everywhere, so an unmodified rule behaves
+exactly as before. The context is deliberately coarse — a finer one (SPR
+bands, heads-up vs multiway) would depend on reads this file already
+flags as imperfect, and a wrong token silently promotes wrong advice,
+which is worse than advice that is merely general.
+
+**Relevance boosts, it does not filter.** +60 for a match, −45 for a
+tagged-but-unmatched entry. A hard filter would leave the panel silent in
+spots no rule happens to cover, and a general read beats no read. The tip
+is now scored across *every* entry of every candidate villain rather than
+each player's top one — taking `[0]` was the actual cause of the
+off-street advice.
+
+Those two numbers sit between two properties that pull against each
+other, and `test/coach-relevance.test.js` pins both sides so a future
+tweak cannot quietly break one to help the other: a matched situational
+rule must win a close call, or context is pointless; and it must not bury
+a high-gain always-relevant state read like tilt, which matters on every
+street. The test also scans the source for `when` tags the context can
+never emit — a typo'd tag is invisible, since it just returns −1 forever
+and demotes the rule permanently without ever erroring.
+
+**Per-street fold patterns, finally read.** `streetRates` has computed
+`foldPct` since per-street stats were added and nothing consumed it —
+the fourth already-collected-but-unreported stat found in this file. It
+is also among the most actionable things here: "folds 64% of their turn
+decisions" names the street to fire at, and the rule is tagged to that
+street so it arrives when it applies.
+
+**New reads from 1.1.0's data.** Postflop re-raise splits into two
+opposite lines — a player who raises 18%+ of bets faced wants your strong
+hands checked to induce, while one who almost never raises is showing you
+the nuts when they do. Limp-3bet is a hard fold trigger at gain 106,
+above every postflop rule, because it is the one read that turns a
+routine call into a fold. And the 3-bet showdown range is surfaced
+separately from the overall one, since that is the range that decides
+whether you can 4-bet or have to fold.
+
+Verified without Node (still not installed here): parses clean in
+JavaScriptCore via JXA, and 16 assertions driving the real extracted
+functions cover matching, the both-sides scoring properties, and the tag
+vocabulary. The full suite has NOT been run.
+
 ## 1.1.0
 
 Preflop ranges split by raise tier, plus two new stats and a recent-form

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.1.0
+// @version      1.2.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,30 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.2.0 - The live coach picks its line for the DECISION, not just the player.
+ *            - currentExploitTip took buildExploitPlan(p)[0] — the villain's
+ *              biggest leak overall — and printed it whatever hero faced, so
+ *              a river shove could still be met with "c-bet every flop you
+ *              take the lead in". True about the player, useless about the
+ *              spot. Entries now carry an optional `when` list of context
+ *              tokens (preflop/flop/turn/river/postflop/facing/lead) and the
+ *              tip is scored across EVERY entry rather than just the top one.
+ *            - Relevance is a BOOST (+60) and a penalty (-45), never a filter:
+ *              a filter would leave the panel silent in spots no rule covers,
+ *              and a general read beats no read. The values sit deliberately
+ *              between two properties test/coach-relevance.test.js pins from
+ *              both sides — a matched rule must win a close call, but must not
+ *              bury an always-relevant state read like tilt.
+ *            - Per-street foldPct is finally read. streetRates has computed it
+ *              since per-street stats were added and NOTHING consumed it — the
+ *              fourth already-collected stat found unreported in this file. It
+ *              is also the most directly actionable: "folds 64% of turns"
+ *              names the street to fire at.
+ *            - New reads wired in from 1.1.0's data: postflop re-raise (do
+ *              they attack bets, or is a raise from them the nuts), limp-3bet
+ *              as a hard fold trigger, and the 3-bet showdown range, which is
+ *              the read that decides whether you can 4-bet or have to fold.
  *
  * 1.1.0 - Preflop ranges are split by RAISE TIER, plus two new stats.
  *            - shownHands.raised was set from countedPfr — "raised at some
@@ -80,60 +104,6 @@
  *          escapeRegexLiteral is deleted — it existed only to feed the pattern
  *          that is now gone.
  *
- * 1.0.0 - Four ideas pulled from HopesG's HUD and Torn Poker Helper, adapted
- *          to this file's own conventions rather than copied wholesale:
- *            - Equity is range-weighted once the pot is raised.
- *              estimateEquity() took an optional raiseLevel argument; a raised
- *              pot now deals opponents from opponentRangeProxy(raiseLevel) —
- *              RFI_RANGES.SHORT.CO / THREE_BET_RANGES.IP / FOUR_BET_RANGE,
- *              charts this file already sourced and combo-weighted, not new
- *              percentages. An unraised pot is untouched (still "vs random").
- *              First implementation measured ~350ms for a single 8-opponent
- *              call against FOUR_BET_RANGE (~20ms unweighted) — a ~16x
- *              regression that would have stalled the coach panel. Fixed by
- *              precomputing the in-range combo list ONCE per call instead of
- *              re-deriving it inside the 1200-iteration loop: ~57ms worst
- *              case. See "Equity" in CLAUDE.md for the full account.
- *              estimateEquityCached's key now includes raiseLevel, so a hand
- *              that goes from unraised to a 3-bet doesn't keep serving the
- *              pre-raise number. equityBasisLabel replaces the hardcoded
- *              "Eq vs random" text with whichever tier actually applied.
- *            - Notable hands survive the history cap. isNotableHand flags a
- *              pot at NOTABLE_POT_BB_THRESHOLD (40bb) or a preflop raise at
- *              NOTABLE_PREFLOP_RAISE_BB (4bb); trimHandHistory evicts oldest
- *              UNPINNED entries first, pinned ones surviving past the normal
- *              historyLimit up to a hard HISTORY_PINNED_CEILING (500) —
- *              "notable" still can't grow unbounded. Wired into both
- *              recordHandHistory and mergeHands, so a hand pinned on one
- *              device isn't silently unpinned by an import from another. 📌
- *              marks a pinned hand in the History tab and its plain-text
- *              export.
- *            - TORN_STAKES gained the $5,000,000 level, previously missing
- *              entirely. More consequential: HopesG's HUD carries a SECOND
- *              table map keyed by CSS texture class rather than blind level,
- *              and it reveals that three stakes ($100k, $1M, $5M) have
- *              MULTIPLE distinct table names sharing one blind — Torn runs
- *              more than one differently-named room at some stakes. The
- *              single name shown for those three levels (including the
- *              device-confirmed "River Wizard" at $1M) is a best guess, not a
- *              fact; documented in both the code and CLAUDE.md rather than
- *              claimed as more certain than it is.
- *            - A real substring-name bug, found while auditing for the class
- *              nameToXidGuess's own comment already warned about ("Joe" would
- *              resolve to a "Joey" seat) but hadn't actually fixed: the
- *              fallback pass used `.includes(name)` with no boundary at all,
- *              and a live scan already established that pass runs on 5 of 6
- *              seats (SELECTORS.seatNameLink resolves on only 1). "Al" could
- *              silently resolve to "AlexTheGreat"'s seat, misattributing every
- *              one of Al's actions — and stats, and P/L — to Alex's record.
- *              Fixed with a boundary check against the actual username
- *              character class (not regex \\b, which treats the hyphens
- *              USERNAME_RE allows as delimiters — \\bAl\\b still matches
- *              inside "Al-Qaeda"). escapeRegexLiteral added alongside it,
- *              since nameToXidGuess is also reachable with the free-typed
- *              Settings → heroName field, not just a scraped (and therefore
- *              already-constrained) log name.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -196,7 +166,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.1.0';
+  const HUD_VERSION = '1.2.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -4697,7 +4667,16 @@
     // `short` is a 2-5 word action for the collapsed pill and the live line,
     // where there is no room for the full sentence. The long form stays for
     // the Exploit tab and the tooltip.
-    const add = (gain, tag, text, short) => out.push({ gain, tag, text, short });
+    //
+    // `when` is an optional list of context tokens (see handContextTokens): the
+    // entry is treated as RELEVANT to the live decision only when every token
+    // is present. Omitted means "always relevant", which is the safe default —
+    // an untagged rule behaves exactly as it did before tagging existed.
+    //
+    // Relevance is a BOOST, never a filter. A hard filter would leave the panel
+    // silent in spots no rule happens to cover, and a slightly off-target read
+    // beats no read at all. See currentExploitTip.
+    const add = (gain, tag, text, short, when) => out.push({ gain, tag, text, short, when: when || null });
     const n = p.hands || 0;
 
     // --- Postflop: the biggest lever against a passive pool ------------------
@@ -4705,10 +4684,10 @@
       if (s.foldToCbet > POOL_AVG.foldToCbet + POOL_SPREAD.foldToCbet) {
         add(100, 'C-bet', `Folds to c-bets ${fmtPct(r.foldToCbet)} vs a ${POOL_AVG.foldToCbet}% pool `
           + `(${p.foldToCbetOpp} spots). C-bet every flop you take the lead in, any two cards. `
-          + 'This is the single most profitable adjustment against them.', 'fire every flop');
+          + 'This is the single most profitable adjustment against them.', 'fire every flop', ['flop', 'lead']);
       } else if (s.foldToCbet < POOL_AVG.foldToCbet - POOL_SPREAD.foldToCbet) {
         add(95, 'C-bet', `Folds to c-bets only ${fmtPct(r.foldToCbet)} (${p.foldToCbetOpp} spots). `
-          + 'Stop bluffing flops. Bet for value and check your air — a c-bet here is lighting money on fire.', 'no flop bluffs');
+          + 'Stop bluffing flops. Bet for value and check your air — a c-bet here is lighting money on fire.', 'no flop bluffs', ['flop', 'lead']);
       }
     }
 
@@ -4718,27 +4697,27 @@
     const tn = r.byStreet.turn;
     if (f.afq != null && tn.afq != null && f.actions >= 8 && tn.actions >= 6 && f.afq - tn.afq > 20) {
       add(90, 'Turn', `Aggression collapses from ${fmtPct(f.afq)} on the flop to ${fmtPct(tn.afq)} on the turn. `
-        + 'Float their flop bet in position and take it away on the turn when they check.', 'float, stab turn');
+        + 'Float their flop bet in position and take it away on the turn when they check.', 'float, stab turn', ['postflop']);
     }
     if (tn.afq != null && tn.actions >= 6 && tn.afq > 55) {
       add(70, 'Turn', `Keeps firing turns (${fmtPct(tn.afq)} aggression, ${tn.actions} actions) — `
-        + 'their turn bets are not automatic bluffs; call down with real hands rather than floats.', 'turn bets are real');
+        + 'their turn bets are not automatic bluffs; call down with real hands rather than floats.', 'turn bets are real', ['turn']);
     }
 
     // --- Preflop ------------------------------------------------------------
     if (r.foldTo3Bet != null && p.foldTo3BetOpp >= 6) {
       if (s.foldTo3Bet > POOL_AVG.foldTo3Bet + POOL_SPREAD.foldTo3Bet) {
         add(85, '3-bet', `Folds to 3-bets ${fmtPct(r.foldTo3Bet)} vs a ${POOL_AVG.foldTo3Bet}% pool `
-          + `(${p.foldTo3BetOpp} spots). 3-bet their opens light, especially in position.`, '3-bet them light');
+          + `(${p.foldTo3BetOpp} spots). 3-bet their opens light, especially in position.`, '3-bet them light', ['preflop']);
       } else if (s.foldTo3Bet < POOL_AVG.foldTo3Bet - POOL_SPREAD.foldTo3Bet) {
         add(60, '3-bet', `Rarely folds to 3-bets (${fmtPct(r.foldTo3Bet)}). 3-bet for value only — `
-          + 'a light 3-bet just builds a pot out of position with the worse hand.', '3-bet value only');
+          + 'a light 3-bet just builds a pot out of position with the worse hand.', '3-bet value only', ['preflop']);
       }
     }
     if (r.limpShareOfVpip != null && p.limpMade >= 5
         && s.limpShareOfVpip > POOL_AVG.limpShareOfVpip + POOL_SPREAD.limpShareOfVpip) {
       add(80, 'Isolate', `Limps into ${fmtPct(r.limpShareOfVpip)} of the pots they enter. `
-        + 'Raise big to isolate them in position — their limping range is capped, and they will call too wide.', 'isolate their limps');
+        + 'Raise big to isolate them in position — their limping range is capped, and they will call too wide.', 'isolate their limps', ['preflop']);
     }
     if (r.vpip != null && n >= 20) {
       if (s.vpip > POOL_AVG.vpip + POOL_SPREAD.vpip) {
@@ -4746,14 +4725,14 @@
           + 'their range is wide and weak. Value bet thinner than feels comfortable and stop bluffing.', 'value bet thin');
       } else if (s.vpip < POOL_AVG.vpip - POOL_SPREAD.vpip) {
         add(65, 'Range', `Plays only ${fmtPct(r.vpip)} of hands vs a ${POOL_AVG.vpip.toFixed(0)}% pool — `
-          + 'genuinely tight for this table. Respect their raises and steal their blinds relentlessly.', 'steal their blinds');
+          + 'genuinely tight for this table. Respect their raises and steal their blinds relentlessly.', 'steal their blinds', ['preflop']);
       }
     }
     if (r.pfr != null && r.vpip > 0 && n >= 20) {
       const gap = r.vpip - r.pfr;
       if (gap > 40) {
         add(50, 'Passive', `Huge VPIP/PFR gap (${fmtPct(r.vpip)}/${fmtPct(r.pfr)}) — a caller, not a raiser. `
-          + 'When they DO raise, believe it.', 'believe their raises');
+          + 'When they DO raise, believe it.', 'believe their raises', ['facing']);
       }
     }
 
@@ -4761,10 +4740,10 @@
     if (r.wtsd != null && n >= 30) {
       if (r.wtsd > 40) {
         add(75, 'Showdown', `Goes to showdown ${fmtPct(r.wtsd)} of hands played — a station. `
-          + 'Three-street value with anything decent; never try to bluff them off a made hand.', 'three-street value');
+          + 'Three-street value with anything decent; never try to bluff them off a made hand.', 'three-street value', ['postflop']);
       } else if (r.wtsd < 18) {
         add(60, 'Showdown', `Reaches showdown only ${fmtPct(r.wtsd)} of the time — they give up a lot. `
-          + 'Barrel more streets; they are folding somewhere before the river.', 'barrel more');
+          + 'Barrel more streets; they are folding somewhere before the river.', 'barrel more', ['postflop']);
       }
     }
 
@@ -4772,10 +4751,10 @@
     if (r.avgBetPct != null && p.betSizeCount >= BET_SIZE_MIN) {
       if (r.avgBetPct > 85) {
         add(45, 'Sizing', `Averages ${r.avgBetPct.toFixed(0)}% of pot when betting (${p.betSizeCount} bets) — `
-          + 'oversized. At this pool that usually means value, not a bluff.', 'big bet = value');
+          + 'oversized. At this pool that usually means value, not a bluff.', 'big bet = value', ['facing']);
       } else if (r.avgBetPct < 40) {
         add(45, 'Sizing', `Averages only ${r.avgBetPct.toFixed(0)}% of pot (${p.betSizeCount} bets) — `
-          + 'small sizing. Raise their weak bets; they are pricing you in.', 'raise their small bets');
+          + 'small sizing. Raise their weak bets; they are pricing you in.', 'raise their small bets', ['facing']);
       }
     }
 
@@ -4791,6 +4770,64 @@
           ? `When they raised preflop they turned up ${shownRaised.slice(0, 4).map((e) => e.cls).join(', ')}.`
           : 'None of it after a preflop raise, so their raising range is still unknown.')
         + ' Showdowns are a floor on their range, not all of it.', 'seen at showdown');
+    }
+
+    // --- Folding patterns, per street ---------------------------------------
+    //
+    // streetRates has computed foldPct since per-street stats were added and
+    // NOTHING read it — the fourth stat in this file found already-collected
+    // and merely unreported. It is also the most directly actionable thing
+    // here: "folds 64% of turns" tells you which street to fire.
+    //
+    // Tagged to its own street, so the advice arrives on the street it is
+    // about rather than whenever this player happens to be the aggressor.
+    POSTFLOP_STREETS.forEach((st) => {
+      const b = r.byStreet[st];
+      if (!b || b.foldPct == null || b.actions < 8) return;
+      if (b.foldPct > 60) {
+        add(84, 'Fold', `Folds ${fmtPct(b.foldPct)} of their ${st} decisions (${b.actions} actions) — `
+          + `they give up on the ${st} more than anyone should. Fire the ${st} whether or not you hit.`,
+        `barrel the ${st}`, [st]);
+      } else if (b.foldPct < 20) {
+        add(74, 'Fold', `Almost never folds the ${st} — ${fmtPct(b.foldPct)} of ${b.actions} decisions. `
+          + `Bluffing the ${st} against them does not work; bet for value and give up your air.`,
+        `no ${st} bluffs`, [st]);
+      }
+    });
+
+    // --- Do they attack a bet? ----------------------------------------------
+    if (r.postflopRR != null && r.rrSample >= 8) {
+      if (r.postflopRR > 18) {
+        add(79, 'Re-raise', `Raises ${fmtPct(r.postflopRR)} of the bets they face (${r.rrSample} spots) — `
+          + 'they attack bets rather than calling. Check your strong hands to induce it, and think twice '
+          + 'about thin value bets that can only be raised off.', 'they raise bets', ['postflop']);
+      } else if (r.postflopRR < 5) {
+        add(76, 'Re-raise', `Almost never raises a bet — ${fmtPct(r.postflopRR)} of ${r.rrSample} spots faced. `
+          + 'So when they DO raise, it is the top of their range. Fold anything marginal to it, and '
+          + 'bet thinner for value knowing you will rarely be blown off the hand.', 'their raise = nuts', ['facing']);
+      }
+    }
+
+    // --- The trap line -------------------------------------------------------
+    // Gain sits above every postflop rule deliberately: this is the one read
+    // that turns a routine call into a fold, and it is dirt cheap to act on.
+    if (r.limpRaiseCount >= 2) {
+      add(106, 'Trap', `Limp-3bets — limped then re-raised on ${r.limpRaiseCount} occasions. `
+        + 'Almost nobody does that light. If they limp and then come back over the top, fold everything '
+        + 'but the very top of your range, regardless of what their other numbers say.',
+      'limp-raise = monster', ['preflop']);
+    }
+
+    // --- What they showed AFTER a 3-bet, specifically -------------------------
+    // The generic "shown at showdown" rule above still covers the whole sample.
+    // This one is narrower and far more useful: a 3-bet range is the read that
+    // decides whether you can 4-bet or have to fold.
+    const shown3 = shownRange(p, 'threebet');
+    if (shown3.length >= 2) {
+      const n3 = shown3.reduce((a, e) => a + e.n, 0);
+      add(62, 'Range', `Has shown ${n3} hand${n3 === 1 ? '' : 's'} after 3-betting: `
+        + `${shown3.slice(0, 5).map((e) => e.cls).join(', ')}${shown3.length > 5 ? '…' : ''}. `
+        + 'That is a floor on their 3-bet range, not all of it.', 'their 3-bet range', ['preflop']);
     }
 
     // --- Live state ----------------------------------------------------------
@@ -4825,9 +4862,56 @@
   // rather than nothing.
   //
   // Returns { xid, entry } or null.
+  // Tokens describing the decision hero is ACTUALLY facing. Exploit entries
+  // declare a `when` list against these — see add() in buildExploitPlan.
+  //
+  // Deliberately coarse. A finer context (SPR bands, heads-up vs multiway)
+  // would depend on reads this file already flags as imperfect — position, and
+  // whether an all-in was really a call — and a wrong token silently promotes
+  // the wrong advice, which is worse than advice that is merely general. Every
+  // token below is read straight off hand state that is already trusted.
+  function handContextTokens(hand) {
+    const ctx = new Set();
+    if (!hand) return ctx;
+    const street = hand.street || 'preflop';
+    ctx.add(street);
+    if (street !== 'preflop') ctx.add('postflop');
+    if (heroUnresolved()) return ctx; // no hero, no "facing" or "lead" to speak of
+    // Facing a bet = someone still in has put MORE into this street than hero.
+    // Street contributions, not hand totals: calling preflop does not mean hero
+    // is facing a bet on the flop.
+    const mine = hand.streetContributions[heroXid] || 0;
+    let most = 0;
+    Object.keys(hand.streetContributions || {}).forEach((x) => {
+      if (x === heroXid) return;
+      const v = hand.streetContributions[x] || 0;
+      if (v > most) most = v;
+    });
+    if (most > mine) ctx.add('facing');
+    // Hero took the preflop lead, so the c-bet is theirs to make or skip.
+    if (hand.aggressorByStreet && hand.aggressorByStreet.preflop === heroXid) ctx.add('lead');
+    return ctx;
+  }
+
+  // An entry is relevant when every token it declares is in the context.
+  // Untagged entries are neutral rather than relevant — they apply everywhere,
+  // so they should neither be promoted nor punished.
+  function entryRelevance(entry, ctx) {
+    if (!entry || !entry.when || !entry.when.length) return 0;
+    return entry.when.every((tok) => ctx.has(tok)) ? 1 : -1;
+  }
+
+  // Deliberately modest. A large bonus would let any situational rule bury a
+  // high-gain state read like tilt, which is relevant on every street; these
+  // values let a matched rule win a close call without erasing the strongest
+  // general reads. Tilt (110) still outranks an off-street c-bet rule (100-45).
+  const EXPLOIT_RELEVANT_BONUS = 60;
+  const EXPLOIT_IRRELEVANT_PENALTY = 45;
+
   function currentExploitTip() {
     const hand = currentHand;
     if (!hand) return null;
+    const ctx = handContextTokens(hand);
 
     const order = [];
     if (hand.lastAggressor) order.push(hand.lastAggressor);
@@ -4838,12 +4922,20 @@
       if (!xid || isHeroRecord(xid)) continue;
       const p = STORE.players[xid];
       if (!p || p.hands < STORE.settings.minHands) continue;
-      const top = buildExploitPlan(p)[0];
-      if (!top) continue;
-      // The aggressor wins outright — a stronger read on someone who has
-      // already folded out of the decision is not more useful.
-      const score = top.gain + (xid === hand.lastAggressor ? 1000 : 0);
-      if (!best || score > best.score) best = { xid, entry: top, score };
+      // EVERY entry, not just the highest-gain one. Taking [0] is what let the
+      // panel offer "c-bet every flop you take the lead in" while hero was
+      // facing a river shove: the player's biggest overall leak is frequently
+      // not the most useful thing to say about the decision in front of them.
+      const plan = buildExploitPlan(p);
+      for (const entry of plan) {
+        const rel = entryRelevance(entry, ctx);
+        // The aggressor still wins outright — a stronger read on someone who
+        // has already folded out of the decision is not more useful.
+        const score = entry.gain
+          + (rel > 0 ? EXPLOIT_RELEVANT_BONUS : rel < 0 ? -EXPLOIT_IRRELEVANT_PENALTY : 0)
+          + (xid === hand.lastAggressor ? 1000 : 0);
+        if (!best || score > best.score) best = { xid, entry, score, relevant: rel > 0 };
+      }
     }
     return best;
   }
@@ -7153,6 +7245,8 @@
       shownRange,
       buildRangeHtml,
       buildExploitPlan,
+      handContextTokens,
+      entryRelevance,
       buildCoachAdvice,
       trackStacks,
       stackSwingBB,
