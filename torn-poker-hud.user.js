@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.4.0
+// @version      1.5.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,28 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.5.0 - Narrow resets, and a diagnostic for a split hero identity.
+ *            - "Reset all data" was the ONLY reset, so fixing a wrong money
+ *              figure meant discarding every stat, showdown range and hand in
+ *              the store. Two narrower buttons sit above it now. "Reset P/L
+ *              only" zeroes every money figure and nothing else — the same
+ *              fields schema 2 wiped, for the same reason: P/L is the one
+ *              number that can be wrong on its own while counts, rates and
+ *              ranges stay perfectly good. "Reset my stats" zeroes hero's own
+ *              counters and keeps every opponent AND all hand history, since
+ *              those hands still describe everybody else in them.
+ *            - resetHeroStats clears TWO records: the real seat record, and any
+ *              `name:<username>` pseudo-record, which is deleted rather than
+ *              emptied. If name resolution ever failed for hero, actions
+ *              accrued to the pseudo one while `hands` accrued to the real one;
+ *              clearing one half would leave the symptom untouched.
+ *            - The deep scan prints heroRecord, heroGhost and STORE.hero side
+ *              by side. `heroXid: ok` does NOT rule the split out — identity
+ *              resolves off the self___ marker and never touches the username,
+ *              while hero's log lines still go through nameToXidGuess. The only
+ *              symptom is "my own VPIP looks low" while every opponent reads
+ *              correctly, so nothing else points at identity.
  *
  * 1.4.0 - P/L was silently lost on every pot won WITHOUT a showdown.
  *          Found by a live deep scan, which printed the winner lines as
@@ -68,30 +90,6 @@
  *              into different descriptions of one player. Report also picked up
  *              the per-street fold, postflop re-raise, limp-3bet and 3-bet
  *              showdown reads it never had.
- *
- * 1.2.0 - The live coach picks its line for the DECISION, not just the player.
- *            - currentExploitTip took buildExploitPlan(p)[0] — the villain's
- *              biggest leak overall — and printed it whatever hero faced, so
- *              a river shove could still be met with "c-bet every flop you
- *              take the lead in". True about the player, useless about the
- *              spot. Entries now carry an optional `when` list of context
- *              tokens (preflop/flop/turn/river/postflop/facing/lead) and the
- *              tip is scored across EVERY entry rather than just the top one.
- *            - Relevance is a BOOST (+60) and a penalty (-45), never a filter:
- *              a filter would leave the panel silent in spots no rule covers,
- *              and a general read beats no read. The values sit deliberately
- *              between two properties test/coach-relevance.test.js pins from
- *              both sides — a matched rule must win a close call, but must not
- *              bury an always-relevant state read like tilt.
- *            - Per-street foldPct is finally read. streetRates has computed it
- *              since per-street stats were added and NOTHING consumed it — the
- *              fourth already-collected stat found unreported in this file. It
- *              is also the most directly actionable: "folds 64% of turns"
- *              names the street to fire at.
- *            - New reads wired in from 1.1.0's data: postflop re-raise (do
- *              they attack bets, or is a raise from them the nuts), limp-3bet
- *              as a hard fold trigger, and the 3-bet showdown range, which is
- *              the read that decides whether you can 4-bet or have to fold.
  *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
@@ -155,7 +153,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.4.0';
+  const HUD_VERSION = '1.5.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -737,6 +735,55 @@
 
   function resetAllData() {
     STORE = emptyStore({ ...STORE.settings });
+    saveStore();
+  }
+
+  // Zero every profit/loss figure and NOTHING else.
+  //
+  // P/L is the one number that can be wrong on its own: an unsettled hand or a
+  // parse gap corrupts the money while hand counts, rates, showdown ranges and
+  // history stay perfectly good. Schema 2's migration wiped exactly these
+  // fields for exactly this reason — "Reset all data" to fix a money figure
+  // throws away the expensive data to repair the cheap one.
+  //
+  // Chips and BB are cleared together, always. Leaving one would leave the
+  // Stats tab quoting two disagreeing results for the same player.
+  function resetProfitLoss() {
+    Object.keys(STORE.players || {}).forEach((xid) => {
+      const p = STORE.players[xid];
+      if (!p) return;
+      p.plChipsEst = 0;
+      p.plBBEst = 0;
+    });
+    STORE.hero.netChips = 0;
+    STORE.hero.netBB = 0;
+    STORE.hero.bbHands = 0;
+    STORE.session.net = 0;
+    saveStore();
+  }
+
+  // Reset HERO's own numbers, leaving every opponent untouched.
+  //
+  // Clears TWO records deliberately. If name resolution ever failed, hero's
+  // actions accrued to a `name:<username>` pseudo-record while `hands` accrued
+  // to the real seat record — and that split is precisely what makes your own
+  // VPIP read low while everyone else's looks right. Resetting one and not the
+  // other would leave the wrong half in place and the symptom unchanged. The
+  // pseudo-record is deleted rather than emptied: it should not exist at all,
+  // and an empty one would just be pruned later as a mystery.
+  //
+  // Hand HISTORY is deliberately not touched. Those hands are shared with every
+  // opponent in them, so discarding 500 hands that still describe everybody
+  // else in order to reset one player's counters is a bad trade.
+  function resetHeroStats() {
+    if (!heroUnresolved() && heroXid && STORE.players[heroXid]) {
+      STORE.players[heroXid] = emptyPlayer(heroXid, STORE.players[heroXid].name);
+    }
+    const uname = (STORE.settings.heroName || '').trim();
+    if (uname && STORE.players['name:' + uname]) delete STORE.players['name:' + uname];
+    STORE.hero = { hands: 0, netChips: 0, netBB: 0, bbHands: 0 };
+    STORE.session.hands = 0;
+    STORE.session.net = 0;
     saveStore();
   }
 
@@ -6632,6 +6679,15 @@
       <textarea class="tph-import" placeholder="Paste JSON to import"></textarea>
       <button class="tph-do-import">Import</button>
       <br><br>
+      <!-- Narrow resets sit ABOVE the total one, and say what they keep. The
+           only button here used to be "Reset all data", so fixing a wrong P/L
+           figure meant discarding every stat, showdown range and hand in the
+           store. -->
+      <button class="tph-reset-pl">Reset P/L only</button>
+      <button class="tph-reset-hero">Reset my stats</button>
+      <div class="tph-stat-legend">P/L only: zeroes every money figure, keeps all stats, ranges and history.
+        My stats: zeroes your own counters and P/L, keeps every opponent and all hand history.</div>
+      <br>
       <button class="tph-reset">Reset all data</button>
     `,
     });
@@ -6818,6 +6874,16 @@
       const text = panel.querySelector('.tph-import').value;
       try { importJson(text); renderSettingsPanel(); } catch (e) { alert('Invalid JSON'); }
     });
+    panel.querySelector('.tph-reset-pl').addEventListener('click', () => {
+      if (confirm('Zero every profit/loss figure?\n\nKeeps all stats, showdown ranges and hand history. Cannot be undone.')) {
+        resetProfitLoss(); renderSettingsPanel(); renderBadges();
+      }
+    });
+    panel.querySelector('.tph-reset-hero').addEventListener('click', () => {
+      if (confirm('Reset YOUR own stats and P/L?\n\nEvery opponent and all hand history is kept. Cannot be undone.')) {
+        resetHeroStats(); renderSettingsPanel(); renderBadges();
+      }
+    });
     panel.querySelector('.tph-reset').addEventListener('click', () => {
       if (confirm('Reset all tracked player data? This cannot be undone.')) { resetAllData(); renderSettingsPanel(); }
     });
@@ -6941,6 +7007,30 @@
       + (domPot != null && currentHand && currentHand.pot > 0 && Math.abs(domPot - currentHand.pot) > domPot * 0.02
         ? '  <-- MISMATCH' : ''));
     L.push('heroXid: ' + (heroXid || 'NOT RESOLVED') + ' — ' + (heroProblem() || 'ok'));
+    // Hero's own counters, and whether a `name:<username>` pseudo-record exists
+    // beside them.
+    //
+    // `heroXid: ok` does NOT clear this: hero identity resolves off the self___
+    // seat marker and never touches the username, while hero's LOG lines still
+    // go through nameToXidGuess. If those ever resolve by name instead of by
+    // seat id, `hands` accrues to the real record and vpip/pfr accrue to the
+    // pseudo one. The only symptom is "my own VPIP looks too low" — every
+    // opponent reads correctly, so nothing points at identity.
+    //
+    // A ghost line here is the whole diagnosis. Two records, one player.
+    (() => {
+      const uname = (STORE.settings.heroName || '').trim();
+      const real = (!heroUnresolved() && heroXid) ? STORE.players[heroXid] : null;
+      const ghost = uname ? STORE.players['name:' + uname] : null;
+      L.push('heroRecord: ' + (real
+        ? `${real.hands} hands, vpip ${real.vpip}, pfr ${real.pfr}`
+        : 'NONE — hero has no seat record'));
+      L.push('heroGhost(name:' + (uname || 'UNSET') + '): ' + (ghost
+        ? `EXISTS — ${ghost.hands} hands, vpip ${ghost.vpip}, pfr ${ghost.pfr}   <-- SPLIT IDENTITY`
+        : 'none'));
+      L.push('STORE.hero: ' + STORE.hero.hands + ' hands, bbHands ' + STORE.hero.bbHands
+        + (real && Math.abs(STORE.hero.hands - real.hands) > 2 ? '   <-- DISAGREES WITH heroRecord' : ''));
+    })();
     L.push('');
 
     L.push('--- SELECTOR ALTERNATIVES (each tested separately) ---');

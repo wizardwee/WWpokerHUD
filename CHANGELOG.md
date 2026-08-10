@@ -9,6 +9,51 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.5.0
+
+Narrow resets, and a diagnostic for a split hero identity.
+
+**Two narrower reset buttons.** "Reset all data" was the only one, so
+correcting a wrong money figure meant discarding every stat, showdown
+range and hand in the store — throwing away the expensive data to repair
+the cheap one.
+
+`resetProfitLoss()` zeroes every money figure and nothing else:
+`plChipsEst` and `plBBEst` on every player, `hero.netChips`,
+`hero.netBB`, `hero.bbHands`, `session.net`. Exactly the fields schema
+2's migration wiped, for exactly the same reason — P/L is the one number
+that can be wrong on its own, because an unsettled hand or a parse gap
+corrupts the money while hand counts, rates, showdown ranges and history
+stay good. Chips and BB are always cleared together; leaving one would
+have the Stats tab quoting two disagreeing results for the same player.
+
+`resetHeroStats()` zeroes hero's own counters and keeps every opponent
+and all hand history — those hands still describe everybody else in
+them. It clears **two** records: the real seat record, and any
+`name:<username>` pseudo-record, which is deleted rather than emptied
+since it should not exist at all and an empty one would just be pruned
+later as a mystery. If name resolution ever failed for hero, actions
+accrued to the pseudo record while `hands` accrued to the real one, so
+clearing only one half would leave the symptom exactly where it was.
+
+**A diagnostic for that split.** The deep scan now prints `heroRecord`,
+`heroGhost` and `STORE.hero` together, and flags a disagreement between
+the first and third.
+
+This is worth having because `heroXid: ok` does **not** rule the split
+out, which makes it genuinely hard to see: hero identity resolves off the
+`self___` seat marker and never touches the configured username, while
+hero's *log lines* still go through `nameToXidGuess`. If those resolve by
+name rather than by seat id, `hands` lands on the real record and
+`vpip`/`pfr` land on the pseudo one. The only symptom is "my own VPIP
+looks too low" while every opponent reads correctly — so nothing points
+at identity, which is where the cause actually is.
+
+Verified without Node (still not installed here): parses clean in
+JavaScriptCore via JXA; every new button confirmed to have both markup
+and a bound handler, and both reset functions confirmed defined and
+called. The full suite has NOT been run.
+
 ## 1.4.0
 
 **P/L was silently lost on every pot won without a showdown.** This is the
