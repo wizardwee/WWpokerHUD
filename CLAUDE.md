@@ -283,6 +283,43 @@ depend on reads already flagged as imperfect (position, and whether an all-in
 was really a call), and a wrong token silently promotes wrong advice — worse
 than advice that is merely general.
 
+## The report has one source, two renderings (v1.3.0)
+
+`buildReportSections(xid)` is the data; `buildReport` renders it to plain text
+for the clipboard and `buildReportHtml` to markup for the screen. **Don't add a
+third rendering that builds its own strings** — the copied report and the
+displayed one describing the same player differently is exactly what this split
+prevents, and it is the same rule `formatHand` follows for the History tab.
+
+Each item carries `text` (the observation) and optional `act` (the action).
+They used to be one sentence, and that is precisely what made the report an
+unreadable wall on a phone: *"Folds to c-bets 68% (14 samples) — c-betting into
+them prints; fire the flop with anything."* Split, the numbers skim and the
+action stands out. Keep them separate when adding rules.
+
+Every `tph-rep-*` class declares its own colour. `pinTextColor` skips `tph-`
+elements, so an undeclared one renders dark-on-dark — the v0.18.2 bug, which
+this tab would hit hardest because it is nearly all text.
+
+## A thin sample is flagged, not withheld (v1.3.0)
+
+`currentExploitTip()` used to skip any player under `minHands`, which left the
+seat you know **least** about as the only one the coach said nothing about.
+It now returns the read with `provisional: true` and a −200 score penalty.
+
+Why this is safe rather than reckless: the frequency rules inside
+`buildExploitPlan` carry their own sample gates (`n >= 20`, `foldToCbetOpp >= 8`,
+`betSizeCount >= BET_SIZE_MIN`), so a new player surfaces only what is valid
+early — tilt, a stuck stack, a limp-3bet, what they have shown down. **If you
+add a rule that needs volume, gate it inside the rule**, not by reinstating the
+outer gate.
+
+−200 is chosen to sit below any solid read on another live opponent but above
+the +1000 aggressor bonus: whoever is driving the action is still who you are
+deciding against, however little you have seen of them. The coach marks it
+`new · Nh` between name and read; the pill uses a trailing `?`, matching the
+badge's existing convention for a provisional archetype.
+
 ## Review findings still open (v0.14.0)
 
 Reviewed and deliberately left, in rough priority order. Also listed in the

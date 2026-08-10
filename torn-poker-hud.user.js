@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.2.0
+// @version      1.3.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,28 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.3.0 - Two readability fixes, both reported from live play.
+ *            - The coach no longer goes silent on a player under minHands. It
+ *              shows the read and marks it "new · Nh" instead, ranked below a
+ *              well-sampled one (-200) but never below the aggressor bonus. The
+ *              frequency rules carry their own sample gates, so a new player
+ *              surfaces only what IS valid early — tilt, a stuck stack, a
+ *              limp-3bet, what they have shown down. The old gate left the seat
+ *              you know least about as the only one the coach said nothing
+ *              about. The pill marks it with a trailing "?", matching the
+ *              badge's existing convention for a provisional read.
+ *            - The player Report was a single <pre> of prose and unreadable on
+ *              a phone. It is now sectioned (Preflop / Postflop / Sizing &
+ *              showdown / Your results / Notes) with each item splitting the
+ *              OBSERVATION from the ACTION — those used to be one long
+ *              sentence, which is what made it a wall. Actions are green and
+ *              indented behind an arrow so the numbers can be skimmed.
+ *              buildReportSections is the single source: the screen gets
+ *              markup, the clipboard keeps plain text, so the two cannot drift
+ *              into different descriptions of one player. Report also picked up
+ *              the per-street fold, postflop re-raise, limp-3bet and 3-bet
+ *              showdown reads it never had.
  *
  * 1.2.0 - The live coach picks its line for the DECISION, not just the player.
  *            - currentExploitTip took buildExploitPlan(p)[0] — the villain's
@@ -73,36 +95,6 @@
  *              PFR carry one: player.recent stores three bits per hand, so
  *              nothing else can be windowed, and those rows show lifetime alone
  *              rather than repeating it under a "recent" heading.
- *
- * 1.0.1 - Role badges (PFR/3B/DONK/RR) — and the stats and P/L behind them —
- *          stopped working for most seats in 1.0.0. Two faults in one line: the
- *          boundary check added to nameToXidGuess's fallback pass.
- *            - It was a regex LOOKBEHIND, which is a SyntaxError at CONSTRUCTION
- *              time on JavaScriptCore before Safari 16.4 — the engine behind
- *              Torn PDA's WKWebView on older iOS. It sits in the log-parse hot
- *              path with no try/catch above it, so the whole parse tick died
- *              rather than merely failing to match. Replaced by
- *              containsNameToken, an index scan: same semantics, no engine
- *              dependency. test/name-boundary.test.js now scans the source to
- *              stop a lookaround coming back, since no device here can catch it.
- *            - It tested seat.textContent, which concatenates child elements
- *              with NO separator ("Bob$41,200,000Sitting out"). A boundary check
- *              then correctly rejects a name glued to a following letter —
- *              correct, and still a failed resolution. nameToXidGuess now tries
- *              seatDisplayName (the seat's own name element, USERNAME_RE
- *              validated) BEFORE the fuzzy pass, so the blob is a last resort
- *              rather than the path most seats take.
- *          Both faults returned the 'name:' pseudo-id, which never equals the
- *          numeric XID renderBadges reads off the seat — so the chip silently
- *          never rendered and stats/P/L accrued to pseudo-records. Same failure
- *          mode as 0.20.0's, reached by a different route.
- *          The 1.0.0 test could not have caught either: it re-implemented the
- *          regex and tested that copy, so it could not fail when the original
- *          was wrong. It now drives the real exported function, and the fixtures
- *          that were all helpfully delimited by '$' or a space are joined by
- *          ones that aren't.
- *          escapeRegexLiteral is deleted — it existed only to feed the pattern
- *          that is now gone.
  *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
@@ -166,7 +158,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.2.0';
+  const HUD_VERSION = '1.3.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -4581,7 +4573,13 @@
     // happened to be checked first.
     const tip = currentExploitTip();
     if (tip) {
-      out.push(`⚡ <b>${escapeHtml(playerDisplayName(tip.xid))}</b> — `
+      // The "new" marker sits BETWEEN the name and the read, so it is seen
+      // while deciding whether to trust the line rather than as a footnote
+      // after it has already been acted on. Hand count included because "new"
+      // alone doesn't distinguish 2 hands from 19.
+      const isNew = tip.provisional
+        ? `<span class="tph-tip-new">new · ${tip.hands}h</span> ` : '';
+      out.push(`⚡ <b>${escapeHtml(playerDisplayName(tip.xid))}</b> ${isNew}— `
         + `${escapeHtml(squish(tip.entry.text, 150))}`);
     }
     return out.filter(Boolean);
@@ -4908,6 +4906,13 @@
   const EXPLOIT_RELEVANT_BONUS = 60;
   const EXPLOIT_IRRELEVANT_PENALTY = 45;
 
+  // A read on a player under `minHands` is shown, flagged, and ranked below a
+  // well-sampled one. Big enough that any solid read on another live opponent
+  // outranks a thin one, small enough that it never beats the +1000 aggressor
+  // bonus — the player driving the action is still who you are deciding
+  // against, however little you have seen of them.
+  const EXPLOIT_PROVISIONAL_PENALTY = 200;
+
   function currentExploitTip() {
     const hand = currentHand;
     if (!hand) return null;
@@ -4921,7 +4926,16 @@
     for (const xid of order) {
       if (!xid || isHeroRecord(xid)) continue;
       const p = STORE.players[xid];
-      if (!p || p.hands < STORE.settings.minHands) continue;
+      if (!p) continue;
+      // Under minHands the read is FLAGGED, not withheld. The frequency rules
+      // in buildExploitPlan already carry their own sample gates (n >= 20,
+      // foldToCbetOpp >= 8, betSizeCount >= BET_SIZE_MIN and so on), so a
+      // genuinely new player surfaces only the reads that are valid early —
+      // tilt, a stack that is stuck, a limp-3bet, what they have shown down.
+      // Those are exactly the reads worth having on someone you have just met,
+      // and the old hard gate left the seat you know LEAST about as the only
+      // one the coach would say nothing at all about.
+      const provisional = p.hands < STORE.settings.minHands;
       // EVERY entry, not just the highest-gain one. Taking [0] is what let the
       // panel offer "c-bet every flop you take the lead in" while hero was
       // facing a river shove: the player's biggest overall leak is frequently
@@ -4933,8 +4947,11 @@
         // has already folded out of the decision is not more useful.
         const score = entry.gain
           + (rel > 0 ? EXPLOIT_RELEVANT_BONUS : rel < 0 ? -EXPLOIT_IRRELEVANT_PENALTY : 0)
+          + (provisional ? -EXPLOIT_PROVISIONAL_PENALTY : 0)
           + (xid === hand.lastAggressor ? 1000 : 0);
-        if (!best || score > best.score) best = { xid, entry, score, relevant: rel > 0 };
+        if (!best || score > best.score) {
+          best = { xid, entry, score, relevant: rel > 0, provisional, hands: p.hands };
+        }
       }
     }
     return best;
@@ -4953,64 +4970,164 @@
         + `<span class="tph-plan-txt">${escapeHtml(e.text)}</span></div>`).join('');
   }
 
-  function buildReport(xid) {
+  // The report as structured SECTIONS, rendered two ways: plain text for the
+  // clipboard, markup for the screen. Same split as buildExploitPlan /
+  // buildExploitHtml, and for the same reason the History tab keeps it — the
+  // copied text and the displayed text must not drift into two descriptions of
+  // one player.
+  //
+  // Each item separates the OBSERVATION from the ADVICE (`act`). They used to
+  // be one sentence — "Folds to c-bets 68% of the time (14 samples) — c-betting
+  // into them prints; fire the flop with anything" — which is the thing that
+  // made the report a wall of prose. Split, the numbers can be skimmed and the
+  // actions stand out, which is how it is actually read mid-session.
+  function buildReportSections(xid) {
     const p = STORE.players[xid];
-    if (!p) return 'No data yet for this player.';
+    if (!p) return null;
     const r = computeRates(p);
-    const lines = [];
-    lines.push(`${p.name} — ${p.hands} hands observed, ${classify(p)}.`);
+    const secs = [];
+    const sec = (title) => { const s = { title, items: [] }; secs.push(s); return s; };
+    const add = (s, text, act) => { if (text) s.items.push({ text, act: act || null }); };
+
+    const head = sec(null); // untitled lead block
+    add(head, `${p.name} — ${p.hands} hands observed, ${classify(p)}.`);
     if (p.hands < STORE.settings.minHands) {
-      lines.push(`Fewer than ${STORE.settings.minHands} hands observed — read with caution.`);
+      head.items.push({
+        text: `Fewer than ${STORE.settings.minHands} hands observed — read with caution.`,
+        act: null,
+        warn: true,
+      });
     }
-    if (r.vpip != null) lines.push(`Plays ${r.vpip > 30 ? 'very wide' : r.vpip > 20 ? 'moderately wide' : 'tight'} preflop (VPIP ${fmtPct(r.vpip)}).`);
+
+    const pre = sec('Preflop');
+    if (r.vpip != null) {
+      add(pre, `Plays ${r.vpip > 30 ? 'very wide' : r.vpip > 20 ? 'moderately wide' : 'tight'} `
+        + `preflop (VPIP ${fmtPct(r.vpip)}, pool ${POOL_AVG.vpip.toFixed(0)}%).`);
+    }
     if (r.pfr != null && r.vpip) {
       const ratio = r.pfr / r.vpip;
-      lines.push(ratio > 0.6 ? 'Mostly raises rather than limps/calls preflop.' : 'Often just calls preflop rather than raising.');
+      add(pre, ratio > 0.6
+        ? `Mostly raises rather than limps or calls (PFR ${fmtPct(r.pfr)}).`
+        : `Often just calls preflop rather than raising (PFR ${fmtPct(r.pfr)}).`);
     }
     if (r.limpShareOfVpip != null && p.limpMade > 0) {
       const share = r.limpShareOfVpip;
-      lines.push(`Limps into ${fmtPct(r.limp)} of hands — ${fmtPct(share)} of the pots they enter `
-        + `(pool average ${POOL_AVG.limpShareOfVpip}%). `
-        + (share > POOL_AVG.limpShareOfVpip + 12
-          ? 'A habitual limper: isolate them wide in position, and expect a capped range when they just call.'
-          : share < POOL_AVG.limpShareOfVpip - 15
-            ? 'Rarely limps — when they enter, they raise, so their calling range is genuinely a calling range.'
-            : 'About average for this pool.'));
+      add(pre, `Limps ${fmtPct(r.limp)} of hands — ${fmtPct(share)} of the pots they enter `
+        + `(pool ${POOL_AVG.limpShareOfVpip}%).`,
+      share > POOL_AVG.limpShareOfVpip + 12
+        ? 'Habitual limper: isolate wide in position, and expect a capped range when they only call.'
+        : share < POOL_AVG.limpShareOfVpip - 15
+          ? 'Rarely limps, so when they call it is a genuine calling range.'
+          : null);
     }
-    if (r.cbet != null) lines.push(`Continuation-bets ${fmtPct(r.cbet)} of flop opportunities.`);
+    if (r.limpRaiseCount >= 1) {
+      add(pre, `Has limp-3bet ${r.limpRaiseCount} time${r.limpRaiseCount === 1 ? '' : 's'}.`,
+        r.limpRaiseCount >= 2
+          ? 'Almost nobody does this light — if they limp then re-raise, fold everything marginal.'
+          : null);
+    }
+    if (r.foldTo3Bet != null) {
+      add(pre, `Folds to 3-bets ${fmtPct(r.foldTo3Bet)} (${p.foldTo3BetOpp} samples, pool ${POOL_AVG.foldTo3Bet}%).`,
+        r.foldTo3Bet > 65 ? '3-bet them light — their opens are close to free money.'
+          : r.foldTo3Bet < 40 ? '3-bet for value only; they will not give up their opens.' : null);
+    }
+
+    const post = sec('Postflop');
+    if (r.cbet != null) add(post, `Continuation-bets ${fmtPct(r.cbet)} of flop opportunities.`);
     if (r.foldToCbet != null) {
-      lines.push(`Folds to continuation bets ${fmtPct(r.foldToCbet)} of the time (${p.foldToCbetOpp} samples) — `
-        + (r.foldToCbet > 60 ? 'c-betting into them prints; fire the flop with anything.'
-          : r.foldToCbet < 40 ? 'they do not fold flops — c-bet for value, not as a bluff.'
-            : 'defends flops at roughly a normal rate.'));
+      add(post, `Folds to c-bets ${fmtPct(r.foldToCbet)} (${p.foldToCbetOpp} samples, pool ${POOL_AVG.foldToCbet}%).`,
+        r.foldToCbet > 60 ? 'C-betting into them prints — fire the flop with anything.'
+          : r.foldToCbet < 40 ? 'They do not fold flops. C-bet for value, never as a bluff.' : null);
     }
-    if (r.foldTo3Bet != null) lines.push(`Folds to 3-bets ${fmtPct(r.foldTo3Bet)} of the time (${p.foldTo3BetOpp} samples) — ${r.foldTo3Bet > 65 ? 'treat continuation bets/3-bets here as close to free' : 'defends 3-bets reasonably often'}.`);
-    if (r.afq != null) lines.push(`Aggression frequency postflop: ${fmtPct(r.afq)}.`);
+    if (r.afq != null) add(post, `Aggression frequency ${fmtPct(r.afq)} (folds excluded).`);
     // Per street, because the aggregate hides the most exploitable pattern
     // there is: firing flops and giving up on turns.
     const streetLine = POSTFLOP_STREETS
       .filter((s) => r.byStreet[s].actions >= 5)
       .map((s) => `${s} ${fmtPct(r.byStreet[s].afq)}`);
     if (streetLine.length) {
-      lines.push(`  by street — ${streetLine.join(', ')} (aggression).`);
       const f = r.byStreet.flop.afq;
       const t = r.byStreet.turn.afq;
-      if (f != null && t != null && r.byStreet.turn.actions >= 5 && f - t > 20) {
-        lines.push('  Fires the flop and gives up on the turn — floating the flop and taking it away on the turn is the counter.');
-      }
+      add(post, `By street — ${streetLine.join(', ')}.`,
+        (f != null && t != null && r.byStreet.turn.actions >= 5 && f - t > 20)
+          ? 'Fires the flop then gives up on the turn: float the flop and take it away on the turn.'
+          : null);
     }
+    POSTFLOP_STREETS.forEach((st) => {
+      const b = r.byStreet[st];
+      if (!b || b.foldPct == null || b.actions < 8) return;
+      if (b.foldPct > 60) {
+        add(post, `Folds ${fmtPct(b.foldPct)} of ${st} decisions (${b.actions} actions).`,
+          `Barrel the ${st} — they give it up more than anyone should.`);
+      } else if (b.foldPct < 20) {
+        add(post, `Folds only ${fmtPct(b.foldPct)} of ${st} decisions (${b.actions} actions).`,
+          `Do not bluff the ${st}; bet for value and give up your air.`);
+      }
+    });
+    if (r.postflopRR != null && r.rrSample >= 8) {
+      add(post, `Raises ${fmtPct(r.postflopRR)} of the bets they face (${r.rrSample} spots).`,
+        r.postflopRR > 18 ? 'They attack bets — check strong hands to induce it.'
+          : r.postflopRR < 5 ? 'When they do raise, it is the top of their range. Fold marginal hands.' : null);
+    }
+
+    const show = sec('Sizing & showdown');
     if (r.avgBetPct != null) {
       const sz = r.avgBetPct;
-      lines.push(`Average bet/raise is ${sz.toFixed(0)}% of pot (${p.betSizeCount} sized bets) — `
-        + (sz > 85 ? 'oversizes heavily; often polarised to strong hands or bluffs.'
-          : sz < 45 ? 'consistently small; easy to float and take away later streets.'
-            : 'fairly standard sizing.'));
+      add(show, `Averages ${sz.toFixed(0)}% of pot when betting (${p.betSizeCount} sized bets).`,
+        sz > 85 ? 'Oversized — usually polarised to strong hands or bluffs.'
+          : sz < 45 ? 'Consistently small — float and take it away on a later street.' : null);
     }
-    if (r.wtsd != null) lines.push(`Goes to showdown ${fmtPct(r.wtsd)} of hands played.`);
-    lines.push(`Your estimated result against them: ${fmtSignedMoney(p.plChipsEst)} / ${fmtBB(p.plBBEst)} `
-      + '(estimate — positive means you are up on them).');
-    if (p.notes) lines.push(`Notes: ${p.notes}`);
-    return lines.join('\n');
+    if (r.wtsd != null) {
+      add(show, `Goes to showdown ${fmtPct(r.wtsd)} of hands played.`,
+        r.wtsd > 40 ? 'A station — three-street value, and never try to bluff them off a made hand.'
+          : r.wtsd < 18 ? 'Gives up a lot — barrel more; they fold before the river.' : null);
+    }
+    const shown3 = shownRange(p, 'threebet');
+    if (shown3.length) {
+      const n3 = shown3.reduce((a, e) => a + e.n, 0);
+      add(show, `Shown after 3-betting (${n3}): ${shown3.slice(0, 6).map((e) => e.cls).join(', ')}`
+        + `${shown3.length > 6 ? '…' : ''}. A floor on that range, not all of it.`);
+    }
+
+    const you = sec('Your results');
+    add(you, `Estimated result against them: ${fmtSignedMoney(p.plChipsEst)} / ${fmtBB(p.plBBEst)}.`,
+      null);
+    you.items.push({ text: 'Positive means you are up on them. Multiway pots are attributed, so this is an estimate.', act: null, note: true });
+
+    if (p.notes) {
+      const nt = sec('Notes');
+      add(nt, p.notes);
+    }
+
+    return secs.filter((s) => s.items.length);
+  }
+
+  // Plain text — the clipboard, and any future consumer that isn't a screen.
+  function buildReport(xid) {
+    const secs = buildReportSections(xid);
+    if (!secs) return 'No data yet for this player.';
+    const out = [];
+    secs.forEach((s) => {
+      if (s.title) { out.push(''); out.push(s.title.toUpperCase()); }
+      s.items.forEach((it) => {
+        out.push(it.text);
+        if (it.act) out.push('  -> ' + it.act);
+      });
+    });
+    return out.join('\n').trim();
+  }
+
+  function buildReportHtml(xid) {
+    const secs = buildReportSections(xid);
+    if (!secs) return '<i>No data yet for this player.</i>';
+    return secs.map((s) => `<div class="tph-rep-sec">`
+      + (s.title ? `<div class="tph-rep-h">${escapeHtml(s.title)}</div>` : '')
+      + s.items.map((it) => {
+        const cls = it.warn ? ' tph-rep-warn' : it.note ? ' tph-rep-note' : '';
+        return `<div class="tph-rep-l${cls}">${escapeHtml(it.text)}</div>`
+          + (it.act ? `<div class="tph-rep-act">${escapeHtml(it.act)}</div>` : '');
+      }).join('')
+      + '</div>').join('');
   }
 
   // ===========================================================================
@@ -5057,6 +5174,30 @@
     .tph-state-note { color: #ffd9a0 !important; font-size: 11px; line-height: 1.35;
                       background: rgba(255,192,70,.10); border-bottom: none !important; }
     .tph-self-tilt { color: #ffb3a0 !important; display: block; }
+    /* Player report. Every one of these declares its own colour: pinTextColor
+       SKIPS tph- elements, so an undeclared one is left to Torn's bare rules and
+       renders dark-on-dark (the v0.18.2 bug). The report used to be one <pre>
+       of prose, which is why it was unreadable — the segmentation below is the
+       fix, and the colour only reinforces it.
+       Observation and ACTION are deliberately different colours: the whole
+       point of the rewrite is that you can skim the numbers and still have the
+       thing to do stand out. */
+    .tph-rep-sec { margin: 0 0 10px 0; }
+    .tph-rep-h { color: #8ec5f0 !important; font-size: 10px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .06em; margin: 0 0 3px 0;
+      border-bottom: 1px solid #8ec5f033; padding-bottom: 2px; }
+    .tph-rep-l { color: #dfe5ea !important; font-size: 12px; line-height: 1.4; margin: 2px 0; }
+    .tph-rep-act { color: #9ee6a0 !important; font-size: 12px; line-height: 1.4;
+      margin: 1px 0 5px 10px; padding-left: 7px; border-left: 2px solid #9ee6a055; }
+    .tph-rep-act::before { content: "→ "; }
+    .tph-rep-warn { color: #f0c674 !important; }
+    .tph-rep-note { color: #8d959c !important; font-size: 10px; }
+    /* "new · 6h" beside a villain's name in the coach line. Amber rather than
+       red: a thin sample is a caveat on the read, not a warning about the
+       player. Its own colour is mandatory — pinTextColor skips tph- elements,
+       so an undeclared one renders dark-on-dark (the v0.18.2 bug). */
+    .tph-tip-new { color: #f0c674 !important; font-size: 10px; font-weight: 700;
+      border: 1px solid #f0c67455; border-radius: 3px; padding: 0 3px; white-space: nowrap; }
     /* background/color pinned: we inject into Torn's page, so an inherited or
        lower-specificity colour can be overridden by their stylesheet and leave
        dark text on a dark panel. */
@@ -5833,10 +5974,17 @@
       const icon = '<span class="tph-pill-icon">📖</span>';
       const tip = currentExploitTip();
       if (tip && tip.entry.short) {
+        // Provisional is marked with a trailing "?" rather than the word "new":
+        // the pill is the most width-starved element in the HUD, and "?" is
+        // already this file's convention for a read that is not yet trustworthy
+        // (the badge uses it for a provisional archetype). The full caveat, with
+        // the hand count, is in the tooltip.
         pill.innerHTML = icon
-          + `<span class="tph-pill-tag">${escapeHtml(tip.entry.tag)}</span>`
+          + `<span class="tph-pill-tag">${escapeHtml(tip.entry.tag)}${tip.provisional ? '?' : ''}</span>`
           + `<span class="tph-pill-tip">${escapeHtml(tip.entry.short)}</span>`;
-        pill.title = `${playerDisplayName(tip.xid)} — ${tip.entry.text} (tap to expand, drag to move)`;
+        pill.title = `${playerDisplayName(tip.xid)}`
+          + (tip.provisional ? ` (new — only ${tip.hands} hand${tip.hands === 1 ? '' : 's'} seen)` : '')
+          + ` — ${tip.entry.text} (tap to expand, drag to move)`;
       } else {
         pill.innerHTML = icon + '<span class="tph-pill-tag">Coach</span>';
         pill.title = 'Tap to show the coach — drag to move';
@@ -6161,9 +6309,12 @@
     } else if (openPlayerTab === 'range') {
       body.innerHTML = buildRangeHtml(p);
     } else if (openPlayerTab === 'report') {
+      // Screen gets the sectioned markup; the clipboard keeps the plain text,
+      // both from buildReportSections so they cannot describe the same player
+      // two different ways. Same rule the History tab follows.
       const text = buildReport(openPlayerXid);
-      body.innerHTML = `<pre style="white-space:pre-wrap;color:#f2f4f6 !important;background:transparent !important">`
-        + `${escapeHtml(text)}</pre><button class="tph-copy-report">Copy report</button>`;
+      body.innerHTML = buildReportHtml(openPlayerXid)
+        + '<button class="tph-copy-report">Copy report</button>';
       body.querySelector('.tph-copy-report').addEventListener('click', () => {
         navigator.clipboard && navigator.clipboard.writeText(text);
       });

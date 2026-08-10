@@ -9,6 +9,59 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.3.0
+
+Two readability fixes, both reported from live play.
+
+**A new player is no longer a silent seat.** `currentExploitTip()` skipped
+anyone under `minHands` entirely, which meant the one opponent you know
+least about was the only one the coach would say nothing at all about.
+It now shows the read and marks it `new · Nh`, ranked 200 below a
+well-sampled read so any solid read on another live opponent outranks it
+— but never below the +1000 aggressor bonus, because the player driving
+the action is still who you are deciding against however little you have
+seen of them.
+
+This is safe because the frequency rules inside `buildExploitPlan`
+already carry their own sample gates (`n >= 20`, `foldToCbetOpp >= 8`,
+`betSizeCount >= BET_SIZE_MIN`). A genuinely new player therefore
+surfaces only the reads that *are* valid early: tilt, a stack that is
+stuck, a limp-3bet, what they have shown down. The coach line puts the
+marker between the name and the read, so it is seen while deciding
+whether to trust the line rather than as a footnote after acting on it.
+The pill uses a trailing `?` instead — it is the most width-starved
+element in the HUD, and `?` is already this file's convention for a
+provisional read (the badge uses it for a provisional archetype).
+
+**The player Report was a wall of prose.** It rendered as a single
+`<pre>` of full sentences, each cramming an observation and its advice
+together: *"Folds to continuation bets 68% of the time (14 samples) —
+c-betting into them prints; fire the flop with anything."* On a phone
+that is unreadable.
+
+It is now sectioned — Preflop / Postflop / Sizing & showdown / Your
+results / Notes — and every item splits the **observation** from the
+**action**. Observations are plain, actions are green, indented and
+behind an arrow, so the numbers can be skimmed and the thing to do still
+stands out. Section headings are small, uppercase and ruled.
+
+`buildReportSections` is the single source. The screen gets markup and
+the clipboard keeps plain text, so the copied report and the displayed
+one cannot drift into two different descriptions of the same player —
+the same rule the History tab already follows for `formatHand`. Every new
+`tph-` class declares its own colour, because `pinTextColor` skips
+`tph-` elements and an undeclared one renders dark-on-dark (the v0.18.2
+bug).
+
+The Report also picked up four reads it never had, all of which existed
+elsewhere by 1.2.0: per-street fold percentages, postflop re-raise,
+limp-3bet, and the 3-bet showdown range.
+
+Verified without Node (still not installed here): parses clean in
+JavaScriptCore via JXA; every text-bearing class checked for a declared
+colour; the clipboard path confirmed still routed through the plain-text
+renderer. The full suite has NOT been run.
+
 ## 1.2.0
 
 The live coach now picks its line for the decision in front of you, not
