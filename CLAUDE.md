@@ -80,6 +80,49 @@ whole, never from the mutated inner span — that alone yielded
 `"called $3,500,000"` with no name, which failed every name-anchored pattern.
 That, not the selectors, was why no stat ever recorded.
 
+## Pattern ORDER is load-bearing: wins before shows (v1.4.0)
+
+`LOG_PATTERNS` is tried in order and the first match wins, so ordering is
+behaviour, not style. **Do not move `wins` back below `shows`.**
+
+Torn writes `Bauderix won $28,500,000 Did not show hand` for a pot taken with
+no reveal. The `shows` pattern is deliberately wide (show/showed/shown/reveals/
+revealed/turns over, because a missed reveal loses a showdown silently) and that
+width matches the bare word **"show" inside "Did not show hand"**. With `shows`
+first, the winner line was consumed as a showdown: the `wins` handler never ran,
+`hand.winners` stayed empty, and `applyHandResults` gates **all** of P/L on
+`hand.winners.length > 0`. Every pot won without a showdown recorded no P/L.
+
+Two reasons this survived a long hunt, both worth internalising:
+
+- **It was intermittent in the way that defeats debugging.** A winner who
+  *shows* produces `won $65,000,000 with [J J]` — no "show", parses as a win,
+  P/L fine. So it worked on some hands and not others.
+- **Nothing appeared in the unmatched list**, because the line *did* match. A
+  clean unmatched list proves every line matched something, **not** that
+  anything matched the right thing. Check what a line matches, not just that it
+  matched — `LOG_PATTERNS` can be driven directly over real scan lines.
+
+It also fed `"Bauderix won $28,500,000 Did not"` to `nameToXidGuess` as a
+username, minting a `name:` pseudo-record that `logAction` counted as a player
+dealt in. Store schema 3 removes those; it drops only `name:` keys whose name
+fails the username pattern, because a genuine pseudo-id holds a valid username
+and must survive.
+
+### migrateStore blocks must be gated on the version migrated FROM
+
+The schema-2 wipe used to run unconditionally — the function checked only that
+*some* migration was due, then always zeroed P/L. Bumping `STORE_VERSION` to 3
+would therefore have wiped the P/L of every already-migrated store as a side
+effect of an unrelated change. Each block is now `if (from < N)`. Keep it that
+way, and add new blocks the same way.
+
+**Do not reference `USERNAME_RE` (or anything declared low in the file) inside
+`migrateStore`.** It runs from `let STORE = loadStore()` near the top, long
+before those bindings initialise; touching one throws a temporal-dead-zone
+`ReferenceError` at load, and in a userscript that means nothing runs at all.
+The schema-3 check inlines its pattern for exactly this reason.
+
 ## Log ingestion: read snapshots, never mutation records (v0.11.0)
 
 `scanLogRows()` reads the text of **every** `logRow` in DOM order and diffs that

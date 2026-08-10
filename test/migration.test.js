@@ -73,6 +73,44 @@ const noPlayers = { version: 1, hero: { netChips: 3 }, session: { net: 3 } };
 T.migrateStore(noPlayers);
 t.eq('absent players map does not throw', noPlayers.session.net, 0);
 
+// --- Schema 3: drop records invented by the winner-line misparse (v1.4.0) ---
+//
+// "Bauderix won $28,500,000 Did not show hand" used to match the `shows`
+// pattern, so the whole clause reached nameToXidGuess as a username and came
+// back as a pseudo-id that logAction counted as a player dealt in. Those keys
+// are removable precisely because the name is not a legal username — a genuine
+// pseudo-id (a player seen before their seat rendered) holds a valid one and
+// must survive, so this cannot just delete every `name:` key.
+
+{
+  const s = {
+    version: 2,
+    players: {
+      311421: { plChipsEst: 5000, hands: 200 },
+      'name:Bauderix': { plChipsEst: 10, hands: 3 },
+      'name:Al-Qaeda': { plChipsEst: 1, hands: 1 },
+      'name:Bauderix won $28,500,000 Did not': { plChipsEst: 0, hands: 7 },
+      'name:Bahn won $44,468,060 Did not': { plChipsEst: 0, hands: 2 },
+    },
+    hero: { netChips: 999999 },
+    session: { net: 4242 },
+  };
+  T.migrateStore(s);
+  t.eq('junk pseudo-record dropped', s.players['name:Bauderix won $28,500,000 Did not'], undefined);
+  t.eq('second junk pseudo-record dropped', s.players['name:Bahn won $44,468,060 Did not'], undefined);
+  t.ok('a legitimate pseudo-record survives', !!s.players['name:Bauderix']);
+  t.ok('a hyphenated username survives (USERNAME_RE allows -)', !!s.players['name:Al-Qaeda']);
+  t.ok('a real numeric record survives', !!s.players['311421']);
+
+  // THE REGRESSION THIS SECTION EXISTS FOR. The schema-2 wipe used to run
+  // unconditionally, so bumping STORE_VERSION to 3 would have re-zeroed the P/L
+  // of every store that had already migrated — destroying good data as a side
+  // effect of an unrelated schema change. Every block must be gated on `from`.
+  t.eq('a v2 store is NOT re-wiped: hero netChips survives', s.hero.netChips, 999999);
+  t.eq('a v2 store is NOT re-wiped: session net survives', s.session.net, 4242);
+  t.eq('a v2 store is NOT re-wiped: opponent P/L survives', s.players['311421'].plChipsEst, 5000);
+}
+
 // --- A fresh store is already current ---------------------------------------
 
 t.eq('emptyStore is stamped current', T.emptyStore().version, T.STORE_VERSION);

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.3.0
+// @version      1.4.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,35 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.4.0 - P/L was silently lost on every pot won WITHOUT a showdown.
+ *          Found by a live deep scan, which printed the winner lines as
+ *          "reveal rows": Torn writes "Bauderix won $28,500,000 Did not show
+ *          hand" when a pot is taken with no reveal, and the deliberately-wide
+ *          `shows` pattern matched the bare word "show" inside "Did not show
+ *          hand". `shows` sat BEFORE `wins`, so the line was consumed as a
+ *          showdown: the wins handler never ran, hand.winners stayed empty,
+ *          and applyHandResults gates ALL of P/L on winners.length > 0.
+ *            - Intermittent in the way that hides a bug: a winner who DOES
+ *              show produces "won $65,000,000 with [J J]", which contains no
+ *              "show", parsed fine, and recorded P/L normally. So P/L worked
+ *              on some hands and vanished on others.
+ *            - Second casualty: nameToXidGuess was handed "Bauderix won
+ *              $28,500,000 Did not" as a username and returned a name: pseudo
+ *              id, which logAction then counted as a player dealt in — junk
+ *              records accumulating in the store.
+ *            - Fixed twice over: `wins` is now tested before `shows`, and the
+ *              shows pattern carries a negative LOOKAHEAD for "did not show"
+ *              so it cannot match whichever order they end up in. Lookahead,
+ *              never lookbehind — see containsNameToken.
+ *            - Store schema 3 removes the junk records. Only name: keys whose
+ *              name is not a legal username are dropped; a genuine pseudo-id
+ *              holds a valid one and survives.
+ *            - migrateStore's schema-2 wipe used to run UNCONDITIONALLY, so
+ *              this very bump would have re-zeroed the P/L of every already
+ *              migrated store. Blocks are now gated on the version migrated
+ *              FROM. The pattern is inlined rather than using USERNAME_RE,
+ *              which is still in its temporal dead zone when loadStore runs.
  *
  * 1.3.0 - Two readability fixes, both reported from live play.
  *            - The coach no longer goes silent on a player under minHands. It
@@ -63,38 +92,6 @@
  *              they attack bets, or is a raise from them the nuts), limp-3bet
  *              as a hard fold trigger, and the 3-bet showdown range, which is
  *              the read that decides whether you can 4-bet or have to fold.
- *
- * 1.1.0 - Preflop ranges are split by RAISE TIER, plus two new stats.
- *            - shownHands.raised was set from countedPfr — "raised at some
- *              point preflop" — so an open and a 3-bet were recorded
- *              identically and averaged into one range that described neither.
- *              hand.preflopTier now records the tier off preflopRaiseEvents at
- *              the moment a player raises (1 open, 2 three-bet, 3+ four-bet),
- *              which is the SAME counter maybeCountThreeBet keys off, so the
- *              tier filed against a showdown cannot disagree with the 3-bet
- *              stat. The Range tab shows Opened / 3-bet / 4-bet+ / Limp-3bet /
- *              Called separately. open is derived by subtraction, so
- *              open+3bet+4bet reconstructs the old "raised" group exactly and
- *              records written before this read wholly as "Opened".
- *            - Limp-3bet: limped and then re-raised the same hand. countedLimp
- *              only ever holds players who acted before any raise, so a raise
- *              from someone in it is unambiguously the trap line. Shown with
- *              its raw count beside the percentage, because it is rare by
- *              nature and "2%" off three hands is not the same claim as off
- *              three hundred. No pool figure exists, so no tick and no verdict.
- *            - Postflop re-raise, with NO new collection: facing a bet is the
- *              only state in which raise/call/fold are possible, so
- *              raise/(raise+call+fold) over streetActions is exactly how often
- *              they raise when bet into. Not split into check-raise vs
- *              raise-of-c-bet — that needs to know whether they checked first,
- *              which streetActions does not record. Withholds rather than
- *              reporting 0% when they have never faced a bet.
- *            - The Stats tab shows recent form beside each lifetime figure, in
- *              the same cell rather than a fourth column (a phone panel has no
- *              room, and 12 colspans would have had to change). Only VPIP and
- *              PFR carry one: player.recent stores three bits per hand, so
- *              nothing else can be windowed, and those rows show lifetime alone
- *              rather than repeating it under a "recent" heading.
  *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
@@ -158,7 +155,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.3.0';
+  const HUD_VERSION = '1.4.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -286,7 +283,7 @@
   const STORAGE_KEY = 'tornPokerHUD_v1';
 
   // Bumped when stored data needs a one-time repair. See migrateStore().
-  const STORE_VERSION = 2;
+  const STORE_VERSION = 3;
 
   const DEFAULT_SETTINGS = {
     minHands: 20,
@@ -644,13 +641,45 @@
   // and holds only a slice of what was played — so wipe P/L and let it
   // reaccumulate. Hand counts, VPIP/PFR and the other rate stats were never
   // touched by that bug, so they are kept.
+  //
+  // Schema 3 (v1.4.0): remove the player records the winner-line misparse
+  // invented. See LOG_PATTERNS — "Bauderix won $28,500,000 Did not show hand"
+  // matched the `shows` pattern, so the whole clause was handed to
+  // nameToXidGuess as a username and came back as a pseudo-id that logAction
+  // then counted as a player dealt into the hand.
   function migrateStore(store) {
-    if ((store.version || 1) >= STORE_VERSION) return;
-    Object.keys(store.players || {}).forEach((xid) => {
-      if (store.players[xid]) store.players[xid].plChipsEst = 0;
-    });
-    store.hero.netChips = 0;
-    store.session.net = 0;
+    const from = store.version || 1;
+    if (from >= STORE_VERSION) return;
+
+    // EVERY block below must be gated on `from`. This one used to run
+    // unconditionally, which meant the next bump of STORE_VERSION — this one —
+    // would have re-zeroed the P/L of every store that had already migrated,
+    // destroying good data as a side effect of an unrelated schema change.
+    if (from < 2) {
+      Object.keys(store.players || {}).forEach((xid) => {
+        if (store.players[xid]) store.players[xid].plChipsEst = 0;
+      });
+      store.hero.netChips = 0;
+      store.session.net = 0;
+    }
+
+    if (from < 3) {
+      // Only pseudo-ids whose name is NOT a valid username are dropped. A real
+      // player first seen before their seat rendered also gets a `name:` key,
+      // holds a legitimate username, and is merged later by noteResolvedName —
+      // those must survive, so this cannot simply delete every `name:` key.
+      //
+      // The pattern is inlined rather than using USERNAME_RE: migrateStore runs
+      // from loadStore() at `let STORE = loadStore()`, which evaluates long
+      // before USERNAME_RE is initialised further down the file. Referencing it
+      // here throws a temporal-dead-zone ReferenceError at load — which, in a
+      // userscript, means nothing runs at all. Keep it a literal.
+      Object.keys(store.players || {}).forEach((key) => {
+        if (key.indexOf('name:') !== 0) return;
+        if (!/^[A-Za-z0-9_\-]{1,20}$/.test(key.slice(5))) delete store.players[key];
+      });
+    }
+
     store.version = STORE_VERSION;
   }
 
@@ -1032,13 +1061,34 @@
     { type: 'flop', re: /^(?:the\s+)?flop\b:?\s*(.+)/i },
     { type: 'turn', re: /^(?:the\s+)?turn\b:?\s*(.+)/i },
     { type: 'river', re: /^(?:the\s+)?river\b:?\s*(.+)/i },
+    // WINS MUST BE TESTED BEFORE SHOWS. Do not reorder these back.
+    //
+    // Torn writes "Bauderix won $28,500,000 Did not show hand" for a pot taken
+    // without a reveal, and the deliberately-widened `shows` pattern below
+    // matches the bare word "show" inside "Did not show hand". With shows
+    // first, that line was consumed as a showdown: the `wins` handler never
+    // ran, hand.winners stayed empty, and applyHandResults gates ALL of P/L on
+    // winners.length > 0 — so every pot won WITHOUT a showdown recorded no
+    // profit or loss whatsoever. It also fed the garbage name
+    // "Bauderix won $28,500,000 Did not" to nameToXidGuess, creating a `name:`
+    // pseudo-record and counting it as a player dealt in.
+    //
+    // It was intermittent in exactly the way that hides a bug: a winner who
+    // SHOWS produces "won $65,000,000 with [J J]", which contains no "show" and
+    // parsed correctly, so P/L worked on some hands and vanished on others.
+    // Confirmed from a live deep scan at v1.1.0.
+    { type: 'wins', re: /^(.+?)\s+w(?:ins?|on)\b(?:\s+the\s+pot)?(?:\s*\$?([\d,]+))?/i },
     // Showdowns read "_AY_  reveals [9♥, 7♠] (Two Pairs: Nines and Sevens)".
     // "reveals" was the confirmed wording, but the pattern only accepted
     // reveal/reveals — "revealed" and "turns over" fell straight through to the
     // unmatched list. A missed reveal costs a showdown from the Range tab
     // silently, so accept every form.
-    { type: 'shows', re: /^(.+?)\s+(?:show(?:s|ed|n)?|reveal(?:s|ed)?|turn(?:s|ed)?\s+over|flip(?:s|ped)?(?:\s+over)?)\s+(.+)/i },
-    { type: 'wins', re: /^(.+?)\s+w(?:ins?|on)\b(?:\s+the\s+pot)?(?:\s*\$?([\d,]+))?/i },
+    //
+    // The leading guard is the second half of the fix above, kept even though
+    // the ordering alone is sufficient: "did not show" must never read as a
+    // reveal, whichever order these end up in. Negative LOOKAHEAD only —
+    // lookbehind is a SyntaxError on older iOS JSC, see containsNameToken.
+    { type: 'shows', re: /^(?!.*\bdid\s+not\s+show\b)(.+?)\s+(?:show(?:s|ed|n)?|reveal(?:s|ed)?|turn(?:s|ed)?\s+over|flip(?:s|ped)?(?:\s+over)?)\s+(.+)/i },
   ];
 
   // Log rows are prefixed with status glyphs; left in place they'd be captured

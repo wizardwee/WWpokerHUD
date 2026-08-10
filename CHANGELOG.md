@@ -9,6 +9,71 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.4.0
+
+**P/L was silently lost on every pot won without a showdown.** This is the
+answer to the long-standing "why does P/L sometimes not get captured"
+question, and it was not any of the theories — it was found by a live
+deep scan, which listed the winner lines under "reveal rows".
+
+Torn writes `Bauderix won $28,500,000 Did not show hand` when a pot is
+taken with no reveal. The `shows` pattern is deliberately wide — it
+accepts show/showed/shown/reveals/revealed/turns over, because a missed
+reveal costs a showdown from the Range tab silently — and that width
+made it match the bare word **"show" inside "Did not show hand"**.
+
+`shows` sat *before* `wins` in `LOG_PATTERNS`, so the line was consumed
+as a showdown. The `wins` handler never ran, `hand.winners` stayed empty,
+and `applyHandResults` gates the entire P/L block on
+`hand.winners.length > 0`. No winner line, no P/L — not wrong figures,
+none at all.
+
+**Why it hid for so long.** It was intermittent in precisely the way that
+defeats debugging: a winner who *does* show produces
+`won $65,000,000 with [J J]`, which contains no "show", parsed correctly,
+and recorded P/L normally. So P/L worked on some hands and vanished on
+others, with nothing in the unmatched-lines list because the line *did*
+match — just as the wrong thing.
+
+**Second casualty.** `nameToXidGuess` was handed
+`"Bauderix won $28,500,000 Did not"` as a username. It came back as a
+`name:` pseudo-id, and `logAction` then added it to `dealtInXids` — so
+every such pot minted a junk player record that counted as a player dealt
+into the hand.
+
+Fixed twice over, because the ordering alone is easy to undo by accident:
+`wins` is now tested before `shows`, **and** the shows pattern carries a
+negative lookahead for "did not show" so it cannot match whichever order
+they end up in. Lookahead only — lookbehind is a `SyntaxError` on older
+iOS JSC (see v1.0.1).
+
+**Store schema 3** removes the junk records. Only `name:` keys whose name
+is not a legal username are dropped; a genuine pseudo-id (a player first
+seen before their seat rendered) holds a valid username and survives,
+so this cannot simply delete every `name:` key.
+
+**A latent data-destroying bug in `migrateStore`, found while adding
+that.** The schema-2 P/L wipe ran *unconditionally* — the function
+checked only whether any migration was needed, then always executed
+schema 2. This very bump to version 3 would therefore have re-zeroed the
+P/L of every store that had already migrated, destroying good data as a
+side effect of an unrelated schema change. Blocks are now gated on the
+version being migrated *from*, and the test asserts a v2 store keeps its
+figures.
+
+The schema-3 pattern is inlined rather than reusing `USERNAME_RE`:
+`migrateStore` runs from `let STORE = loadStore()`, which evaluates long
+before `USERNAME_RE` is initialised further down the file. Referencing it
+there throws a temporal-dead-zone `ReferenceError` at load — which, in a
+userscript, means nothing runs at all.
+
+Verified without Node (still not installed here): the script parses clean
+in JavaScriptCore via JXA; the three winner lines from the scan now parse
+as wins with correct names and amounts; genuine reveals still register as
+showdowns; and 15 migration assertions cover the gating, the junk
+removal, and idempotence. `test/winner-line.test.js` is new and
+`test/migration.test.js` extended. The full suite has NOT been run.
+
 ## 1.3.0
 
 Two readability fixes, both reported from live play.
