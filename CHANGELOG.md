@@ -9,6 +9,44 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.7.0
+
+Three screen-real-estate fixes, all reported from a live table.
+
+**Hero's own badge was blocking the action timer.** At its full lift
+(`SELF_BADGE_LIFT_PX`, five badge-lines, existing since 0.42.0) it cleared the
+name plate and chip figure but sat over the timer. Nudged half a badge-line
+down and ~10 characters right (`SELF_BADGE_DOWN_NUDGE_PX` /
+`SELF_BADGE_RIGHT_NUDGE_PX`, at the badge's own 10px font) — enough to clear
+the timer without giving back enough of the lift to land back on the chip
+figure it exists to avoid.
+
+**Tapping outside a panel now closes it.** `renderPanel` mounts a dim backdrop
+behind the panel whenever `onClose` is given — covers the player panel, the
+players list and Settings, since all three already pass one. A tap fires the
+same `onClose` the ✕ does. The backdrop is torn down with its own
+`tph-backdrop-<marker>` class, never `.tph-panel` or the bare marker, so it
+follows the exact per-panel teardown isolation the panels themselves already
+had (see "Panels go through renderPanel", CLAUDE.md) — one backdrop being
+mounted must not disturb another panel's.
+
+The panel's own outer margin grew from 5% to 8% a side at the same time, so
+there is a real margin to tap outside rather than a 5%-wide sliver against the
+table edge. Paid for by trimming the Stats table's cell padding (4px 3px ->
+3px 2px) and rebalancing its column widths (33/27/40 -> 30/26/44): the label
+column is short static words with room to give up, so the reclaim goes to the
+value and note columns — the two that carry nowrap numbers and can't wrap onto
+a second line.
+
+**The Stats tab's "By street — aggr/fold" section moved above "Stack this
+sitting."** It's read far more often and used to sit below the stack bar,
+tables-played and last-seen sections, requiring a scroll to reach.
+
+8 new assertions in `test/panel.test.js` cover backdrop creation, the
+click-closes behaviour, and that one panel's backdrop survives another panel
+opening and closing — the same isolation property the original panel teardown
+tests lock down for the panels themselves.
+
 ## 1.6.0
 
 Hero's own VPIP really was split across two records. Root cause found from a

@@ -66,4 +66,38 @@ t.eq('settings still mounted after player panel closes', mountedWith('tph-settin
   t.ok(`${m} is not the shared base class`, m !== 'tph-panel');
 });
 
+// --- Backdrop: tap outside a panel closes it the same way ✕ does -----------
+
+{
+  T.renderPanel({ marker: 'tph-alpha', open: true, html: 'x' });
+  t.eq('backdrop is NOT created when onClose is omitted',
+    mountedWith('tph-backdrop-tph-alpha').length, 0);
+  T.renderPanel({ marker: 'tph-alpha', open: false, html: '' });
+}
+
+{
+  let closed = false;
+  T.renderPanel({ marker: 'tph-beta', open: true, html: 'x', onClose: () => { closed = true; } });
+  const backdrops = mountedWith('tph-backdrop-tph-beta');
+  t.eq('backdrop IS created when onClose is given', backdrops.length, 1);
+  t.ok('backdrop carries the shared backdrop class', backdrops[0].classes().includes('tph-panel-backdrop'));
+  t.ok('the panel itself is not swept up by the backdrop marker',
+    !mountedWith('tph-beta').some((el) => el.classes().includes('tph-panel-backdrop')));
+
+  backdrops[0]._fire('click');
+  t.eq('tapping the backdrop fires onClose', closed, true);
+
+  // Teardown is scoped to this backdrop's OWN marker, same invariant as the
+  // panel itself — opening one panel's backdrop must not disturb another's.
+  T.renderPanel({ marker: 'tph-gamma', open: true, html: 'y', onClose: () => {} });
+  T.renderPanel({ marker: 'tph-beta', open: true, html: 'x2', onClose: () => {} });
+  t.eq('a second panel\'s backdrop survives a third panel opening',
+    mountedWith('tph-backdrop-tph-gamma').length, 1);
+
+  T.renderPanel({ marker: 'tph-beta', open: false, html: '' });
+  t.eq('closing a panel removes its own backdrop', mountedWith('tph-backdrop-tph-beta').length, 0);
+  t.eq('and leaves an unrelated backdrop alone', mountedWith('tph-backdrop-tph-gamma').length, 1);
+  T.renderPanel({ marker: 'tph-gamma', open: false, html: '' });
+}
+
 process.exit(t.report());

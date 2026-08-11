@@ -1143,13 +1143,16 @@ open live-verification items.** Keep the scan itself as the record:
      clear both once this fix is live — going forward hero's own log lines
      resolve correctly, so the numbers won't re-split.
 
-Then back to **screen real estate**, which is reported from the table rather
-than reasoned about. The badge floats over the felt at a fixed size and
-the table does not: a badge that fits at six-handed reaches the community cards
-at nine. `badgeStats: false` is the escape hatch and the constants are gathered
-(`SELF_BADGE_LIFT_PX`, `.tph-badge` max-widths) — but the honest position is
-that nobody working on this can see the layout, so **each adjustment needs one
-report back before the next one.**
+**Screen real estate got three more fixes in v1.7.0**, all reported from a live
+table rather than reasoned about: hero's badge was nudged down and right to
+clear the action timer (`SELF_BADGE_DOWN_NUDGE_PX` / `SELF_BADGE_RIGHT_NUDGE_PX`),
+every panel now closes on an outside tap and got a wider margin to tap in, and
+the Stats tab's "By street" section moved above "Stack this sitting". The
+badge floats over the felt at a fixed size and the table does not — a badge
+that fits at six-handed reaches the community cards at nine — so this is still
+not "done", just the latest report acted on. `badgeStats: false` remains the
+escape hatch, and nobody working on this can see the layout, so **each
+adjustment still needs one report back before the next one.**
 
 An unexploited find worth considering: `SPAN[class*="srOnly_"]` carries the full
 sentence in plain text — `"GhostNote420 checked The river: 4 of hearts"` — with

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.6.0
+// @version      1.7.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,27 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.7.0 - Three screen-real-estate fixes, all reported from a live table.
+ *            - Hero's own badge was blocking the action timer at its full lift.
+ *              Nudged half a badge-line down and ~10 characters right
+ *              (SELF_BADGE_DOWN_NUDGE_PX / SELF_BADGE_RIGHT_NUDGE_PX) — enough
+ *              to clear the timer without giving back enough height to land
+ *              back on the chip figure the lift exists to avoid.
+ *            - Tapping outside the player/settings/players-list panel now
+ *              closes it, the same as the ✕. renderPanel mounts a dim backdrop
+ *              behind the panel whenever onClose is given, torn down with its
+ *              own `tph-backdrop-<marker>` class so it follows the same
+ *              per-panel teardown isolation the panels themselves already had.
+ *              The panel's own margin grew from 5% to 8% a side at the same
+ *              time, so there is a real margin to tap rather than a sliver
+ *              against the table edge — paid for by trimming Stats table cell
+ *              padding and rebalancing its column widths (33/27/40 -> 30/26/44)
+ *              toward the two columns that carry nowrap numbers.
+ *            - The Stats tab's "By street — aggr/fold" section now renders
+ *              before "Stack this sitting" rather than after: it is read far
+ *              more often and used to require scrolling past the stack bar
+ *              to reach.
  *
  * 1.6.0 - Hero's own VPIP really was split across two records, root cause found
  *          from a live deep scan that printed `heroGhost(name:Wonkawee): EXISTS`
@@ -74,28 +95,6 @@
  *              required a code change.
  *            - Net effect: none of 1.0.1-1.5.0's actual runtime behaviour was
  *              wrong. The suite was just unable to say so.
- *
- * 1.5.0 - Narrow resets, and a diagnostic for a split hero identity.
- *            - "Reset all data" was the ONLY reset, so fixing a wrong money
- *              figure meant discarding every stat, showdown range and hand in
- *              the store. Two narrower buttons sit above it now. "Reset P/L
- *              only" zeroes every money figure and nothing else — the same
- *              fields schema 2 wiped, for the same reason: P/L is the one
- *              number that can be wrong on its own while counts, rates and
- *              ranges stay perfectly good. "Reset my stats" zeroes hero's own
- *              counters and keeps every opponent AND all hand history, since
- *              those hands still describe everybody else in them.
- *            - resetHeroStats clears TWO records: the real seat record, and any
- *              `name:<username>` pseudo-record, which is deleted rather than
- *              emptied. If name resolution ever failed for hero, actions
- *              accrued to the pseudo one while `hands` accrued to the real one;
- *              clearing one half would leave the symptom untouched.
- *            - The deep scan prints heroRecord, heroGhost and STORE.hero side
- *              by side. `heroXid: ok` does NOT rule the split out — identity
- *              resolves off the self___ marker and never touches the username,
- *              while hero's log lines still go through nameToXidGuess. The only
- *              symptom is "my own VPIP looks low" while every opponent reads
- *              correctly, so nothing else points at identity.
  *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
@@ -159,7 +158,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.6.0';
+  const HUD_VERSION = '1.7.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -5321,9 +5320,16 @@
     /* background/color pinned: we inject into Torn's page, so an inherited or
        lower-specificity colour can be overridden by their stylesheet and leave
        dark text on a dark panel. */
-    .tph-panel { position: fixed; z-index: 99999; top: 10%; left: 5%; right: 5%; max-height: 80%; overflow-y: auto;
+    .tph-panel { position: fixed; z-index: 99999; top: 10%; left: 8%; right: 8%; max-height: 80%; overflow-y: auto;
       background: #1b1b1f !important; color: #eee !important; border: 1px solid #666; border-radius: 8px; padding: 12px;
       font: 13px/1.4 -apple-system, sans-serif; opacity: 1 !important; }
+    /* Sits behind every .tph-panel, in front of the table. Tapping it fires the
+       same onClose the ✕ does — see renderPanel. The panel itself is a sibling,
+       not a child, so a tap inside the panel never bubbles here. left/right
+       widened from 5% to 8% at the same time so there is a real margin to tap,
+       not a 5%-wide sliver next to the table edge. */
+    .tph-panel-backdrop { position: fixed; inset: 0; z-index: 99998;
+      background: rgba(0,0,0,0.35); }
     .tph-panel h3 { margin: 0 0 8px; font-size: 15px; }
     .tph-panel textarea { width: 100%; height: 90px; background: #111; color: #ddd; border: 1px solid #444; }
     .tph-panel .tph-tabs { display: flex; gap: 6px; margin-bottom: 8px; }
@@ -5344,18 +5350,22 @@
                  border-collapse: collapse; font-size: 12px; }
     .tph-stats th { text-align: left; opacity: .55; font-weight: normal;
                     border-bottom: 1px solid #444; padding: 3px 3px; }
-    .tph-stats td { padding: 4px 3px; border-bottom: 1px solid #2a2a2e;
+    .tph-stats td { padding: 3px 2px; border-bottom: 1px solid #2a2a2e;
                     vertical-align: middle; overflow-wrap: anywhere; }
-    /* Explicit widths for all three columns; they must total 100%. */
-    .tph-stat-l { width: 33%; color: #dfe5ea !important; }
+    /* Explicit widths for all three columns; they must total 100%. Trimmed
+       from 33/27/40 when the panel's own margin grew from 5% to 8% per side —
+       the label column is short static words ("PFR", "Fold v 3B") with room to
+       give up, so the reclaim goes to the value and note columns, the two that
+       carry nowrap numbers and can't wrap onto a second line. */
+    .tph-stat-l { width: 30%; color: #dfe5ea !important; }
     /* Explicit colours, not inherited. pinTextColor deliberately SKIPS anything
        carrying a tph- class, so a tph- cell with no colour of its own is left
        for Torn's bare td rule to darken — the v0.18.2 bug, reintroduced. Any
        new tph- element that holds text needs a colour declared right here.
        Declared BEFORE the .tph-dev-* rules so those win on equal specificity.
        (No backticks in this block: the whole stylesheet is a template literal.) */
-    .tph-stat-v { width: 27%; white-space: nowrap; color: #f2f4f6 !important; }
-    .tph-stat-n { width: 40%; white-space: nowrap; font-size: 11px; color: #aeb6bd !important; }
+    .tph-stat-v { width: 26%; white-space: nowrap; color: #f2f4f6 !important; }
+    .tph-stat-n { width: 44%; white-space: nowrap; font-size: 11px; color: #aeb6bd !important; }
     /* The recent-form figure, shown beside the lifetime one. Declares its own
        colour so it does NOT pick up the .tph-dev-* deviation shading on the
        parent cell — that shading is computed from the lifetime figure, and
@@ -5644,11 +5654,26 @@
   //    the colour walk renders dark-on-dark — the v0.18.2 bug. Callers that
   //    build tab bodies inside wire() get this ordering for free.
   //
+  // A backdrop is mounted behind the panel whenever onClose is given, so a tap
+  // outside the panel closes it the same way the ✕ does. It is torn down with
+  // its OWN marker-derived class (`tph-backdrop-<marker>`), never `.tph-panel`
+  // or the bare marker — giving it the marker class directly would make it
+  // count toward that marker's "is this panel mounted" checks, which is not
+  // what it is.
+  //
   // opts: { marker, open, html, onClose, wire }
   // Returns the panel element, or null when `open` is false.
   function renderPanel(opts) {
     document.querySelectorAll('.' + opts.marker).forEach((el) => el.remove());
+    document.querySelectorAll('.tph-backdrop-' + opts.marker).forEach((el) => el.remove());
     if (!opts.open) return null;
+
+    if (opts.onClose) {
+      const backdrop = document.createElement('div');
+      backdrop.className = 'tph-panel-backdrop tph-backdrop-' + opts.marker;
+      backdrop.addEventListener('click', opts.onClose);
+      document.body.appendChild(backdrop);
+    }
 
     const panel = document.createElement('div');
     panel.className = 'tph-panel ' + opts.marker;
@@ -5690,6 +5715,13 @@
   // the acting seat — so the space that is empty on an opponent's seat is not
   // empty on yours, and the badge was landing on top of that furniture.
   const SELF_BADGE_LIFT_PX = 5 * BADGE_HEIGHT_PX;
+
+  // Nudges off the lifted position above, reported from a live table: at the
+  // full lift the badge sat over the action timer. Half a badge-line down and
+  // ~10 characters right (at the badge's own 10px font) clears it without
+  // giving back enough height to land on the chip figure again.
+  const SELF_BADGE_DOWN_NUDGE_PX = BADGE_HEIGHT_PX / 2;
+  const SELF_BADGE_RIGHT_NUDGE_PX = 60;
 
   // One place each, so the badge tooltip, the players list, the Stats tab and
   // the coach all describe these the same way.
@@ -5930,14 +5962,17 @@
       // sits ABOVE the name rather than under it. See the constant for why your
       // seat needs that and an opponent's doesn't.
       const maxTop = Math.max(0, window.innerHeight - BADGE_HEIGHT_PX);
-      const top = rect.bottom + 1 - (isSelf ? SELF_BADGE_LIFT_PX : 0);
+      const top = rect.bottom + 1
+        - (isSelf ? SELF_BADGE_LIFT_PX - SELF_BADGE_DOWN_NUDGE_PX : 0);
       badge.style.top = Math.min(Math.max(0, top), maxTop) + 'px';
       if (isSelf) {
         // Centred on the seat rather than left-aligned, so it sits over the
         // chip pile instead of hanging off toward the edge. translateX(-50%)
         // does the centring because the badge's own width isn't known until it
-        // is in the DOM.
-        badge.style.left = Math.max(0, rect.left + rect.width / 2) + 'px';
+        // is in the DOM. SELF_BADGE_RIGHT_NUDGE_PX shifts off that centre —
+        // see the constant, this is what clears the action timer.
+        badge.style.left = Math.max(0, rect.left + rect.width / 2
+          + SELF_BADGE_RIGHT_NUDGE_PX) + 'px';
         badge.style.transform = 'translateX(-50%)';
       } else {
         badge.style.left = Math.max(0, rect.left) + 'px';
@@ -6366,6 +6401,10 @@
             Tick = pool average (reference figures, not measured here).
             The blue <span class="tph-stat-rec">· figure</span> is recent form over the last ${STORE.settings.sessionWindow || 15} hands —
             only VPIP and PFR can be windowed, so the rest show lifetime only.</td></tr>
+          <tr class="tph-stat-head"><td colspan="3"><b>By street</b> — aggr / fold</td></tr>
+          ${POSTFLOP_STREETS.map((st) => `<tr><td class="tph-stat-l">${st[0].toUpperCase() + st.slice(1)}</td>`
+            + `<td class="tph-stat-v">${fmtPct(r.byStreet[st].afq)} / ${fmtPct(r.byStreet[st].foldPct)}</td>`
+            + `<td class="tph-stat-n"><span class="tph-stat-norm">${r.byStreet[st].actions} acts</span></td></tr>`).join('')}
           ${stackBarHtml(p)}
           ${(() => {
             const tabs = tablesPlayed(p);
@@ -6387,10 +6426,6 @@
             }
             return html;
           })()}
-          <tr class="tph-stat-head"><td colspan="3"><b>By street</b> — aggr / fold</td></tr>
-          ${POSTFLOP_STREETS.map((st) => `<tr><td class="tph-stat-l">${st[0].toUpperCase() + st.slice(1)}</td>`
-            + `<td class="tph-stat-v">${fmtPct(r.byStreet[st].afq)} / ${fmtPct(r.byStreet[st].foldPct)}</td>`
-            + `<td class="tph-stat-n"><span class="tph-stat-norm">${r.byStreet[st].actions} acts</span></td></tr>`).join('')}
           ${isHeroRecord(openPlayerXid) ? `
           <tr class="tph-stat-head"><td colspan="3"><b>Your results</b></td></tr>
           <tr>
