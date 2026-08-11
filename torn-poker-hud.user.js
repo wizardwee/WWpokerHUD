@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.7.0
+// @version      1.8.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,35 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.8.0 - Shared-affiliation badges: 🔗 same faction, 💍 married, on seats.
+ *            - Deliberately NOT a behavioural collusion detector (raise-pattern
+ *              squeezes, pairwise soft play) — that needs pairwise stats
+ *              maintained for every pair that's ever shared a table, the exact
+ *              O(n²) growth shape open finding #2 already burned this file on
+ *              once. Faction/marriage are objective facts from Torn's own API
+ *              instead, cached PER PLAYER (a handful of scalars: factionId,
+ *              factionName, spouseXid, affilFetchedAt), never per pair — the
+ *              match itself is computed fresh each render from whoever is
+ *              CURRENTLY seated and is never stored, so there is no
+ *              relationship state to grow at all.
+ *            - Needs an optional Torn API key (Settings, public access is
+ *              enough) — the script's first credential besides the GitHub
+ *              token, and follows the exact same rule: added to
+ *              LOCAL_ONLY_SETTINGS, stripped from Backup/Gist exports, empty
+ *              key = the whole feature is a silent no-op. Fetched via the
+ *              existing pdaFetchJson adapter, no new @grant needed.
+ *            - refreshSeatedAffiliations runs on the existing 3s watcher tick
+ *              (same one as harvestSeatNames), gated by a 24h per-player
+ *              staleness check — faction/marriage don't change hand to hand,
+ *              so this costs a handful of calls per session, not one per tick.
+ *            - UNCONFIRMED: the API response field names (faction.faction_id/
+ *              faction_name, married.spouse_id) are written from Torn's
+ *              documented v1 profile shape, not a live response — same as any
+ *              DOM selector in this file, needs a real report back before it's
+ *              trusted. parseAffiliationProfile fails to null rather than
+ *              throwing on anything it doesn't recognise, so a wrong guess
+ *              here costs a missing badge, not a crash.
  *
  * 1.7.0 - Three screen-real-estate fixes, all reported from a live table.
  *            - Hero's own badge was blocking the action timer at its full lift.
@@ -38,41 +67,6 @@
  *              before "Stack this sitting" rather than after: it is read far
  *              more often and used to require scrolling past the stack bar
  *              to reach.
- *
- * 1.6.0 - Hero's own VPIP really was split across two records, root cause found
- *          from a live deep scan that printed `heroGhost(name:Wonkawee): EXISTS`
- *          with 2174 hands tracking almost 1-for-1 against heroRecord's 2571 —
- *          an ACTIVE ongoing split, not stale history. heroRecord's vpip/pfr
- *          (166/89) read far lower than the ghost's (1198/662): nearly every
- *          one of hero's own voluntary preflop actions was landing on the ghost.
- *            - Root cause: nameToXidGuess resolves a log line's actor by
- *              matching seat TEXT (a profile link, the name element, or the
- *              seat's own blob). heroXid itself resolves by a completely
- *              different path — the seat's self___ marker (0.22.0), which never
- *              looks at the username. Nothing guarantees Torn's own seat prints
- *              YOUR username where the text-matching passes look for it the way
- *              it prints an opponent's, so hero's own log lines ("Wonkawee
- *              called $X") failed every pass and fell to the name:Wonkawee
- *              pseudo-id, forever — while dealtInXids/STORE.hero.hands (seat-xid
- *              based, not name-based) kept accruing correctly, which is why the
- *              split showed up only in log-driven stats, never in hand counts.
- *            - Fix: nameToXidGuess now checks FIRST whether heroXid is already
- *              resolved and the name matches the configured username
- *              (case-insensitively) — if so it returns heroXid directly, no
- *              seat text involved. test/name-boundary.test.js pins this: the
- *              harness cannot drive the seat-matching passes at all, which
- *              makes it the right tool to prove this exact path is what
- *              resolves hero's name now.
- *            - The historical ghost data is NOT auto-merged — mergePseudoPlayer
- *              bails once the real record exists, by design, and reconciling
- *              2174 already-split hands risks double-counting against a hand
- *              count that is already complete. Use "Reset my stats" (1.5.0) to
- *              clear both once this is live; going forward the numbers won't
- *              re-split.
- *            - Also confirmed by the same scan, no code changes needed: the
- *              1.4.0 P/L fix (both no-showdown win lines now parse as `wins`,
- *              not `shows`) and SELECTORS.seatState (matched a real sitting-out
- *              player's seat correctly).
  *
  * 1.5.1 - Ran `node test/run.js` for the first time since 1.0.0 — every version
  *          from 1.0.1 through 1.5.0 shipped verified only by a JXA parse-check,
@@ -158,7 +152,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.7.0';
+  const HUD_VERSION = '1.8.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -328,6 +322,10 @@
     equityIters: 1200, // Monte Carlo samples per equity estimate
     tableMax: 9,       // seats at a full table — the baseline equity is always
                        // quoted against a full ring (tableMax - 1 opponents)
+    // Optional. A public-only Torn API key is enough — used solely to look up
+    // faction/marriage on currently seated players (see refreshSeatedAffiliations).
+    // Empty = the feature does nothing, no error, no nag. LOCAL_ONLY_SETTINGS below.
+    tornApiKey: '',
   };
 
   function emptyStore(settings) {
@@ -420,6 +418,15 @@
       betSizeCount: 0,
       notes: '',
       lastSeen: 0,
+      // Cached from a Torn API profile lookup — see refreshSeatedAffiliations.
+      // 0/'' means "none" AND "not fetched yet"; affilFetchedAt is what tells
+      // the two apart (0 = never fetched). Small, fixed-size fields, same
+      // storage profile as everything else here — no per-PAIR data is stored,
+      // only per-player, so this can't grow the way a pairwise stat would.
+      factionId: 0,
+      factionName: '',
+      spouseXid: 0,
+      affilFetchedAt: 0,
     };
   }
 
@@ -710,7 +717,7 @@
   // user-facing Copy button and the Gist upload, so anything left in here would
   // be written into the gist and into any exported JSON that gets pasted
   // somewhere public. Strip secrets at the single choke point.
-  const LOCAL_ONLY_SETTINGS = ['githubToken'];
+  const LOCAL_ONLY_SETTINGS = ['githubToken', 'tornApiKey'];
 
   function sanitizedStore() {
     const settings = { ...STORE.settings };
@@ -969,6 +976,103 @@
       });
     },
   };
+
+  // --- Shared-affiliation lookup (faction / marriage) -------------------------
+  //
+  // A behavioural collusion detector (raise-pattern squeezes, pairwise soft
+  // play) needs pairwise stats maintained for every pair that's ever shared a
+  // table — the exact O(n²) growth shape open finding #2 already burned this
+  // file on once (STORE.players itself, closed in v0.40-0.41). This is the
+  // cheaper alternative: faction and marriage are objective facts Torn's own
+  // API already knows, not an inferred pattern, and the result is cached PER
+  // PLAYER (factionId, spouseXid — a handful of scalars), not per pair. The
+  // "do two players match" check itself is computed fresh at render time from
+  // whoever is CURRENTLY seated, never stored — so there is no relationship
+  // state to grow at all, unlike the whipsaw/soft-play designs this replaced.
+  //
+  // UNCONFIRMED: the v1 `selections=profile` field names below (faction.
+  // faction_id/faction_name, married.spouse_id) are written from the
+  // documented Torn API v1 shape, not a live response — nobody working on
+  // this holds an API key to check one. Same rule as every DOM selector in
+  // this file: verify against a real response before trusting it fully, and
+  // report back what actually came back. parseAffiliationProfile fails
+  // defensively (returns nulls) on anything it doesn't recognise rather than
+  // throwing, so a wrong guess here costs a missing badge, not a crash.
+  function parseAffiliationProfile(json) {
+    if (!json || json.error) return null;
+    const faction = json.faction || {};
+    const married = json.married || {};
+    return {
+      factionId: faction.faction_id || 0,
+      factionName: faction.faction_name || '',
+      spouseXid: married.spouse_id || 0,
+    };
+  }
+
+  // Faction/marriage don't change hand to hand — a day between refetches keeps
+  // this to a handful of calls per session instead of one per seat per tick.
+  const AFFIL_REFRESH_MS = 24 * 60 * 60 * 1000;
+
+  async function fetchAffiliation(xid) {
+    const key = (STORE.settings.tornApiKey || '').trim();
+    if (!key) return; // no key configured — the whole feature is a no-op
+    try {
+      const { json } = await pdaFetchJson('GET',
+        `https://api.torn.com/user/${xid}?selections=profile&key=${encodeURIComponent(key)}`);
+      const parsed = parseAffiliationProfile(json);
+      if (!parsed) return; // bad key, rate-limited, unknown id — try again next window
+      const p = getPlayer(xid);
+      p.factionId = parsed.factionId;
+      p.factionName = parsed.factionName;
+      p.spouseXid = parsed.spouseXid;
+      p.affilFetchedAt = Date.now();
+      saveStore();
+    } catch (e) {
+      // Network hiccup. Never blocks anything — just try again next window.
+    }
+  }
+
+  // Refreshes affiliation data for currently seated opponents whose cache is
+  // missing or stale. Called from the same 3s watcher tick as harvestSeatNames
+  // — cheap enough to run there, and the staleness guard (AFFIL_REFRESH_MS)
+  // means a fetch only actually fires once a day per player, not once a tick.
+  function refreshSeatedAffiliations() {
+    if (!(STORE.settings.tornApiKey || '').trim()) return;
+    // includeSittingOut: renderBadges checks a sitting-out seat's data too
+    // (they're still physically at the table) — fetching only for active
+    // seats would leave an AFK player's cache permanently empty.
+    seatedXids({ includeSittingOut: true }).forEach((xid) => {
+      if (isHeroRecord(xid)) return; // hero's own affiliation isn't the question
+      const p = STORE.players[xid];
+      const stale = !p || !p.affilFetchedAt || (Date.now() - p.affilFetchedAt) > AFFIL_REFRESH_MS;
+      if (stale) fetchAffiliation(xid);
+    });
+  }
+
+  // Which shared-affiliation emoji (if any) apply to `xid`, checked against
+  // every OTHER currently-seated xid — never stored, recomputed each render.
+  // `detail` names who and what, for the badge tooltip; both stay empty when
+  // neither field has been fetched yet (or no key is configured at all).
+  function affiliationFlags(xid, seatedList) {
+    const p = STORE.players[xid];
+    if (!p || (!p.factionId && !p.spouseXid)) return { flags: '', detail: '' };
+    let flags = '';
+    const details = [];
+    seatedList.forEach((other) => {
+      if (String(other) === String(xid)) return;
+      const o = STORE.players[other];
+      if (!o) return;
+      if (p.factionId && o.factionId && p.factionId === o.factionId) {
+        flags = flags.indexOf('🔗') === -1 ? flags + '🔗' : flags;
+        details.push(`same faction as ${playerDisplayName(other)} (${p.factionName || 'faction #' + p.factionId})`);
+      }
+      if (p.spouseXid && String(p.spouseXid) === String(other)) {
+        flags = flags.indexOf('💍') === -1 ? flags + '💍' : flags;
+        details.push(`married to ${playerDisplayName(other)}`);
+      }
+    });
+    return { flags, detail: details.join('; ') };
+  }
 
   // ===========================================================================
   // 4. TABLE STATE CAPTURE
@@ -2991,6 +3095,9 @@
       // that player is seen at a table again.
       harvestSeatNames();
       trackStacks();
+      // No-op with no API key configured; otherwise gated by AFFIL_REFRESH_MS
+      // so this fires network calls at most once a day per seated player.
+      refreshSeatedAffiliations();
     }, 3000);
     harvestSeatNames();
 
@@ -5276,8 +5383,12 @@
     .tph-badge .tph-badge-dim { color: #9fb0bf !important; }
     /* Emoji render wider than the 10px text around them, so they are pulled
        down a size and given the minimum gap that still keeps 🤮🔥 apart. */
-    .tph-badge .tph-badge-tilt, .tph-badge .tph-badge-heat {
+    .tph-badge .tph-badge-tilt, .tph-badge .tph-badge-heat, .tph-badge .tph-badge-affil {
       margin-right: 1px; font-size: 9px; }
+    /* No colour declared here, same as -tilt/-heat above: this is emoji-only
+       content and pinTextColor never walks badges (only .tph-panel content),
+       so there is no dark-on-dark risk to guard against. */
+    .tph-badge .tph-badge-affil { margin-left: 1px; }
     /* This-hand role markers. Deliberately a filled chip rather than more text
        in the badge's own voice — these describe the hand in front of you, not
        the player, and they disappear at settlement. Colour is declared here
@@ -5936,6 +6047,10 @@
     // Computed once for the whole table, not per seat — it walks the action log.
     const roles = STORE.settings.showRoleBadges === false
       ? { pfr: null, tag: null, post: {} } : handRoles(currentHand);
+    // Also once per render, not per seat — affiliationFlags compares against
+    // every OTHER seated xid, so computing the list once avoids an O(seats²)
+    // re-scan of the DOM inside the per-seat loop below.
+    const seatedList = Array.from(seatedXids({ includeSittingOut: true }));
     const seats = document.querySelectorAll(SELECTORS.seatContainer);
     seats.forEach((seat) => {
       const xid = resolveSeatKey(seat);
@@ -5994,6 +6109,10 @@
       // steaming AND getting there.
       const tilt = player ? tiltRead(player) : null;
       const heat = player ? heatRead(player) : null;
+      // 🔗 shares a faction, 💍 married — with another player CURRENTLY seated
+      // here, never a stored relationship. Empty for both when no Torn API key
+      // is configured, so this is a pure no-op absent that setting.
+      const affil = affiliationFlags(xid, seatedList);
       // Always show a TYPE, never just a hand count. Below minHands `classify`
       // returns "Unrated", which told you nothing about the player — the read is
       // the point of the badge. Show the provisional archetype with a "?" so it
@@ -6030,12 +6149,16 @@
       const statsHtml = STORE.settings.badgeStats === false ? ''
         : `<span class="tph-badge-dim">V${badgePct(shown.vpip)}`
           + `P${badgePct(shown.pfr)}A${badgePct(r.afq)}</span>`;
-      badge.innerHTML = hands === 0
+      // Appended outside the hands===0 branch: a faction/marriage match is a
+      // real read even before a single hand has been tracked on this player.
+      const affilHtml = affil.flags ? `<span class="tph-badge-affil">${affil.flags}</span>` : '';
+      badge.innerHTML = (hands === 0
         ? `${roleHtml}<b>NEW</b>`
         : roleHtml
           + `${tilt ? '<span class="tph-badge-tilt">🤮</span>' : ''}`
           + `${heat ? '<span class="tph-badge-heat">🔥</span>' : ''}<b>${type}</b>`
-          + statsHtml;
+          + statsHtml)
+        + affilHtml;
       badge.title = `${isSelf ? 'You' : playerDisplayName(xid)} — ${hands} hand(s) seen. `
         + (roleTag ? roleTagText(roleTag) + ' ' : '')
         + 'V = VPIP (hands played), P = PFR (raised preflop), A = AFq (postflop aggression). '
@@ -6052,6 +6175,7 @@
         + (player && player.stack
           ? ` Stack ${fmtMoney(player.stack.now)} (sitting low ${fmtMoney(player.stack.low)}, high ${fmtMoney(player.stack.high)}).`
           : '')
+        + (affil.detail ? ` ⚠ ${affil.detail} — a fact from Torn's own profile data, not proof of anything at this table.` : '')
         + ' Tap for full stats.';
       badge.addEventListener('click', () => openPlayerPanel(xid));
       document.body.appendChild(badge);
@@ -6725,6 +6849,12 @@
       <div style="opacity:.7;margin:2px 0 10px">Drag the ◢ corner to resize the coach panel — it stays where you put
         it, at the size you set, and now stays on screen between hands instead of disappearing.</div>
       <label><input type="checkbox" class="tph-calib-toggle" ${STORE.settings.calibrationMode ? 'checked' : ''}> Calibration mode</label><br><br>
+      <h4>Shared-affiliation badges</h4>
+      <label>Torn API key: <input type="text" class="tph-torn-api-key" value="${escapeHtml(STORE.settings.tornApiKey)}" placeholder="optional, public access is enough" style="width:60%"></label>
+      <div style="opacity:.7;margin:2px 0 10px">🔗 marks two seated players sharing a faction, 💍 marks two married
+        to each other — both are facts from Torn's own profile data, checked only against whoever is CURRENTLY
+        seated, never stored as a relationship between two players. Leave blank and this does nothing; a public-only
+        key is enough, and it never leaves this device (stripped from Backup/Gist exports, same as the GitHub token).</div>
       <h4>GitHub Gist sync</h4>
       <label>OAuth App Client ID: <input type="text" class="tph-client-id" value="${escapeHtml(STORE.settings.githubClientId)}" style="width:70%"></label><br>
       <button class="tph-connect">${GistSync.status === 'connected' ? 'Re-sync now' : 'Connect'}</button>
@@ -6912,6 +7042,10 @@
     });
     panel.querySelector('.tph-client-id').addEventListener('change', (e) => {
       STORE.settings.githubClientId = e.target.value.trim();
+      saveStore();
+    });
+    panel.querySelector('.tph-torn-api-key').addEventListener('change', (e) => {
+      STORE.settings.tornApiKey = e.target.value.trim();
       saveStore();
     });
     panel.querySelector('.tph-connect').addEventListener('click', () => {
@@ -7532,6 +7666,7 @@
       estimateEquityCached,
       opponentRangeProxy,
       equityBasisLabel,
+      parseAffiliationProfile,
       numericHandShorthand,
       cardToNum,
       handToShorthand,
@@ -7675,6 +7810,8 @@
       HISTORY_PINNED_CEILING,
       nameToXidGuess,
       heroUnresolved,
+      affiliationFlags,
+      refreshSeatedAffiliations,
       // Exposed as accessors because STORE and heroXid are rebound, not
       // mutated — a plain reference would freeze at whatever loaded first.
       applyHandResults,

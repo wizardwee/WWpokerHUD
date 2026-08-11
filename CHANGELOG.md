@@ -9,6 +9,55 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.8.0
+
+Shared-affiliation badges: 🔗 marks two seated players in the same faction,
+💍 marks two married to each other.
+
+**Deliberately not a behavioural collusion detector.** The other design on the
+table — raise-pattern squeeze detection, pairwise soft-play reads — needs
+pairwise stats maintained for every pair of players that's ever shared a
+table. That is the exact O(n²) growth shape open finding #2 already burned
+this file on once (`STORE.players` itself, closed in v0.40–0.41). Faction and
+marriage sidestep it entirely: they're objective facts Torn's own API already
+knows, not an inferred pattern, and the result is cached **per player** —
+`factionId`, `factionName`, `spouseXid`, `affilFetchedAt`, a handful of
+scalars, the same storage shape every other player field already has. Whether
+two players *match* is computed fresh at render time from whoever is
+currently seated and is never itself stored, so there is no relationship
+state to grow at all.
+
+**Needs an optional Torn API key** (Settings → "Shared-affiliation badges") —
+a public-access key is enough. This is the script's first credential besides
+the GitHub token, and follows the identical rule: added to
+`LOCAL_ONLY_SETTINGS`, stripped from Backup/Gist exports, and an empty key
+makes the whole feature a silent no-op — no error, no nag, nothing fetched.
+Requests go through the existing `pdaFetchJson` adapter, so no new `@grant` is
+needed.
+
+`refreshSeatedAffiliations()` runs on the same 3s watcher tick as
+`harvestSeatNames`, gated by a 24-hour per-player staleness check —
+faction and marriage don't change hand to hand, so in practice this costs a
+handful of API calls per session, not one per seat per tick.
+
+**Unconfirmed, flagged in the code:** the parsed field names
+(`faction.faction_id`/`faction_name`, `married.spouse_id`) are written from
+Torn's documented API v1 profile shape, not a response anyone working on this
+has actually seen — nobody holds a key to check one live. Same rule as every
+DOM selector in this file: trust it once it's been reported back from a real
+fetch, not before. `parseAffiliationProfile` fails to `null` rather than
+throwing on anything it doesn't recognise, so a wrong guess here costs a
+missing badge, not a crash — and also correctly rejects Torn's `{"error":
+{...}}` shape for a bad/rate-limited key, rather than reading it as "no
+faction, no marriage" and caching a false negative.
+
+19 new assertions in `test/affiliation.test.js` cover the parser (well-formed
+response, missing fields, null/undefined input, the API-error shape) and the
+pure seated-comparison logic (`affiliationFlags`) — matching faction pairs,
+directional marriage data (only the side whose `spouseXid` was fetched shows
+💍), de-duplication when both flags apply, and that nothing about a match is
+persisted between two different seated-list snapshots.
+
 ## 1.7.0
 
 Three screen-real-estate fixes, all reported from a live table.

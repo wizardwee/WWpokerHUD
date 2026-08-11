@@ -1091,6 +1091,47 @@ on the badge. `computeRates` stays **raw** — the Stats tab must show what was
 observed, and shrinkage is for classification only. AFq is deliberately left
 unshrunk because no published pool figure exists for it.
 
+## Shared-affiliation badges, not a behavioural collusion detector (v1.8.0)
+
+HopesG's HUD (see below) does real behavioural collusion detection — raise
+"whipsaw" squeezes between a pair, soft-play read against a pair's *own*
+baseline. Both need **pairwise** stats maintained for every pair of players
+that's ever shared a table. That is the exact O(n²) growth shape open finding
+#2 already burned this file on once, in a worse form than the original: this
+one grows with the number of distinct *pairs* seen, not the number of players.
+
+What shipped instead: 🔗 (same faction) and 💍 (married) on seats, from
+Torn's own API rather than an inferred pattern. The load-bearing design
+choice is **where the state lives**. Faction ID and spouse XID are cached
+**per player** — `factionId`, `factionName`, `spouseXid`, `affilFetchedAt`,
+the same handful-of-scalars shape every other player field already has.
+Whether two players *match* is computed fresh at render time from whoever is
+**currently seated**, via `affiliationFlags(xid, seatedList)`, and is never
+itself stored. There is no relationship state to grow, prune, or migrate —
+if a behavioural detector is ever built on top of this, it should keep that
+same discipline: cache facts per player, compute relationships live.
+
+**Needs an optional Torn API key** (Settings → "Shared-affiliation badges") —
+public access is enough, same tier HopesG's script asks for. This is the
+script's first credential besides the GitHub token and follows the identical
+rule: added to `LOCAL_ONLY_SETTINGS`, stripped from Backup/Gist exports,
+empty key = the feature is a silent no-op. `refreshSeatedAffiliations()` piggybacks
+on the existing 3s watcher tick (same one as `harvestSeatNames`), gated by a
+24-hour per-player staleness check so it costs a handful of API calls per
+session rather than one per seat per tick.
+
+**Unconfirmed, same as any DOM selector in this file.** The parsed field
+names (`faction.faction_id`/`faction_name`, `married.spouse_id`) are written
+from Torn's documented API v1 profile shape, not a response anyone working on
+this has actually seen — nobody holds a key to check one live yet.
+`parseAffiliationProfile` fails to `null` on anything it doesn't recognise
+rather than throwing, including Torn's `{"error": {...}}` shape for a bad or
+rate-limited key — reading that as "no faction, no marriage" would cache a
+false negative that then sits for a full `AFFIL_REFRESH_MS` window. **Needs a
+report from someone who has actually set a key and sat at a table with a
+known faction-mate or spouse**, the same way every selector here got
+confirmed: try it, paste back what the badge (or its absence) actually showed.
+
 ## Next task
 
 **A live deep scan (v1.5.1, from the actual table) closed all three of the
@@ -1153,6 +1194,15 @@ that fits at six-handed reaches the community cards at nine — so this is still
 not "done", just the latest report acted on. `badgeStats: false` remains the
 escape hatch, and nobody working on this can see the layout, so **each
 adjustment still needs one report back before the next one.**
+
+**New in v1.8.0, and needs a live check the same way a selector does:**
+shared-affiliation badges (🔗/💍, see the section above) need a Torn API key
+set in Settings and a real fetch to confirm `parseAffiliationProfile`'s field
+names actually match what `api.torn.com/user/{id}?selections=profile`
+returns. Nobody working on this holds a key. If you set one, the fastest
+check is sitting at a table with someone in your own faction (or your spouse,
+if they play) and confirming the badge lights up — or, failing that, pasting
+back one raw API response so the field names can be checked directly.
 
 An unexploited find worth considering: `SPAN[class*="srOnly_"]` carries the full
 sentence in plain text — `"GhostNote420 checked The river: 4 of hearts"` — with
