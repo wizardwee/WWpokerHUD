@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.9.0
+// @version      1.10.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,26 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.10.0 - Two players-list fixes, both reported straight after 1.9.0 shipped.
+ *            - "Save / share pool tendencies" only calls PDA's native share
+ *              handler, an async OS-level share sheet this webview can't see
+ *              the outcome of — the button's "Sent ✓" just means the handler
+ *              was CALLED, not that anything visibly happened, which read as
+ *              broken on a real device. Added a plain "Copy" button beside it
+ *              that goes straight to the clipboard, no share-sheet detour —
+ *              the same two-button split the per-player History export
+ *              already uses (Copy vs Save/share), just missing here.
+ *            - The players list table is now sortable: tap any header (Name,
+ *              Type, Hands, VPIP/PFR, P/L) to sort by it, tap again to flip
+ *              direction. playersSortValue() decides what each column
+ *              actually sorts on — VPIP/PFR sorts on VPIP alone, since that's
+ *              the leading, more comparable figure; a player with no data for
+ *              a stat sorts as -Infinity, not 0, so "never faced a 3-bet"
+ *              can't land in the middle of players who "always call it"; and
+ *              hero's own P/L (which shows "see Lifetime", not a number)
+ *              sorts to the bottom on that column rather than wherever
+ *              plChipsEst happens to place it.
  *
  * 1.9.0 - Pool tendencies, exportable: observedPoolAverages grew from VPIP/PFR
  *          only to every rate computeRates produces (3-bet, fold-to-3-bet,
@@ -38,35 +58,6 @@
  *            - The export labels AFq and WTSD as having no published pool
  *              figure to compare against, rather than inventing one — same
  *              rule POOL_AVG/POOL_SPREAD already follow everywhere else.
- *
- * 1.8.0 - Shared-affiliation badges: 🔗 same faction, 💍 married, on seats.
- *            - Deliberately NOT a behavioural collusion detector (raise-pattern
- *              squeezes, pairwise soft play) — that needs pairwise stats
- *              maintained for every pair that's ever shared a table, the exact
- *              O(n²) growth shape open finding #2 already burned this file on
- *              once. Faction/marriage are objective facts from Torn's own API
- *              instead, cached PER PLAYER (a handful of scalars: factionId,
- *              factionName, spouseXid, affilFetchedAt), never per pair — the
- *              match itself is computed fresh each render from whoever is
- *              CURRENTLY seated and is never stored, so there is no
- *              relationship state to grow at all.
- *            - Needs an optional Torn API key (Settings, public access is
- *              enough) — the script's first credential besides the GitHub
- *              token, and follows the exact same rule: added to
- *              LOCAL_ONLY_SETTINGS, stripped from Backup/Gist exports, empty
- *              key = the whole feature is a silent no-op. Fetched via the
- *              existing pdaFetchJson adapter, no new @grant needed.
- *            - refreshSeatedAffiliations runs on the existing 3s watcher tick
- *              (same one as harvestSeatNames), gated by a 24h per-player
- *              staleness check — faction/marriage don't change hand to hand,
- *              so this costs a handful of calls per session, not one per tick.
- *            - UNCONFIRMED: the API response field names (faction.faction_id/
- *              faction_name, married.spouse_id) are written from Torn's
- *              documented v1 profile shape, not a live response — same as any
- *              DOM selector in this file, needs a real report back before it's
- *              trusted. parseAffiliationProfile fails to null rather than
- *              throwing on anything it doesn't recognise, so a wrong guess
- *              here costs a missing badge, not a crash.
  *
  * 1.5.1 - Ran `node test/run.js` for the first time since 1.0.0 — every version
  *          from 1.0.1 through 1.5.0 shipped verified only by a JXA parse-check,
@@ -152,7 +143,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.9.0';
+  const HUD_VERSION = '1.10.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -5641,6 +5632,11 @@
     .tph-ptable { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12px; }
     .tph-ptable th { text-align: left; opacity: 0.6; font-weight: normal; border-bottom: 1px solid #444; padding: 3px 4px; }
     .tph-ptable td { padding: 6px 4px; border-bottom: 1px solid #2a2a2e; }
+    /* th, not tr — a header tap must never fall through to the row-click
+       handler below (there is no row here to open), and headers aren't
+       inside a .tph-prow anyway so there is nothing to conflict with. */
+    .tph-sortable { cursor: pointer; white-space: nowrap; }
+    .tph-sortable:active { opacity: 1; }
     .tph-prow { cursor: pointer; }
     .tph-prow:active { background: #2c2c33; }
     /* Hand history was one 11px monospace blob of up to 40 hands run together on
@@ -6728,6 +6724,33 @@
   // way to reach a player's stats, report and history regardless.
   let playersListOpen = false;
   let playersFilter = '';
+  // Which column the players table is sorted by, and which way. Defaults
+  // match the table's original fixed order (most hands first), so turning
+  // this on changed nothing about what a fresh open of the panel shows.
+  let playersSortKey = 'hands';
+  let playersSortDir = 'desc';
+
+  // The value each row sorts on for a given column — kept separate from the
+  // HTML the row renders so a column can sort on something other than what's
+  // literally printed (e.g. the combined "VPIP/PFR" cell sorts on VPIP alone,
+  // since that's the leading, more comparable of the two figures).
+  //
+  // Nulls (a stat with no opportunity yet) sort as -Infinity rather than 0 —
+  // a player who has never faced a 3-bet is "no data", not "folds 0% of the
+  // time", and should land at whichever end of the list means "unknown", not
+  // get mixed in among players who genuinely never fold there.
+  function playersSortValue(key, xid, p) {
+    const r = computeRates(p);
+    if (key === 'name') return (p.name || '').toLowerCase();
+    if (key === 'type') return classify(p);
+    if (key === 'hands') return p.hands || 0;
+    if (key === 'vpip') return r.vpip == null ? -Infinity : r.vpip;
+    // Hero's own P/L column doesn't show a number at all (see plShort/isHeroRecord
+    // below) — sorting hero to the bottom on a numeric sort keeps that row from
+    // landing in the middle of real P/L figures under a value nobody can see.
+    if (key === 'pl') return isHeroRecord(xid) ? -Infinity : pl0(p);
+    return 0;
+  }
 
   // Archetype thresholds hang off POOL_AVG, and POOL_AVG came from a third-party
   // script rather than from anything this HUD measured. Showing both side by
@@ -6772,7 +6795,14 @@
     const all = !playersListOpen ? [] : Object.keys(STORE.players)
       .map((xid) => ({ xid, p: STORE.players[xid] }))
       .filter(({ p }) => !playersFilter || (p.name || '').toLowerCase().includes(playersFilter.toLowerCase()))
-      .sort((a, b) => (b.p.hands || 0) - (a.p.hands || 0));
+      .sort((a, b) => {
+        const av = playersSortValue(playersSortKey, a.xid, a.p);
+        const bv = playersSortValue(playersSortKey, b.xid, b.p);
+        const cmp = typeof av === 'string' || typeof bv === 'string'
+          ? String(av).localeCompare(String(bv))
+          : av - bv;
+        return playersSortDir === 'asc' ? cmp : -cmp;
+      });
 
     const rows = all.length
       ? all.map(({ xid, p }) => {
@@ -6813,7 +6843,15 @@
       ${problem ? `<div class="tph-warn">⚠ ${escapeHtml(problem)}</div>` : ''}
       <input class="tph-pfilter" placeholder="Filter by name…" value="${escapeHtml(playersFilter)}" style="width:60%">
       <table class="tph-ptable">
-        <tr><th>Name</th><th>Type</th><th>Hands</th><th>VPIP/PFR</th><th>P/L</th></tr>
+        <tr>${(() => {
+          // ▲/▼ only on the active column — the others carry a data-sort
+          // attribute but no arrow, so the affordance stays discoverable
+          // without cluttering four headers that aren't currently doing anything.
+          const arrow = (key) => playersSortKey === key ? (playersSortDir === 'asc' ? ' ▲' : ' ▼') : '';
+          const th = (key, label) => `<th class="tph-sortable" data-sort="${key}">${label}${arrow(key)}</th>`;
+          return th('name', 'Name') + th('type', 'Type') + th('hands', 'Hands')
+            + th('vpip', 'VPIP/PFR') + th('pl', 'P/L');
+        })()}</tr>
         <tr class="tph-pool-row"><td colspan="3"><i>Pool average</i></td>
           <td>${POOL_AVG.vpip.toFixed(0)}%/${POOL_AVG.pfr.toFixed(0)}%</td><td>—</td></tr>
         ${rows}
@@ -6832,6 +6870,7 @@
           return `<span${cls}>${fmtBytes(s.chars)} stored (${s.pct.toFixed(0)}%)</span>`;
         })()}
         ${poolComparisonLine()}<br>
+        <button class="tph-copy-pool">Copy pool tendencies</button>
         <button class="tph-export-pool">${isPDA() ? 'Save / share' : 'Download'} pool tendencies</button>
       </div>
     `,
@@ -6852,8 +6891,37 @@
             openPlayerPanel(row.dataset.xid);
           });
         });
+        panel.querySelectorAll('.tph-sortable').forEach((th) => {
+          th.addEventListener('click', () => {
+            const key = th.dataset.sort;
+            if (playersSortKey === key) {
+              playersSortDir = playersSortDir === 'asc' ? 'desc' : 'asc';
+            } else {
+              playersSortKey = key;
+              // First tap on a new column: name/type read better A-Z, the
+              // numeric columns read better biggest-first (find your worst
+              // matchup or your most-hands regular immediately, not last).
+              playersSortDir = (key === 'name' || key === 'type') ? 'asc' : 'desc';
+            }
+            renderPlayersList();
+          });
+        });
         // Aggregate stats across every tracked player, never a hand-by-hand
         // dump — see poolTendencyExport for why that's the honest choice.
+        //
+        // Copy goes straight to the clipboard — no PDA share-sheet detour.
+        // "Sent ✓" on the button below only means the native share handler
+        // was CALLED, not that a share actually completed (that's async OS
+        // UI outside this webview's visibility) — reported as confusing on a
+        // real device, hence this plain, unambiguous alternative existing at
+        // all. Same two-button split History already uses (Copy vs Save/share).
+        panel.querySelector('.tph-copy-pool').addEventListener('click', (e) => {
+          const text = poolTendencyExport();
+          if (navigator.clipboard) {
+            navigator.clipboard.writeText(text);
+            e.target.textContent = 'Copied ✓';
+          }
+        });
         panel.querySelector('.tph-export-pool').addEventListener('click', (e) => {
           const stamp = new Date().toISOString().slice(0, 10);
           const file = `torn-poker-hud-pool-tendencies-${stamp}.txt`;
@@ -7780,6 +7848,7 @@
       statRow,
       plShort,
       isHeroRecord,
+      playersSortValue,
       TORN_STAKES,
       MIN_PLAUSIBLE_BB,
       plausibleBB,

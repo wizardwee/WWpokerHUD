@@ -9,6 +9,35 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.10.0
+
+Two players-list fixes, both reported straight after 1.9.0 shipped.
+
+**"Save / share pool tendencies" only calls PDA's native share handler** — an
+async, OS-level share sheet this webview has no visibility into once it's
+launched. The button's "Sent ✓" state only ever meant "the handler was
+called without throwing," never "a share actually completed," and on a real
+device that read as the button silently doing nothing. Added a plain **Copy**
+button beside it that writes straight to the clipboard, no share-sheet
+detour — the same two-button split (Copy vs Save/share) the per-player
+History export has always had; pool tendencies just shipped without it.
+
+**The players list table is now sortable.** Tap any header — Name, Type,
+Hands, VPIP/PFR, P/L — to sort by it, tap again to flip direction.
+`playersSortValue()` is the one place that decides what each column actually
+sorts on, and three choices there are worth knowing:
+
+- The combined "VPIP/PFR" header sorts on VPIP alone, since it's the leading
+  and more directly comparable of the two figures.
+- A stat with no data (a player who's never faced a 3-bet, say) sorts as
+  `-Infinity`, not `0` — "unknown" and "always calls it" are different claims,
+  and treating the former as the latter would bury real 0%-fold players in a
+  crowd of players who simply haven't been observed there yet.
+- Hero's own P/L cell doesn't show a number at all (it prints "see Lifetime"
+  instead — plChipsEst is never written for hero, since that would mean P/L
+  against yourself). Sorting hero to the bottom of that column keeps the row
+  from landing in the middle of real figures under a value nobody can see.
+
 ## 1.9.0
 
 Pool tendencies, exportable. `observedPoolAverages()` grew from VPIP/PFR only
