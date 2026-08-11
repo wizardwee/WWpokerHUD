@@ -9,6 +9,37 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.5.1
+
+Ran `node test/run.js` for the first time since 1.0.0 — every version from
+1.0.1 through 1.5.0 shipped verified only by a JXA parse-check, per their own
+commit messages ("the full N-file suite has NOT been run"). It crashed
+outright before a single assertion executed: the test-only export block
+(gated on `window.__TPH_TEST_HOOKS`, zero production effect) referenced
+`recordShownHand`, a name that was never a real function. 1.1.0 added that
+export line, but the showdown recorder had always been `noteShowdown` — a
+copy-paste mismatch, not a rename that missed a call site. That one bad
+reference took down all 27 test files at once, including the 26 that had
+nothing to do with showdown ranges.
+
+Two more failures were real once the suite could run at all, and both were the
+same shape: an intentional behaviour change shipped without Node to check it,
+and the test's expectation was never updated to match.
+
+- `buildRangeHtml`'s group titles moved from one combined "raised" bucket to
+  per-tier ones (Opened / 3-bet / 4-bet+ / Limp-3bet / Called) in 1.1.0.
+  `test/reads.test.js` still searched the rendered HTML for the old title,
+  "Raised preflop", which no longer exists anywhere in the file.
+- `currentExploitTip` stopped returning `null` for a player under `minHands`
+  and started returning a flagged, provisional read instead — the entire
+  point of 1.3.0's "coach speaks up about new players" change. The test still
+  asserted the pre-1.3.0 behaviour (`null`).
+
+Both tests are updated to match the shipped, intentional behaviour; neither
+required a code change. Net effect: none of 1.0.1 through 1.5.0's actual
+runtime behaviour was wrong. The suite was just unable to say so, for want of
+one correct identifier in a block that never ships to a player's phone.
+
 ## 1.5.0
 
 Narrow resets, and a diagnostic for a split hero identity.

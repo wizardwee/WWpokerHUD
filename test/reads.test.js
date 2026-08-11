@@ -211,7 +211,7 @@ t.eq('a three-card flop still parses', cards('The flop:  5♣, 7♦, A♦').leng
 
   const html = R.buildRangeHtml(p);
   t.ok('the range renders', html.includes('AKo'));
-  t.ok('it splits by preflop action', html.includes('Raised preflop'));
+  t.ok('it splits by preflop action', html.includes('Opened the pot'));
   t.ok('it says showdowns are a floor, not the whole range', html.includes('floor on their range'));
   t.ok('a thin sample says so', html.includes('thin sample'));
 }

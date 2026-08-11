@@ -1114,11 +1114,17 @@ code.
    `state_` matching 13 elements and `probe "Sitting out": 0 hits` with nobody
    sitting out — suggestive, not proof. Needs a scan taken while someone IS
    sitting out.
-4. **Node, and the test suite.** `node test/run.js` has not run since v1.0.0 —
-   v1.0.1 through v1.5.0 all shipped verified only by a JXA parse-check plus
-   targeted extraction tests (see Conventions). That has caught real bugs, but
-   it is not the suite. **If the machine you are on has Node, run it first** and
-   report anything red before adding features.
+4. **Node, and the test suite — done, in v1.5.1.** `node test/run.js` had not
+   run since v1.0.0; v1.0.1 through v1.5.0 shipped verified only by a JXA
+   parse-check. It crashed instantly: the test-only export block referenced
+   `recordShownHand`, which was never a real function (`noteShowdown` always
+   was) — a copy-paste mismatch from 1.1.0 that took down all 27 files at
+   once. Two more failures were real once that was fixed, both the same
+   shape: an intentional 1.1.0/1.3.0 behaviour change that shipped without
+   Node to check it, and a test whose expectation was never updated to
+   match. All three fixed; `node test/run.js` is green (27/27). See
+   CHANGELOG.md 1.5.1 for the detail. No production runtime code changed —
+   the broken reference lived entirely inside `window.__TPH_TEST_HOOKS`.
 
 Then back to **screen real estate**, which is reported from the table rather
 than reasoned about. The badge floats over the felt at a fixed size and

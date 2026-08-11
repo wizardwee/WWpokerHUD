@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.5.0
+// @version      1.5.1
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,28 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.5.1 - Ran `node test/run.js` for the first time since 1.0.0 — every version
+ *          from 1.0.1 through 1.5.0 shipped verified only by a JXA parse-check,
+ *          per their own commit messages. It crashed outright: the test-only
+ *          export block (gated on window.__TPH_TEST_HOOKS, zero production
+ *          effect) referenced `recordShownHand`, a name that was never a real
+ *          function — 1.1.0 added the export line but the showdown recorder was
+ *          always `noteShowdown`. That took down all 27 test files at once, not
+ *          just the one testing it.
+ *            - Two more failures were real once the suite could run at all, and
+ *              both were the SAME shape: a test's expectation was never updated
+ *              alongside an intentional behaviour change made without Node to
+ *              check it. buildRangeHtml's group titles moved from a combined
+ *              "raised" bucket to per-tier ones (1.1.0) — test/reads.test.js
+ *              still looked for the old title. currentExploitTip stopped
+ *              returning null for a player under minHands and started
+ *              returning a flagged, provisional read instead (1.3.0) —
+ *              test/exploit-plan.test.js still asserted null. Both tests are
+ *              updated to match the shipped, intentional behaviour; neither
+ *              required a code change.
+ *            - Net effect: none of 1.0.1-1.5.0's actual runtime behaviour was
+ *              wrong. The suite was just unable to say so.
  *
  * 1.5.0 - Narrow resets, and a diagnostic for a split hero identity.
  *            - "Reset all data" was the ONLY reset, so fixing a wrong money
@@ -68,28 +90,6 @@
  *              migrated store. Blocks are now gated on the version migrated
  *              FROM. The pattern is inlined rather than using USERNAME_RE,
  *              which is still in its temporal dead zone when loadStore runs.
- *
- * 1.3.0 - Two readability fixes, both reported from live play.
- *            - The coach no longer goes silent on a player under minHands. It
- *              shows the read and marks it "new · Nh" instead, ranked below a
- *              well-sampled one (-200) but never below the aggressor bonus. The
- *              frequency rules carry their own sample gates, so a new player
- *              surfaces only what IS valid early — tilt, a stuck stack, a
- *              limp-3bet, what they have shown down. The old gate left the seat
- *              you know least about as the only one the coach said nothing
- *              about. The pill marks it with a trailing "?", matching the
- *              badge's existing convention for a provisional read.
- *            - The player Report was a single <pre> of prose and unreadable on
- *              a phone. It is now sectioned (Preflop / Postflop / Sizing &
- *              showdown / Your results / Notes) with each item splitting the
- *              OBSERVATION from the ACTION — those used to be one long
- *              sentence, which is what made it a wall. Actions are green and
- *              indented behind an arrow so the numbers can be skimmed.
- *              buildReportSections is the single source: the screen gets
- *              markup, the clipboard keeps plain text, so the two cannot drift
- *              into different descriptions of one player. Report also picked up
- *              the per-street fold, postflop re-raise, limp-3bet and 3-bet
- *              showdown reads it never had.
  *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
@@ -153,7 +153,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.5.0';
+  const HUD_VERSION = '1.5.1';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -7484,7 +7484,7 @@
       computeShrunkRates,
       streetRates,
       shownRange,
-      recordShownHand,
+      noteShowdown,
       shrunkPct,
       POOL_AVG,
       PRIOR_WEIGHT,
