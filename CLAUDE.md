@@ -1093,12 +1093,35 @@ unshrunk because no published pool figure exists for it.
 
 ## Next task
 
-**The deep scan is done and came back good** (confirmed 2026-08-07). Identity,
-positions, stats and P/L all check out at a live table, so don't re-litigate
-them — if something looks wrong, it is a regression, not an unverified claim.
+**Four things are open as of v1.5.0, in priority order.** The first three all
+need one live scan or one report from the table; none can be settled by reading
+code.
 
-The live work now is **screen real estate**, and it is reported from the table
-rather than reasoned about. The badge floats over the felt at a fixed size and
+1. **Confirm the v1.4.0 P/L fix at a live table.** Winner lines on pots taken
+   WITHOUT a showdown ("X won $Y Did not show hand") were being consumed by the
+   `shows` pattern, so `hand.winners` stayed empty and ALL of P/L was skipped.
+   Fixed twice over (order + negative lookahead), but **not yet confirmed
+   live**. Win a pot with everyone folding and check that P/L moves.
+2. **Is hero's own VPIP split across two records?** Reported as "my personal
+   VPIP seems low". The deep scan now prints `heroRecord`, `heroGhost` and
+   `STORE.hero` together — a `heroGhost … EXISTS` line is the whole diagnosis.
+   `heroXid: ok` does NOT rule it out; see the deep-scan comment for why.
+   **Don't let the user reset their stats before reading this** — the reset
+   destroys the evidence, and the numbers would just re-accrue wrong.
+3. **`SELECTORS.seatState` is unconfirmed on this layout.** It is what excludes
+   sitting-out players from the "hands observed" denominator. If it matches
+   nothing, every rate for every player reads LOW. The v1.1.0 scan showed
+   `state_` matching 13 elements and `probe "Sitting out": 0 hits` with nobody
+   sitting out — suggestive, not proof. Needs a scan taken while someone IS
+   sitting out.
+4. **Node, and the test suite.** `node test/run.js` has not run since v1.0.0 —
+   v1.0.1 through v1.5.0 all shipped verified only by a JXA parse-check plus
+   targeted extraction tests (see Conventions). That has caught real bugs, but
+   it is not the suite. **If the machine you are on has Node, run it first** and
+   report anything red before adding features.
+
+Then back to **screen real estate**, which is reported from the table rather
+than reasoned about. The badge floats over the felt at a fixed size and
 the table does not: a badge that fits at six-handed reaches the community cards
 at nine. `badgeStats: false` is the escape hatch and the constants are gathered
 (`SELF_BADGE_LIFT_PX`, `.tph-badge` max-widths) — but the honest position is
