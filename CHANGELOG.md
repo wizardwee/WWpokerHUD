@@ -9,6 +9,41 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.9.0
+
+Pool tendencies, exportable. `observedPoolAverages()` grew from VPIP/PFR only
+to every rate `computeRates` produces — 3-bet, fold-to-3-bet, C-bet,
+fold-to-C-bet, limp share of VPIP, AFq, WTSD — and a new "Download pool
+tendencies" button in the players list turns it into a readable file.
+
+**Deliberately aggregate, not a hand-by-hand dump.** `STORE.hands` is capped
+at `historyLimit` (roughly 200-300 hands once pinned notable ones are
+counted), so an "export all hands" feature there would really mean "whichever
+recent or big pots survived pruning" — a recency- and size-biased sample, not
+an honest picture of the pool. The per-player counters this draws from
+instead (`p.vpip`, `p.foldTo3BetMade`, etc.) are never capped or pruned down,
+so summing across every tracked player is the actually-complete dataset.
+
+**Each stat is averaged only across players who had the opportunity at all.**
+`computeRates` already returns `null` for a stat with a zero denominator (a
+player who's never faced a 3-bet has no `foldTo3Bet` figure to contribute),
+and the pool mean drops nulls rather than reading them as 0% — a player who's
+never seen a spot doesn't get scored as playing it perfectly tight. No second
+per-stat sample-size gate was added on top of the existing 25-hand floor:
+that distinction matters for a single opponent, where one thin sample IS the
+whole answer, but a pool *average* is already protected by however many
+players qualify for it — one player's noisy denominator gets diluted by
+everyone else's, not amplified.
+
+**AFq and WTSD are reported without a comparison**, exactly like everywhere
+else in this file that shows them: no published pool figure exists for
+either, so inventing one to compare against would be worse than leaving the
+row honest about not having one.
+
+22 new assertions in `test/pool-tendency.test.js` cover the full stat set,
+the null-exclusion behavior, hero being excluded from the pool, and the
+export's handling of both the normal case and "fewer than 3 players tracked."
+
 ## 1.8.0
 
 Shared-affiliation badges: 🔗 marks two seated players in the same faction,

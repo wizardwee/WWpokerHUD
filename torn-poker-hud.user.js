@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.8.0
+// @version      1.9.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,27 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.9.0 - Pool tendencies, exportable: observedPoolAverages grew from VPIP/PFR
+ *          only to every rate computeRates produces (3-bet, fold-to-3-bet,
+ *          C-bet, fold-to-C-bet, limp share, AFq, WTSD), plus a new downloadable
+ *          report (poolTendencyExport) in the players list.
+ *            - Deliberately aggregate, not a hand-by-hand dump. STORE.hands is
+ *              capped at historyLimit (~200-300 with pinned notable hands), so
+ *              "export all hands" there would really mean "whichever recent or
+ *              big ones survived pruning" — a recency- and size-biased sample,
+ *              not the pool. The per-player counters this draws from instead
+ *              are never capped or pruned, so this is the honest full picture.
+ *            - Each stat is averaged only across players who actually had that
+ *              opportunity — computeRates already returns null on a zero
+ *              denominator, and the mean drops nulls rather than treating them
+ *              as 0%. No SECOND per-stat sample-size gate on top of the
+ *              existing 25-hand floor: a pool average is protected by however
+ *              many players qualify, unlike a single-player exploit read where
+ *              one thin sample IS the whole answer.
+ *            - The export labels AFq and WTSD as having no published pool
+ *              figure to compare against, rather than inventing one — same
+ *              rule POOL_AVG/POOL_SPREAD already follow everywhere else.
  *
  * 1.8.0 - Shared-affiliation badges: 🔗 same faction, 💍 married, on seats.
  *            - Deliberately NOT a behavioural collusion detector (raise-pattern
@@ -46,27 +67,6 @@
  *              trusted. parseAffiliationProfile fails to null rather than
  *              throwing on anything it doesn't recognise, so a wrong guess
  *              here costs a missing badge, not a crash.
- *
- * 1.7.0 - Three screen-real-estate fixes, all reported from a live table.
- *            - Hero's own badge was blocking the action timer at its full lift.
- *              Nudged half a badge-line down and ~10 characters right
- *              (SELF_BADGE_DOWN_NUDGE_PX / SELF_BADGE_RIGHT_NUDGE_PX) — enough
- *              to clear the timer without giving back enough height to land
- *              back on the chip figure the lift exists to avoid.
- *            - Tapping outside the player/settings/players-list panel now
- *              closes it, the same as the ✕. renderPanel mounts a dim backdrop
- *              behind the panel whenever onClose is given, torn down with its
- *              own `tph-backdrop-<marker>` class so it follows the same
- *              per-panel teardown isolation the panels themselves already had.
- *              The panel's own margin grew from 5% to 8% a side at the same
- *              time, so there is a real margin to tap rather than a sliver
- *              against the table edge — paid for by trimming Stats table cell
- *              padding and rebalancing its column widths (33/27/40 -> 30/26/44)
- *              toward the two columns that carry nowrap numbers.
- *            - The Stats tab's "By street — aggr/fold" section now renders
- *              before "Stack this sitting" rather than after: it is read far
- *              more often and used to require scrolling past the stack bar
- *              to reach.
  *
  * 1.5.1 - Ran `node test/run.js` for the first time since 1.0.0 — every version
  *          from 1.0.1 through 1.5.0 shipped verified only by a JXA parse-check,
@@ -152,7 +152,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.8.0';
+  const HUD_VERSION = '1.9.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -3637,6 +3637,18 @@
   // What this HUD has actually observed, for players with a real sample.
   // Returned so the UI can show it next to POOL_AVG — if the two diverge over a
   // few hundred hands, POOL_AVG is the thing to correct.
+  //
+  // Covers every rate computeRates produces, not just VPIP/PFR (v1.9.0). Each
+  // one is averaged only across players who actually had the opportunity —
+  // computeRates already returns null for a stat with a zero denominator (e.g.
+  // foldTo3Bet with no foldTo3BetOpp), and `mean` drops nulls before averaging
+  // — rather than adding a SECOND per-stat sample-size gate on top of the
+  // blanket POOL_OBS_MIN_HANDS. That is a deliberate simplification: a
+  // per-player exploit read needs its own gate because one thin sample IS the
+  // whole answer, but a pool AVERAGE is protected by however many players
+  // qualify — noise from one player's small denominator is diluted by
+  // everyone else's, not the dominant source of error the way it would be for
+  // a single opponent.
   const POOL_OBS_MIN_HANDS = 25;
   function observedPoolAverages() {
     const ps = Object.keys(STORE.players)
@@ -3646,15 +3658,76 @@
       .map((xid) => STORE.players[xid])
       .filter((p) => p && p.hands >= POOL_OBS_MIN_HANDS);
     if (ps.length < 3) return null; // too few to mean anything
+    const rates = ps.map((p) => computeRates(p));
     const mean = (f) => {
-      const vals = ps.map(f).filter((v) => v != null && !isNaN(v));
+      const vals = rates.map(f).filter((v) => v != null && !isNaN(v));
       return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
     };
     return {
       players: ps.length,
-      vpip: mean((p) => pct(p.vpip, p.hands)),
-      pfr: mean((p) => pct(p.pfr, p.hands)),
+      vpip: mean((r) => r.vpip),
+      pfr: mean((r) => r.pfr),
+      threeBet: mean((r) => r.threeBet),
+      foldTo3Bet: mean((r) => r.foldTo3Bet),
+      cbet: mean((r) => r.cbet),
+      foldToCbet: mean((r) => r.foldToCbet),
+      limpShareOfVpip: mean((r) => r.limpShareOfVpip),
+      // No published pool figure exists for either (see POOL_AVG/POOL_SPREAD),
+      // so these have nothing to be compared against — reported as observed
+      // facts on their own, same as everywhere else AFq/WTSD appear.
+      afq: mean((r) => r.afq),
+      wtsd: mean((r) => r.wtsd),
     };
+  }
+
+  // The full report as a downloadable/copyable file — every stat above, each
+  // against POOL_AVG where a published figure exists to compare it to, with
+  // the same deviation label (typical/notable/extreme) the Stats tab and
+  // players list use. This is aggregate numbers across every tracked
+  // opponent, not a hand-by-hand dump: STORE.hands is capped at historyLimit
+  // (~200-300 with pinned notable hands), so "all hands" there would really
+  // mean "whichever recent/big ones survived pruning" — a recency- and
+  // size-biased sample, not the pool. The per-player counters this draws
+  // from instead are never capped or pruned down, so this is the honest full
+  // picture. See CLAUDE.md "Shared-affiliation badges" for the same
+  // per-player-not-per-relationship storage reasoning applied elsewhere.
+  function poolTendencyExport() {
+    const obs = observedPoolAverages();
+    const header = [
+      'Torn Poker HUD — observed pool tendencies',
+      `Exported ${new Date().toISOString()}`,
+    ];
+    if (!obs) {
+      header.push(`Fewer than 3 opponents have ${POOL_OBS_MIN_HANDS}+ hands tracked yet — not enough for a pool read.`);
+      return header.join('\n') + '\n';
+    }
+    header.push(`Averaged across ${obs.players} tracked opponent(s) with ${POOL_OBS_MIN_HANDS}+ hands each `
+      + '(hero excluded). Each stat is a RAW average — not sample-adjusted — and only counts players who '
+      + 'actually had that opportunity at all, same rule computeRates uses everywhere else in this file.');
+    header.push('');
+    const row = (label, key, hasPoolFigure) => {
+      const v = obs[key];
+      if (v == null) return `${label}: not enough data`;
+      if (!hasPoolFigure) return `${label}: ${v.toFixed(1)}% (no published pool figure to compare against)`;
+      const norm = POOL_AVG[key];
+      const d = deviation(v, norm, POOL_SPREAD[key]);
+      return `${label}: ${v.toFixed(1)}% (assumed pool ${norm.toFixed(1)}%, `
+        + `${d.level}${d.dir !== 'flat' ? ' ' + d.dir : ''})`;
+    };
+    const lines = [
+      row('VPIP', 'vpip', true),
+      row('PFR', 'pfr', true),
+      row('3-Bet', 'threeBet', true),
+      row('Fold to 3-Bet', 'foldTo3Bet', true),
+      row('C-Bet', 'cbet', true),
+      row('Fold to C-Bet', 'foldToCbet', true),
+      row('Limp share of VPIP', 'limpShareOfVpip', true),
+      row('AFq (aggression, folds excluded)', 'afq', false),
+      row('WTSD', 'wtsd', false),
+    ];
+    return header.join('\n') + '\n' + lines.join('\n') + '\n\n'
+      + 'If these diverge from the assumed pool figures over a few hundred hands, the assumed figures '
+      + '(POOL_AVG in the script) are what to correct, not this observed data — see CLAUDE.md.\n';
   }
 
   // How far from POOL_AVG a stat has to move before it means anything, in
@@ -6758,7 +6831,8 @@
           const cls = s.level === 'ok' ? '' : ' class="tph-store-warntext"';
           return `<span${cls}>${fmtBytes(s.chars)} stored (${s.pct.toFixed(0)}%)</span>`;
         })()}
-        ${poolComparisonLine()}
+        ${poolComparisonLine()}<br>
+        <button class="tph-export-pool">${isPDA() ? 'Save / share' : 'Download'} pool tendencies</button>
       </div>
     `,
       wire: (panel) => {
@@ -6777,6 +6851,23 @@
             renderPlayersList();
             openPlayerPanel(row.dataset.xid);
           });
+        });
+        // Aggregate stats across every tracked player, never a hand-by-hand
+        // dump — see poolTendencyExport for why that's the honest choice.
+        panel.querySelector('.tph-export-pool').addEventListener('click', (e) => {
+          const stamp = new Date().toISOString().slice(0, 10);
+          const file = `torn-poker-hud-pool-tendencies-${stamp}.txt`;
+          const text = poolTendencyExport();
+          // Same fallback as every other export button here: `<a download>`
+          // does nothing in some webviews, and a button that appears to work
+          // and produces no file is worse than one that says it can't.
+          const ok = downloadTextFile(text, file, 'text/plain');
+          if (ok) {
+            e.target.textContent = 'Sent ✓';
+          } else {
+            e.target.textContent = 'Copied instead ✓';
+            if (navigator.clipboard) navigator.clipboard.writeText(text);
+          }
         });
       },
     });
@@ -7799,6 +7890,7 @@
 
       // --- stateful: reads or writes module-level STORE / heroXid ---
       playerHistoryExport,
+      poolTendencyExport,
       handsInvolving,
       formatHand,
       recordHandHistory,
