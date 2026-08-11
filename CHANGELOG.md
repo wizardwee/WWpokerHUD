@@ -9,6 +9,51 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.11.0
+
+`POOL_AVG` is measured now, not borrowed. Corrected from `observedPoolAverages()`
+output over 173 tracked opponents (25+ hands each), replacing the figures
+this file carried since v0.22.0 straight from HopesG's "Torn Poker HUD -
+Player Profiler & Coach" script and never independently verified — the
+correction those versions' own comments always said was coming: "if these
+diverge over a few hundred hands, POOL_AVG is what to fix."
+
+**Old → new:** VPIP 50.9 → 42.5, PFR 13.4 → 9.4, 3-bet 3.7 → 1.5,
+fold-to-3-bet 14.9 → 48.1 (more than **tripled**), C-bet 40.3 → 38.7,
+fold-to-C-bet 56.1 → 44.9, limp-share 44.8 → 42.4.
+
+The divergence went a direction worth knowing: this pool is **tighter** than
+HopesG's figures assumed, not looser, and folds to a 3-bet dramatically more
+often than assumed. Whether that reflects a genuinely different player pool,
+different stakes getting tracked, or something else isn't known — it's just
+what got measured.
+
+**Archetype thresholds moved automatically, and that's the point of how they
+were built.** `A.tight`/`A.loose` are algebraic functions of `POOL_AVG.vpip`
+(`* 0.55` / `* 1.15`), so correcting the anchor moved the Nit/TAG/LAG/Station
+boundaries with it — no separate edit needed, confirming the "thresholds are
+pool-relative, not absolute" design decision from v0.22.0 actually holds.
+`A.aggRatio`/`A.passiveRatio` and every `POOL_SPREAD` entry are different:
+independent judgement calls, not values derived from `POOL_AVG`, so this
+correction deliberately left them alone rather than guessing at a new
+"correct" distance without evidence.
+
+**A handful of tests turned out to hardcode expectations computed from the
+OLD anchor** — an exact classification boundary that happened to sit right at
+old-but-not-new thresholds, a rendered delta string, a shrinkage-arithmetic
+result — instead of computing them from the live `POOL_AVG`/`A`. Fixed across
+`test/archetype.test.js`, `test/deviation.test.js`, `test/exploit-plan.test.js`,
+`test/blended-rates.test.js`, and `test/stats.test.js`, all now deriving their
+expectations dynamically. `A` is exported to the test seam for exactly this.
+The next correction (and there will be one — `observedPoolAverages()` and the
+export button that surfaces it aren't going anywhere) shouldn't need to touch
+test code at all.
+
+**Also confirmed by a fresh deep scan**, unrelated to this correction but
+worth recording: the v1.6.0 hero-identity-split fix is holding under real
+play. `heroGhost(name:Wonkawee): none` — no ghost record — and `heroRecord`
+tracks `STORE.hero` exactly, 275 hands both sides, no drift.
+
 ## 1.10.0
 
 Two players-list fixes, both reported straight after 1.9.0 shipped.

@@ -43,9 +43,10 @@ tracked-players browser, coach prompts in a resizable panel, a verified Monte
 Carlo equity engine, position from the seat ring, session tracking, bet-sizing
 tells, showdown ranges, and optional GitHub Gist sync.
 
-What is still unverified is called out where it lives: the `POOL_AVG` figures
-are borrowed rather than measured, `POOL_SPREAD` is a judgement call, and the
-v0.22.0 identity/ring markers are read out of someone else's source.
+What is still unverified is called out where it lives: `POOL_SPREAD` is a
+judgement call (not re-derived when `POOL_AVG` was corrected to measured
+figures in v1.11.0 — see "The pool average is measured, not borrowed"), and
+the v0.22.0 identity/ring markers are read out of someone else's source.
 
 ## The critical constraint
 
@@ -950,25 +951,48 @@ seat), `dealer___` once. Both sat below the cutoff for the entire life of the
 project while `opponent___(5)` was visible the whole time. The new probe lists
 rare markers in full.
 
-### The pool average is borrowed, not measured
+### The pool average is measured, not borrowed (corrected v1.11.0)
 
-`POOL_AVG` (VPIP 50.9, PFR 13.4, 3-bet 3.7, fold-to-3-bet 14.9, C-bet 40.3, WTSD
-20.9) comes from that same script. Nothing here has verified it.
+`POOL_AVG` used to be VPIP 50.9, PFR 13.4, 3-bet 3.7, fold-to-3-bet 14.9,
+C-bet 40.3, fold-to-C-bet 56.1, limp-share 44.8 — lifted from HopesG's script
+and never independently verified. This is the correction that section always
+said was coming: 173 tracked opponents, 25+ hands each, pulled via "Download
+pool tendencies" in the players list and fed back in. Current figures: **VPIP
+42.5, PFR 9.4, 3-bet 1.5, fold-to-3-bet 48.1, C-bet 38.7, fold-to-C-bet 44.9,
+limp-share 42.4.**
 
-It matters because the correction is enormous: Torn's pool plays roughly twice
-the hands of a live low-stakes game and raises less. The old thresholds (nit
-under 15 VPIP, fish over 35) put essentially the whole population in one bucket
-— technically correct, and useless, since a label every seat shares carries no
-information.
+The divergence went a direction worth knowing about: this pool is **tighter**
+than HopesG's figures assumed (42.5/9.4 vs the old 50.9/13.4), not looser —
+and folds to a 3-bet more than three times as often (48.1% vs 14.9%). Whether
+that's a genuine difference between player pools, a difference in which
+stakes got tracked, or something else isn't known; it's just what got
+measured.
 
-Two rules for anything downstream of this:
+Two rules for anything downstream of this, both already proven out by this
+correction actually landing cleanly:
 
-- **Thresholds are written as multiples of `POOL_AVG`** (`A.tight`, `A.loose`,
-  `A.aggRatio`), never as bare numbers. Correcting the anchor then moves every
-  label with it instead of silently invalidating them.
+- **Thresholds are written as multiples of `POOL_AVG`** (`A.tight`, `A.loose`),
+  never as bare numbers. Correcting the anchor moved every label with it
+  automatically — no separate archetype-boundary edit was needed. `A.aggRatio`
+  and `A.passiveRatio` are the exception: they're independent judgement calls,
+  not algebraic functions of `POOL_AVG`, so correcting VPIP/PFR here did NOT
+  re-examine whether they still sit at the right distance from the pool's new
+  PFR/VPIP ratio (was 0.264, now 0.221) — left alone rather than guessed at.
+  `POOL_SPREAD` is the same story: still the original judgement-call spreads,
+  not re-derived from this measurement.
 - **`observedPoolAverages()` reports what this HUD has actually seen**, and the
-  players list footer shows it beside the assumed figure. If they diverge over a
-  few hundred hands, `POOL_AVG` is what to fix.
+  players list footer shows it beside the assumed figure — this is what made
+  the correction possible, and is exactly how the NEXT one should happen too,
+  once new hands accrue that meaningfully diverge from these.
+
+One migration cost worth knowing: a handful of tests hardcoded expected values
+computed from the OLD anchor (an exact classification boundary, a rendered
+delta string, a shrinkage arithmetic result) instead of computing them from
+the live `POOL_AVG`/`A` — see `test/archetype.test.js`, `test/deviation.test.js`,
+`test/exploit-plan.test.js`, `test/blended-rates.test.js`, `test/stats.test.js`
+for the fixes. All now compute their expectations from `POOL_AVG`/`A` directly
+(the test seam exports `A` for exactly this), so the NEXT correction shouldn't
+need to touch test code at all.
 
 ### The WTSD anchor was wrong (corrected in v0.23.0)
 
@@ -1045,7 +1069,7 @@ as a raise.
 
 `POOL_SPREAD` says how far a stat must move from `POOL_AVG` before it means
 anything. Each stat gets its own scale, and that is the entire point: 5pp on
-VPIP (norm 50.9) is noise, 5pp on 3-bet (norm 3.7) more than doubles it. A
+VPIP (norm ~42) is noise, 5pp on 3-bet (norm ~1.5) more than triples it. A
 single shared threshold calls the first notable and the second typical — exactly
 backwards. One spread = notable, two = extreme.
 
@@ -1183,6 +1207,11 @@ open live-verification items.** Keep the scan itself as the record:
      seat-xid path). **Recommend "Reset my stats"** (v1.5.0) to the user to
      clear both once this fix is live — going forward hero's own log lines
      resolve correctly, so the numbers won't re-split.
+   - **Confirmed holding, from a scan taken after the user did exactly that.**
+     `heroGhost(name:Wonkawee): none` — no ghost record at all — and
+     `heroRecord`'s 275 hands match `STORE.hero`'s 275 exactly, a clean 1-for-1
+     with no drift. The fix is not just theoretically correct; it has now been
+     observed working across a real session.
 
 **Screen real estate got three more fixes in v1.7.0**, all reported from a live
 table rather than reasoned about: hero's badge was nudged down and right to

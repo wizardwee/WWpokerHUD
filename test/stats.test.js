@@ -206,7 +206,11 @@ t.ok('a raiser limps a far smaller share of their VPIP',
 // It was mapped from the source's `wwsf` (won when saw flop), a different stat.
 // WTSD is now left unshrunk rather than pulled toward an unrelated number.
 t.eq('POOL_AVG carries no WTSD figure', T.POOL_AVG.wtsd, undefined);
-t.eq('POOL_AVG carries fold-to-c-bet instead', T.POOL_AVG.foldToCbet, 56.1);
+// Not pinned to a literal figure: POOL_AVG.foldToCbet is measured pool data
+// (v1.11.0) rather than a fixed constant, and gets corrected as more hands
+// accrue — the test only needs to know the slot is populated, same as the
+// limp-share assertion right below it.
+t.ok('POOL_AVG carries a fold-to-c-bet figure', T.POOL_AVG.foldToCbet > 0);
 t.ok('POOL_AVG carries the limp share', T.POOL_AVG.limpShareOfVpip > 0);
 
 const wt = player({ hands: 100, wtsd: 30 });

@@ -1,7 +1,7 @@
 // Deviation-from-pool indicators on the Stats tab and players list.
 //
-// The scale is the whole point: 5pp on VPIP (norm 50.9) is noise, while 5pp on
-// 3-bet (norm 3.7) more than doubles it. A single shared threshold would call
+// The scale is the whole point: 5pp on VPIP (norm ~42) is noise, while 5pp on
+// 3-bet (norm ~1.5) more than triples it. A single shared threshold would call
 // the first notable and the second typical — exactly backwards. POOL_SPREAD
 // gives each stat its own scale, so "one spread away" means the same amount of
 // "this player is different" regardless of which stat you are looking at.
@@ -64,18 +64,23 @@ t.eq('WTSD has no pool figure', POOL_AVG.wtsd, undefined);
   t.ok('the norm tick is placed', html.includes('tph-bar-tick'));
 }
 
-// An extreme player: arrow, signed delta, extreme class.
+// An extreme player: arrow, signed delta, extreme class. Expressed as vn/vs
+// offsets (already established above), not a hardcoded VPIP number, so this
+// keeps testing the same relative case across a future POOL_AVG correction —
+// the delta text itself is computed from the live norm for the same reason.
 {
-  const html = T.statRow('VPIP', 85, 85, 'vpip');
+  const above = vn + vs * 3;
+  const html = T.statRow('VPIP', above, above, 'vpip');
   t.ok('extreme row is marked extreme', html.includes('tph-dev-extreme'));
   t.ok('extreme row shows an up arrow', html.includes('▲'));
-  t.ok('the deviation is signed', html.includes('+34'));
+  t.ok('the deviation is signed', html.includes('+' + (above - vn).toFixed(0)));
 }
 
 {
-  const html = T.statRow('VPIP', 15, 15, 'vpip');
+  const below = vn - vs * 3;
+  const html = T.statRow('VPIP', below, below, 'vpip');
   t.ok('low row shows a down arrow', html.includes('▼'));
-  t.ok('the deviation is negative', html.includes('-36'));
+  t.ok('the deviation is negative', html.includes((below - vn).toFixed(0))); // already negative
 }
 
 // Bar geometry: the fill is the value, the tick is the norm, both on 0-100.

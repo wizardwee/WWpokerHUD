@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.10.0
+// @version      1.11.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,32 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.11.0 - POOL_AVG is measured now, not borrowed. Corrected from
+ *           observedPoolAverages() output over 173 tracked opponents (25+
+ *           hands each), replacing the figures carried since v0.22.0 from
+ *           HopesG's script and never independently verified.
+ *             - Old -> new: VPIP 50.9->42.5, PFR 13.4->9.4, 3-bet 3.7->1.5,
+ *               fold-to-3-bet 14.9->48.1 (more than TRIPLED), C-bet
+ *               40.3->38.7, fold-to-C-bet 56.1->44.9, limp-share 44.8->42.4.
+ *               This pool is tighter than assumed, not looser, and folds to
+ *               3-bets dramatically more than assumed.
+ *             - A.tight/A.loose are algebraic functions of POOL_AVG.vpip, so
+ *               they moved automatically — no separate archetype-boundary
+ *               edit needed. A.aggRatio/A.passiveRatio and every POOL_SPREAD
+ *               entry are independent judgement calls, NOT re-derived here —
+ *               left alone rather than adjusted without evidence for the
+ *               right new distance.
+ *             - A handful of tests hardcoded expected values computed from
+ *               the OLD anchor instead of the live POOL_AVG/A (an exact
+ *               classification boundary, a rendered delta string, a
+ *               shrinkage-arithmetic result) — fixed to compute expectations
+ *               dynamically in archetype/deviation/exploit-plan/blended-rates/
+ *               stats tests, so the NEXT correction shouldn't need to touch
+ *               test code at all. `A` is now exported to the test seam.
+ *             - Also confirmed by a fresh deep scan: the v1.6.0 hero-identity
+ *               fix is holding — heroGhost(name:Wonkawee): none, heroRecord
+ *               and STORE.hero match exactly, no drift.
  *
  * 1.10.0 - Two players-list fixes, both reported straight after 1.9.0 shipped.
  *            - "Save / share pool tendencies" only calls PDA's native share
@@ -37,27 +63,6 @@
  *              hero's own P/L (which shows "see Lifetime", not a number)
  *              sorts to the bottom on that column rather than wherever
  *              plChipsEst happens to place it.
- *
- * 1.9.0 - Pool tendencies, exportable: observedPoolAverages grew from VPIP/PFR
- *          only to every rate computeRates produces (3-bet, fold-to-3-bet,
- *          C-bet, fold-to-C-bet, limp share, AFq, WTSD), plus a new downloadable
- *          report (poolTendencyExport) in the players list.
- *            - Deliberately aggregate, not a hand-by-hand dump. STORE.hands is
- *              capped at historyLimit (~200-300 with pinned notable hands), so
- *              "export all hands" there would really mean "whichever recent or
- *              big ones survived pruning" — a recency- and size-biased sample,
- *              not the pool. The per-player counters this draws from instead
- *              are never capped or pruned, so this is the honest full picture.
- *            - Each stat is averaged only across players who actually had that
- *              opportunity — computeRates already returns null on a zero
- *              denominator, and the mean drops nulls rather than treating them
- *              as 0%. No SECOND per-stat sample-size gate on top of the
- *              existing 25-hand floor: a pool average is protected by however
- *              many players qualify, unlike a single-player exploit read where
- *              one thin sample IS the whole answer.
- *            - The export labels AFq and WTSD as having no published pool
- *              figure to compare against, rather than inventing one — same
- *              rule POOL_AVG/POOL_SPREAD already follow everywhere else.
  *
  * 1.5.1 - Ran `node test/run.js` for the first time since 1.0.0 — every version
  *          from 1.0.1 through 1.5.0 shipped verified only by a JXA parse-check,
@@ -143,7 +148,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.10.0';
+  const HUD_VERSION = '1.11.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -3499,36 +3504,47 @@
 
   // Average tendencies of the TORN poker pool, in percent.
   //
-  // PROVENANCE, and it matters: these are the figures published in HopesG's
-  // "Torn Poker HUD - Player Profiler & Coach" userscript (MIT, GreasyFork
-  // 569933). They were NOT measured by this HUD, and no independent
-  // confirmation exists. They are used because the alternative — standard live
-  // poker norms — is demonstrably wrong here, not because they are certain.
+  // PROVENANCE, and it matters: MEASURED (v1.11.0), not borrowed. These are
+  // observedPoolAverages() output from this HUD's own store — 173 tracked
+  // opponents, 25+ hands each — replacing figures published in HopesG's "Torn
+  // Poker HUD - Player Profiler & Coach" userscript (MIT, GreasyFork 569933)
+  // that carried this constant from v0.22.0 through v1.10.0. This is the
+  // correction those versions' own comments anticipated: "if these diverge
+  // over a few hundred hands, POOL_AVG is what to fix."
   //
-  // The correction is large. Torn's pool plays roughly 51% of hands and raises
-  // 13%, where a live low-stakes game is nearer 25% / 18%. Thresholds written
-  // for normal poker therefore classified almost the entire Torn population as
-  // "Fish", which is accurate on paper and useless in practice: a label that
-  // every seat shares carries no information.
+  // The divergence was real and went in an unexpected direction: this pool is
+  // TIGHTER than HopesG's figures assumed (VPIP 42.5 vs the old 50.9, PFR 9.4
+  // vs 13.4), not looser — and folds to a 3-bet dramatically more often
+  // (48.1% vs an old 14.9%, more than triple). Re-measure and correct again
+  // via the "Download pool tendencies" button once enough new hands accrue
+  // that a fresh export meaningfully diverges from these — same rule that
+  // applied to the HopesG figures applies to this HUD's own.
   //
-  // observedPoolAverages() below reports what THIS HUD has actually seen, and
-  // the players list shows both, so the two can be compared as data accrues.
-  // NOTE ON WTSD: an earlier pass listed `wtsd: 20.9` here. That figure is the
-  // source's `wwsf` — won-when-saw-flop — which is a different statistic from
-  // went-to-showdown (typically ~25-30% vs ~45% in normal poker). No pool figure
-  // for WTSD exists, so WTSD is left UNSHRUNK rather than anchored to an
-  // unrelated number. Same reasoning as AFq. Don't reinstate it without a source.
+  // NOT touched by this correction, and worth knowing why: A.aggRatio (0.45)
+  // and A.passiveRatio (0.20) below are independent judgement calls, not
+  // values ALGEBRAICALLY derived from POOL_AVG the way A.tight/A.loose are —
+  // so correcting vpip/pfr here does not automatically re-examine whether
+  // those two ratios still sit at the right relative distance from the pool's
+  // new PFR/VPIP ratio (was 0.264, now 0.221). Left alone rather than guessed
+  // at without evidence for what the right distance actually is. Same for
+  // POOL_SPREAD: still the pre-existing judgement-call thresholds, not
+  // re-derived from this measurement.
+  //
+  // NOTE ON WTSD: an earlier pass listed `wtsd: 20.9` here. That figure was
+  // HopesG's `wwsf` — won-when-saw-flop — a different statistic from
+  // went-to-showdown. This HUD now measures WTSD directly (13.5% observed),
+  // but it is deliberately NOT added here: POOL_SPREAD has no entry for it
+  // either, and adding one is its own judgement call this correction didn't
+  // set out to make. Same reasoning still applies to AFq.
   const POOL_AVG = {
-    vpip: 50.9,
-    pfr: 13.4,
-    threeBet: 3.7,
-    foldTo3Bet: 14.9,
-    cbet: 40.3,
-    foldToCbet: 56.1,
-    // Share of a player's VPIP that is limping rather than raising. The pool's
-    // defining trait: with VPIP 50.9 and PFR 13.4, most voluntary money goes in
-    // without a raise.
-    limpShareOfVpip: 44.8,
+    vpip: 42.5,
+    pfr: 9.4,
+    threeBet: 1.5,
+    foldTo3Bet: 48.1,
+    cbet: 38.7,
+    foldToCbet: 44.9,
+    // Share of a player's VPIP that is limping rather than raising.
+    limpShareOfVpip: 42.4,
   };
 
   // Strength of the prior, in pseudo-observations.
@@ -3760,11 +3776,13 @@
   // of, or distance from, POOL_AVG so that correcting POOL_AVG later moves the
   // labels with it rather than silently invalidating them.
   //
-  // Pool anchors: VPIP 50.9, PFR 13.4, PFR/VPIP 0.26.
+  // Pool anchors (v1.11.0, measured): VPIP 42.5, PFR 9.4, PFR/VPIP 0.221.
+  // aggRatio/passiveRatio are NOT re-derived from that ratio — see the
+  // "NOT touched by this correction" note on POOL_AVG above.
   const A = {
-    tight: POOL_AVG.vpip * 0.55,   // ~28 — well below pool, "tight" for Torn
-    loose: POOL_AVG.vpip * 1.15,   // ~59 — meaningfully looser than pool
-    aggRatio: 0.45,                // PFR/VPIP; pool sits at 0.26
+    tight: POOL_AVG.vpip * 0.55,   // ~23 — well below pool, "tight" for Torn
+    loose: POOL_AVG.vpip * 1.15,   // ~49 — meaningfully looser than pool
+    aggRatio: 0.45,                // PFR/VPIP; pool sits at 0.221
     passiveRatio: 0.20,            // clearly below pool: raises almost nothing
   };
 
@@ -7930,6 +7948,7 @@
       classifyProvisional,
       shortType,
       ARCHETYPE_SHORT,
+      A,
       observedPoolAverages,
       ACTION_BTN_RE,
       isPDA,

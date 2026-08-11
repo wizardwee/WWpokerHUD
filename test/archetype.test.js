@@ -15,7 +15,7 @@ const t = runner('archetype');
 const T = load();
 T.STORE = T.emptyStore();
 
-const { POOL_AVG, PRIOR_WEIGHT } = T;
+const { POOL_AVG, PRIOR_WEIGHT, A } = T;
 
 // Build a player record with the given observed counts.
 function player(o) {
@@ -63,18 +63,34 @@ const avgLabel = T.classifyProvisional(average);
 t.ok(`pool-average player is not Nit/LAG/Maniac (got ${avgLabel})`,
   !['Nit', 'LAG', 'Maniac'].includes(avgLabel));
 
-// 25% VPIP is tight FOR TORN even though it is loose by live-poker standards.
-t.eq('tight + passive is a Nit', T.classifyProvisional(withRates(20, 4)), 'Nit');
-t.eq('tight + aggressive is a TAG', T.classifyProvisional(withRates(22, 14)), 'TAG');
+// Every boundary case below is expressed RELATIVE to the live A/POOL_AVG
+// thresholds rather than as a hardcoded VPIP number. POOL_AVG is measured
+// pool data (v1.11.0) that gets corrected as more hands accrue — a fixed
+// "22% VPIP" input would silently start testing a different bucket the next
+// time that correction happens (this exact thing broke once already, when
+// POOL_AVG.vpip moved from 50.9 to 42.5 and a hardcoded 58 crossed from
+// "Fish" into "Station" without the test itself changing at all).
 
-// Very loose and aggressive.
-t.eq('very loose + aggressive is a LAG', T.classifyProvisional(withRates(70, 40)), 'LAG');
+// Comfortably below A.tight, weak raising.
+t.eq('tight + passive is a Nit',
+  T.classifyProvisional(withRates(A.tight * 0.85, A.tight * 0.85 * 0.2)), 'Nit');
+// Just below A.tight, strong raising.
+t.eq('tight + aggressive is a TAG',
+  T.classifyProvisional(withRates(A.tight * 0.95, A.tight * 0.95 * 0.6)), 'TAG');
 
-// Very loose and almost never raises.
-t.eq('very loose + no raising is a Station', T.classifyProvisional(withRates(75, 5)), 'Station');
+// Comfortably above A.loose, strong raising.
+t.eq('very loose + aggressive is a LAG',
+  T.classifyProvisional(withRates(A.loose * 1.3, A.loose * 1.3 * 0.6)), 'LAG');
 
-// Above pool but not extreme, with weak raising.
-t.eq('above-pool + weak raising is a Fish', T.classifyProvisional(withRates(58, 10)), 'Fish');
+// Comfortably above A.loose, almost never raises.
+t.eq('very loose + no raising is a Station',
+  T.classifyProvisional(withRates(A.loose * 1.3, A.loose * 1.3 * 0.05)), 'Station');
+
+// Strictly between the pool average and A.loose (1.0x-1.15x), with weak
+// raising — the gap the Fish rule exists to catch. 1.075x always sits
+// inside that gap by construction, whatever POOL_AVG.vpip happens to be.
+t.eq('above-pool + weak raising is a Fish',
+  T.classifyProvisional(withRates(POOL_AVG.vpip * 1.075, POOL_AVG.vpip * 1.075 * 0.2)), 'Fish');
 
 // --- Shrinkage changes the label for tiny samples ---------------------------
 

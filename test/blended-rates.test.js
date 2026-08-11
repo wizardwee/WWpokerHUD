@@ -42,7 +42,17 @@ const rep = (n, code) => Array(n).fill(code);
   const p = player(100, 20, 10, rep(15, PLAY));
   const b = T.blendedRates(p, 15);
   t.ok('the baseline is computed without the window', b.baseVpip < 20);
-  t.near('and lands near the true out-of-window rate', b.baseVpip, 11.7, 1);
+  // Independently computed via shrunkPct (pinned separately in
+  // archetype.test.js) rather than a hardcoded number, so this keeps testing
+  // "the baseline is 5/85 shrunk toward the CURRENT POOL_AVG.vpip" rather
+  // than one frozen figure that goes stale the next time POOL_AVG is
+  // corrected — which already broke this exact assertion once, when
+  // POOL_AVG.vpip moved from 50.9 to 42.5. baseVpip uses the DEFAULT prior
+  // weight (blendedRates calls shrunkPct with no 4th argument there) —
+  // RECENT_PRIOR_WEIGHT only applies one level up, blending the window
+  // itself against this baseline.
+  const expected = T.shrunkPct(5, 85, T.POOL_AVG.vpip, T.PRIOR_WEIGHT);
+  t.near('and lands near the true out-of-window rate', b.baseVpip, expected, 0.5);
 }
 
 // --- No cliff: the estimate moves continuously ------------------------------

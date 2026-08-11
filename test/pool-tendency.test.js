@@ -112,7 +112,7 @@ function mk(T, xid, o) {
       vpip: 50,
       pfr: 15,
       foldTo3BetMade: 8,
-      foldTo3BetOpp: 10, // 80% — well above POOL_AVG.foldTo3Bet (14.9), should read "extreme up"
+      foldTo3BetOpp: 10, // 80% — well above POOL_AVG.foldTo3Bet, should read "extreme up" regardless of its exact value
     });
   }
   const text = T.poolTendencyExport();
