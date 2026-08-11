@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.5.1
+// @version      1.6.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,41 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.6.0 - Hero's own VPIP really was split across two records, root cause found
+ *          from a live deep scan that printed `heroGhost(name:Wonkawee): EXISTS`
+ *          with 2174 hands tracking almost 1-for-1 against heroRecord's 2571 —
+ *          an ACTIVE ongoing split, not stale history. heroRecord's vpip/pfr
+ *          (166/89) read far lower than the ghost's (1198/662): nearly every
+ *          one of hero's own voluntary preflop actions was landing on the ghost.
+ *            - Root cause: nameToXidGuess resolves a log line's actor by
+ *              matching seat TEXT (a profile link, the name element, or the
+ *              seat's own blob). heroXid itself resolves by a completely
+ *              different path — the seat's self___ marker (0.22.0), which never
+ *              looks at the username. Nothing guarantees Torn's own seat prints
+ *              YOUR username where the text-matching passes look for it the way
+ *              it prints an opponent's, so hero's own log lines ("Wonkawee
+ *              called $X") failed every pass and fell to the name:Wonkawee
+ *              pseudo-id, forever — while dealtInXids/STORE.hero.hands (seat-xid
+ *              based, not name-based) kept accruing correctly, which is why the
+ *              split showed up only in log-driven stats, never in hand counts.
+ *            - Fix: nameToXidGuess now checks FIRST whether heroXid is already
+ *              resolved and the name matches the configured username
+ *              (case-insensitively) — if so it returns heroXid directly, no
+ *              seat text involved. test/name-boundary.test.js pins this: the
+ *              harness cannot drive the seat-matching passes at all, which
+ *              makes it the right tool to prove this exact path is what
+ *              resolves hero's name now.
+ *            - The historical ghost data is NOT auto-merged — mergePseudoPlayer
+ *              bails once the real record exists, by design, and reconciling
+ *              2174 already-split hands risks double-counting against a hand
+ *              count that is already complete. Use "Reset my stats" (1.5.0) to
+ *              clear both once this is live; going forward the numbers won't
+ *              re-split.
+ *            - Also confirmed by the same scan, no code changes needed: the
+ *              1.4.0 P/L fix (both no-showdown win lines now parse as `wins`,
+ *              not `shows`) and SELECTORS.seatState (matched a real sitting-out
+ *              player's seat correctly).
  *
  * 1.5.1 - Ran `node test/run.js` for the first time since 1.0.0 — every version
  *          from 1.0.1 through 1.5.0 shipped verified only by a JXA parse-check,
@@ -61,35 +96,6 @@
  *              while hero's log lines still go through nameToXidGuess. The only
  *              symptom is "my own VPIP looks low" while every opponent reads
  *              correctly, so nothing else points at identity.
- *
- * 1.4.0 - P/L was silently lost on every pot won WITHOUT a showdown.
- *          Found by a live deep scan, which printed the winner lines as
- *          "reveal rows": Torn writes "Bauderix won $28,500,000 Did not show
- *          hand" when a pot is taken with no reveal, and the deliberately-wide
- *          `shows` pattern matched the bare word "show" inside "Did not show
- *          hand". `shows` sat BEFORE `wins`, so the line was consumed as a
- *          showdown: the wins handler never ran, hand.winners stayed empty,
- *          and applyHandResults gates ALL of P/L on winners.length > 0.
- *            - Intermittent in the way that hides a bug: a winner who DOES
- *              show produces "won $65,000,000 with [J J]", which contains no
- *              "show", parsed fine, and recorded P/L normally. So P/L worked
- *              on some hands and vanished on others.
- *            - Second casualty: nameToXidGuess was handed "Bauderix won
- *              $28,500,000 Did not" as a username and returned a name: pseudo
- *              id, which logAction then counted as a player dealt in — junk
- *              records accumulating in the store.
- *            - Fixed twice over: `wins` is now tested before `shows`, and the
- *              shows pattern carries a negative LOOKAHEAD for "did not show"
- *              so it cannot match whichever order they end up in. Lookahead,
- *              never lookbehind — see containsNameToken.
- *            - Store schema 3 removes the junk records. Only name: keys whose
- *              name is not a legal username are dropped; a genuine pseudo-id
- *              holds a valid one and survives.
- *            - migrateStore's schema-2 wipe used to run UNCONDITIONALLY, so
- *              this very bump would have re-zeroed the P/L of every already
- *              migrated store. Blocks are now gated on the version migrated
- *              FROM. The pattern is inlined rather than using USERNAME_RE,
- *              which is still in its temporal dead zone when loadStore runs.
  *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
@@ -153,7 +159,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.5.1';
+  const HUD_VERSION = '1.6.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -1730,6 +1736,23 @@
     // numeric XID renderBadges reads off the seat, so the PFR/3B chip silently
     // stopped rendering and stats/P/L landed on pseudo-records — the same
     // failure mode CLAUDE.md documents under "The pseudo-id is not a resolution".
+    //
+    // Hero's OWN log lines are a case none of the passes below can ever solve.
+    // A live deep scan (v1.5.1) found heroXid resolving correctly off the
+    // seat's self___ marker while a `name:<username>` ghost record kept
+    // accumulating almost every hand in parallel — heroRecord.vpip/pfr read far
+    // LOWER than the ghost's, which is the "my own VPIP looks low" report this
+    // was tracking. Root cause: Torn's own seat does not necessarily print your
+    // OWN username where every pass here looks for it (a link, the name
+    // element, or the seat's text blob) the way it prints an opponent's — so a
+    // name match against your own seat can fail every single hand while an
+    // opponent's never does. Once heroXid is resolved by ANY means (the seat
+    // marker, primarily), it is the answer for a name equal to the configured
+    // username — no seat text needed at all.
+    if (!heroUnresolved()) {
+      const configured = (STORE.settings.heroName || '').trim();
+      if (configured && name && name.toLowerCase() === configured.toLowerCase()) return heroXid;
+    }
     const seats = Array.from(document.querySelectorAll(SELECTORS.seatContainer));
 
     for (const seat of seats) {
@@ -7615,6 +7638,8 @@
       NOTABLE_POT_BB_THRESHOLD,
       NOTABLE_PREFLOP_RAISE_BB,
       HISTORY_PINNED_CEILING,
+      nameToXidGuess,
+      heroUnresolved,
       // Exposed as accessors because STORE and heroXid are rebound, not
       // mutated — a plain reference would freeze at whatever loaded first.
       applyHandResults,

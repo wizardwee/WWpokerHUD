@@ -95,6 +95,40 @@ t.eq('empty name is not a match', has('Bob$1,000,000', ''), false);
 t.eq('a repeated name matches on the second, valid occurrence',
   has('Bobby and Bob', 'Bob'), true);
 
+// --- Hero's own log lines: the one case seat-text matching can never solve --
+//
+// A live deep scan (v1.5.1) found heroXid resolving correctly off the seat's
+// self___ marker while a `name:<username>` ghost record kept accumulating in
+// parallel, almost one-for-one with hero's real hand count — heroRecord's
+// vpip/pfr read far LOWER than the ghost's, the "my own VPIP looks low"
+// report CLAUDE.md had open. Root cause: nothing says Torn's own seat prints
+// YOUR username where these passes look for it the way it prints an
+// opponent's, so a name match against your own seat can fail every hand while
+// an opponent's match never does. This harness can't drive the seat-matching
+// passes at all (SELECTORS.seatContainer never matches on the stub — see file
+// header), which makes it the right tool for THIS assertion: with no seat able
+// to match anything, the only way nameToXidGuess can return heroXid rather
+// than the pseudo-id is the direct name-vs-configured-username check.
+{
+  const T = load();
+  T.STORE.settings.heroName = 'Wonkawee';
+
+  T.heroXid = '311421';
+  t.eq('hero\'s own name resolves straight to heroXid once heroXid is known',
+    T.nameToXidGuess('Wonkawee'), '311421');
+  t.eq('the match is case-insensitive (Torn login is)',
+    T.nameToXidGuess('wonkawee'), '311421');
+  t.eq('a different name is unaffected', T.nameToXidGuess('SomeoneElse'), 'name:SomeoneElse');
+
+  T.heroXid = null;
+  t.eq('unresolved heroXid falls through to the pseudo-id, same as before this fix',
+    T.nameToXidGuess('Wonkawee'), 'name:Wonkawee');
+
+  T.heroXid = 'name:Wonkawee';
+  t.eq('a pseudo heroXid does not short-circuit itself',
+    T.nameToXidGuess('Wonkawee'), 'name:Wonkawee');
+}
+
 // --- Engine compatibility: no lookbehind anywhere in the script -------------
 //
 // The scan is the point. A lookbehind reads as ordinary modern JS and passes

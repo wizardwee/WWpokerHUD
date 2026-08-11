@@ -1093,38 +1093,55 @@ unshrunk because no published pool figure exists for it.
 
 ## Next task
 
-**Four things are open as of v1.5.0, in priority order.** The first three all
-need one live scan or one report from the table; none can be settled by reading
-code.
+**A live deep scan (v1.5.1, from the actual table) closed all three of the
+open live-verification items.** Keep the scan itself as the record:
 
-1. **Confirm the v1.4.0 P/L fix at a live table.** Winner lines on pots taken
-   WITHOUT a showdown ("X won $Y Did not show hand") were being consumed by the
-   `shows` pattern, so `hand.winners` stayed empty and ALL of P/L was skipped.
-   Fixed twice over (order + negative lookahead), but **not yet confirmed
-   live**. Win a pot with everyone folding and check that P/L moves.
-2. **Is hero's own VPIP split across two records?** Reported as "my personal
-   VPIP seems low". The deep scan now prints `heroRecord`, `heroGhost` and
-   `STORE.hero` together — a `heroGhost … EXISTS` line is the whole diagnosis.
-   `heroXid: ok` does NOT rule it out; see the deep-scan comment for why.
-   **Don't let the user reset their stats before reading this** — the reset
-   destroys the evidence, and the numbers would just re-accrue wrong.
-3. **`SELECTORS.seatState` is unconfirmed on this layout.** It is what excludes
-   sitting-out players from the "hands observed" denominator. If it matches
-   nothing, every rate for every player reads LOW. The v1.1.0 scan showed
-   `state_` matching 13 elements and `probe "Sitting out": 0 hits` with nobody
-   sitting out — suggestive, not proof. Needs a scan taken while someone IS
-   sitting out.
-4. **Node, and the test suite — done, in v1.5.1.** `node test/run.js` had not
-   run since v1.0.0; v1.0.1 through v1.5.0 shipped verified only by a JXA
-   parse-check. It crashed instantly: the test-only export block referenced
-   `recordShownHand`, which was never a real function (`noteShowdown` always
-   was) — a copy-paste mismatch from 1.1.0 that took down all 27 files at
-   once. Two more failures were real once that was fixed, both the same
-   shape: an intentional 1.1.0/1.3.0 behaviour change that shipped without
-   Node to check it, and a test whose expectation was never updated to
-   match. All three fixed; `node test/run.js` is green (27/27). See
-   CHANGELOG.md 1.5.1 for the detail. No production runtime code changed —
-   the broken reference lived entirely inside `window.__TPH_TEST_HOOKS`.
+1. **The v1.4.0 P/L fix is confirmed.** The scan's "reveal rows in log"
+   section shows both no-showdown win lines ("X won $Y Did not show hand")
+   parsed as `-> wins`, not `-> shows`. That is the fix working: before it,
+   these lines were consumed by `shows` and `hand.winners` stayed empty, so
+   P/L was skipped on every pot won without a showdown.
+2. **`SELECTORS.seatState` is confirmed.** The scan was taken with a real
+   player sitting out (`sittingOut: player-2587965`), and the `"Sitting out"`
+   text probe matched nested under `DIV.state___K_BXh` inside that exact
+   seat. `[class*="state_"]` is the right selector on this layout; sitting-out
+   players are correctly excluded from the "hands observed" denominator.
+3. **Hero's own VPIP WAS split across two records — root cause found and
+   fixed in v1.6.0.** The scan printed `heroGhost(name:Wonkawee): EXISTS`
+   with 2174 hands against `heroRecord`'s 2571 — tracking almost 1-for-1 with
+   hero's real hand count, so this was an ACTIVE ongoing split, not stale
+   history. `heroRecord.vpip`/`.pfr` (166/89) read far lower than the
+   ghost's (1198/662): nearly every one of hero's own voluntary preflop
+   actions was landing on the ghost.
+   - **Root cause:** `nameToXidGuess` resolves a log line's actor name to a
+     seat by matching seat TEXT — a profile link, the seat's own name
+     element, or (last resort) the whole seat blob. `heroXid` itself resolves
+     correctly, but by a completely different path: the seat's `self___`
+     marker (v0.22.0), which never looks at the username at all. Nothing
+     guarantees Torn's own seat prints the sitting player's OWN username
+     where these text-matching passes look for it — an opponent's seat
+     reliably does, hero's evidently does not on this layout. So every one of
+     hero's own log lines ("Wonkawee called $X") failed all three passes and
+     fell through to the `name:Wonkawee` pseudo-id, forever, while
+     `dealtInXids`/`STORE.hero.hands` (both seat-xid-based, not name-based)
+     kept accruing correctly on the real record — hence the split being
+     visible only in the log-driven stats (VPIP/PFR/etc.), never in hand
+     counts.
+   - **Fix:** `nameToXidGuess` now checks, before touching any seat, whether
+     `heroXid` is already resolved (`!heroUnresolved()`) and the name matches
+     the configured username (case-insensitively) — if so it returns
+     `heroXid` directly, no seat text involved. `test/name-boundary.test.js`
+     pins this: the harness can't drive the seat-matching passes at all (see
+     that file's header), which makes it the right tool to prove this exact
+     path is what resolves hero's name now.
+   - **The historical ghost data is not merged.** `mergePseudoPlayer` bails
+     when the real record already exists (by design — see "Names must be
+     bound explicitly"), so the 2174 already-corrupted hands sit in
+     `name:Wonkawee` untouched. Reconciling them into the real record risks
+     double-counting (the real record's `hands` is already complete via the
+     seat-xid path). **Recommend "Reset my stats"** (v1.5.0) to the user to
+     clear both once this fix is live — going forward hero's own log lines
+     resolve correctly, so the numbers won't re-split.
 
 Then back to **screen real estate**, which is reported from the table rather
 than reasoned about. The badge floats over the felt at a fixed size and

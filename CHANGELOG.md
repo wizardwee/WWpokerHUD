@@ -9,6 +9,57 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.6.0
+
+Hero's own VPIP really was split across two records. Root cause found from a
+live deep scan that printed `heroGhost(name:Wonkawee): EXISTS` with 2174 hands
+tracking almost 1-for-1 against `heroRecord`'s 2571 — an active, ongoing split,
+not stale history left over from before identity resolution worked. The
+ghost's raw vpip/pfr counts (1198/662) were far higher than the real record's
+(166/89): nearly every one of hero's own voluntary preflop actions was landing
+on the ghost instead.
+
+**Root cause.** `nameToXidGuess` resolves a log line's actor name to a seat by
+matching seat TEXT — a profile link, the seat's own name element, or, as a
+last resort, the whole seat blob. `heroXid` itself resolves by a completely
+different path: the seat's `self___` marker (0.22.0), which never looks at the
+username at all. Nothing guarantees Torn's own seat prints the sitting
+player's OWN username where the text-matching passes look for it the way it
+reliably prints an opponent's — evidently it does not, on this layout. So
+every one of hero's own log lines ("Wonkawee called $X") failed all three
+passes and fell through to the `name:Wonkawee` pseudo-id, every time, while
+`dealtInXids` and `STORE.hero.hands` — both keyed off the seat's numeric XID,
+never off a name — kept accruing correctly on the real record. That is why the
+split was invisible in hand counts and visible only in the log-driven rate
+stats.
+
+**The fix.** `nameToXidGuess` now checks, before touching any seat, whether
+`heroXid` is already resolved and the name being resolved matches the
+configured username (case-insensitively, since Torn login is). If so it
+returns `heroXid` directly — no seat text involved for the one player whose
+real XID is already known by another, more reliable means.
+`test/name-boundary.test.js` pins this. The harness cannot drive the
+seat-matching passes at all (`SELECTORS.seatContainer` never matches against
+the stub DOM — see that file's own header), which makes it the right tool for
+this exact assertion: with no seat able to match anything, the only way
+`nameToXidGuess` can return `heroXid` rather than the pseudo-id is the new
+direct check.
+
+**The historical ghost data is not merged automatically.** `mergePseudoPlayer`
+bails once the real record already exists — by design, see "Names must be
+bound explicitly" — so the 2174 already-split hands stay in `name:Wonkawee`,
+untouched. Reconciling them into the real record risks double-counting, since
+the real record's hand count is already complete via the seat-XID path.
+Recommend "Reset my stats" (1.5.0) to clear both once this fix is live; going
+forward hero's own log lines resolve correctly, so the numbers will not
+re-split.
+
+**Two other open items closed by the same scan, no code changes needed.** The
+1.4.0 P/L fix is confirmed: both no-showdown win lines in the scan parsed as
+`-> wins`, not `-> shows`. And `SELECTORS.seatState` is confirmed: the scan
+was taken with a real player sitting out, and the "Sitting out" text probe
+matched nested inside that exact seat.
+
 ## 1.5.1
 
 Ran `node test/run.js` for the first time since 1.0.0 — every version from
