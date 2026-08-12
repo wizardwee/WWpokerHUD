@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.11.0
+// @version      1.12.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,22 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.12.0 - Pool tendencies export now says HOW MANY hands and WHICH STAKES.
+ *          Asked directly after 1.11.0's POOL_AVG correction landed — the
+ *          export named the player count but not the hand count or the
+ *          stakes it was drawn from.
+ *             - observedPoolAverages() gains totalHands: the sum of each
+ *               qualifying player's own lifetime hand count (the same
+ *               denominator computeRates uses), not a hand-history length.
+ *             - New poolStakesBreakdown(), aggregating p.tables (already used
+ *               per-player by "Usually plays" in the Stats tab) across every
+ *               qualifying player — same set poolQualifyingPlayers() now
+ *               shares with observedPoolAverages() so the two never
+ *               independently drift.
+ *             - p.tables is only written when a hand's blind was readable, so
+ *               its sum typically runs slightly BELOW totalHands — reported
+ *               as its own total rather than silently assumed equal.
  *
  * 1.11.0 - POOL_AVG is measured now, not borrowed. Corrected from
  *           observedPoolAverages() output over 173 tracked opponents (25+
@@ -43,26 +59,6 @@
  *             - Also confirmed by a fresh deep scan: the v1.6.0 hero-identity
  *               fix is holding — heroGhost(name:Wonkawee): none, heroRecord
  *               and STORE.hero match exactly, no drift.
- *
- * 1.10.0 - Two players-list fixes, both reported straight after 1.9.0 shipped.
- *            - "Save / share pool tendencies" only calls PDA's native share
- *              handler, an async OS-level share sheet this webview can't see
- *              the outcome of — the button's "Sent ✓" just means the handler
- *              was CALLED, not that anything visibly happened, which read as
- *              broken on a real device. Added a plain "Copy" button beside it
- *              that goes straight to the clipboard, no share-sheet detour —
- *              the same two-button split the per-player History export
- *              already uses (Copy vs Save/share), just missing here.
- *            - The players list table is now sortable: tap any header (Name,
- *              Type, Hands, VPIP/PFR, P/L) to sort by it, tap again to flip
- *              direction. playersSortValue() decides what each column
- *              actually sorts on — VPIP/PFR sorts on VPIP alone, since that's
- *              the leading, more comparable figure; a player with no data for
- *              a stat sorts as -Infinity, not 0, so "never faced a 3-bet"
- *              can't land in the middle of players who "always call it"; and
- *              hero's own P/L (which shows "see Lifetime", not a number)
- *              sorts to the bottom on that column rather than wherever
- *              plChipsEst happens to place it.
  *
  * 1.5.1 - Ran `node test/run.js` for the first time since 1.0.0 — every version
  *          from 1.0.1 through 1.5.0 shipped verified only by a JXA parse-check,
@@ -148,7 +144,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.11.0';
+  const HUD_VERSION = '1.12.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -3657,13 +3653,22 @@
   // everyone else's, not the dominant source of error the way it would be for
   // a single opponent.
   const POOL_OBS_MIN_HANDS = 25;
-  function observedPoolAverages() {
-    const ps = Object.keys(STORE.players)
+
+  // The player records a pool read is built from — hero excluded, 25+ hands
+  // each. Pulled out as its own function so observedPoolAverages() and
+  // poolStakesBreakdown() describe exactly the same set of players, not two
+  // independently-filtered lists that could quietly drift apart.
+  function poolQualifyingPlayers() {
+    return Object.keys(STORE.players)
       // Hero's own record is not part of the opponent pool, and including it
       // would bias the average toward your own style.
       .filter((xid) => heroUnresolved() || String(xid) !== String(heroXid))
       .map((xid) => STORE.players[xid])
       .filter((p) => p && p.hands >= POOL_OBS_MIN_HANDS);
+  }
+
+  function observedPoolAverages() {
+    const ps = poolQualifyingPlayers();
     if (ps.length < 3) return null; // too few to mean anything
     const rates = ps.map((p) => computeRates(p));
     const mean = (f) => {
@@ -3672,6 +3677,12 @@
     };
     return {
       players: ps.length,
+      // Sum of each qualifying player's OWN lifetime hand count — the same
+      // "hands observed" denominator computeRates uses, not a count of
+      // actions or a hand-history length. This is "how many hands of
+      // evidence sit behind this average" in the same units the rest of the
+      // UI already reports per-player sample size in.
+      totalHands: ps.reduce((a, p) => a + (p.hands || 0), 0),
       vpip: mean((r) => r.vpip),
       pfr: mean((r) => r.pfr),
       threeBet: mean((r) => r.threeBet),
@@ -3685,6 +3696,38 @@
       afq: mean((r) => r.afq),
       wtsd: mean((r) => r.wtsd),
     };
+  }
+
+  // Which stakes the pool read is actually drawn from, busiest first.
+  // Answers "which stakes/rooms" for observedPoolAverages() the same way
+  // tablesPlayed(p) answers it for one player — this is that same aggregation
+  // summed across every qualifying player instead of just one.
+  //
+  // p.tables is written at hand settlement only when the blind was readable
+  // (see noteBlindLevel / plausibleBB), so its sum is typically slightly
+  // BELOW a player's p.hands, not equal to it — a hand with an implausible or
+  // missed blind read contributes to the rate averages (computeRates doesn't
+  // need a blind level) but not to this breakdown. Reported as its own total
+  // rather than silently assumed equal to totalHands.
+  function poolStakesBreakdown() {
+    const ps = poolQualifyingPlayers();
+    const byBB = {};
+    ps.forEach((p) => {
+      Object.keys(p.tables || {}).forEach((bb) => {
+        byBB[bb] = (byBB[bb] || 0) + (p.tables[bb] || 0);
+      });
+    });
+    const total = Object.keys(byBB).reduce((a, k) => a + byBB[k], 0);
+    if (!total) return { total: 0, stakes: [] };
+    const stakes = Object.keys(byBB)
+      .map((k) => ({
+        bb: Number(k),
+        name: tableNameForBB(Number(k)) || fmtMoney(Number(k)) + ' BB',
+        hands: byBB[k],
+        share: (100 * byBB[k]) / total,
+      }))
+      .sort((a, b) => b.hands - a.hands);
+    return { total, stakes };
   }
 
   // The full report as a downloadable/copyable file — every stat above, each
@@ -3709,7 +3752,8 @@
       return header.join('\n') + '\n';
     }
     header.push(`Averaged across ${obs.players} tracked opponent(s) with ${POOL_OBS_MIN_HANDS}+ hands each `
-      + '(hero excluded). Each stat is a RAW average — not sample-adjusted — and only counts players who '
+      + `(hero excluded), ${obs.totalHands} hand(s) of evidence total (each qualifying player's own lifetime `
+      + 'hand count, summed). Each stat is a RAW average — not sample-adjusted — and only counts players who '
       + 'actually had that opportunity at all, same rule computeRates uses everywhere else in this file.');
     header.push('');
     const row = (label, key, hasPoolFigure) => {
@@ -3732,7 +3776,20 @@
       row('AFq (aggression, folds excluded)', 'afq', false),
       row('WTSD', 'wtsd', false),
     ];
-    return header.join('\n') + '\n' + lines.join('\n') + '\n\n'
+    const stakesBlock = (() => {
+      const sb = poolStakesBreakdown();
+      if (!sb.total) {
+        return ['', 'Stakes: unknown — no qualifying player has a readable blind level recorded yet.'];
+      }
+      const out = ['', `Stakes (${sb.total} hand(s) with a readable blind level — `
+        + 'may be less than the total above; a hand whose blind couldn\'t be read still counts toward the '
+        + 'rates but not toward this breakdown):'];
+      sb.stakes.forEach((s) => {
+        out.push(`  ${s.name} (${fmtMoney(s.bb)} BB): ${s.hands} hand(s), ${s.share.toFixed(0)}%`);
+      });
+      return out;
+    })();
+    return header.join('\n') + '\n' + lines.join('\n') + '\n' + stakesBlock.join('\n') + '\n\n'
       + 'If these diverge from the assumed pool figures over a few hundred hands, the assumed figures '
       + '(POOL_AVG in the script) are what to correct, not this observed data — see CLAUDE.md.\n';
   }
@@ -7950,6 +8007,7 @@
       ARCHETYPE_SHORT,
       A,
       observedPoolAverages,
+      poolStakesBreakdown,
       ACTION_BTN_RE,
       isPDA,
       fmtMoney,

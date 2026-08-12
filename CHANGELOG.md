@@ -9,6 +9,40 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.12.0
+
+Pool tendencies export now says **how many hands** and **which stakes** it's
+drawn from — asked directly after the 1.11.0 `POOL_AVG` correction landed.
+The export already named the player count (173 tracked opponents) but not
+the hand count behind it or which rooms it spanned, which matters for
+judging how much confidence to place in a correction like that one.
+
+**`observedPoolAverages()` gains `totalHands`**: the sum of each qualifying
+player's own lifetime hand count — the same "hands observed" denominator
+`computeRates` already uses everywhere else, not a count of logged actions or
+a hand-history length.
+
+**New `poolStakesBreakdown()`** aggregates `p.tables` (blind level → hands
+seen there, already used per-player by "Usually plays" in the Stats tab)
+across every qualifying player, ranked busiest first with a share percentage.
+`poolQualifyingPlayers()` was pulled out as its own function so this and
+`observedPoolAverages()` are guaranteed to describe the exact same set of
+players — two independently-filtered lists that could quietly drift apart
+was the failure mode worth avoiding here.
+
+One honesty detail in the export text: `p.tables` is only incremented when a
+hand's blind level was actually readable (see `noteBlindLevel`/`plausibleBB`),
+so its total typically runs slightly *below* `totalHands` — a hand with an
+unreadable blind still counts toward the rate averages (`computeRates`
+doesn't need a blind level) but not toward the stakes breakdown. The report
+says so explicitly rather than implying the two totals should match.
+
+14 new assertions in `test/pool-tendency.test.js` cover `totalHands`
+excluding hero and under-sample players, the stakes breakdown's aggregation
+and sorting, an under-sample player's stakes being excluded from the
+breakdown the same way their rates already were, and the "no readable blind
+anywhere" and "no qualifying players" empty-report cases.
+
 ## 1.11.0
 
 `POOL_AVG` is measured now, not borrowed. Corrected from `observedPoolAverages()`

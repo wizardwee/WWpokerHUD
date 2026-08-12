@@ -101,6 +101,62 @@ function mk(T, xid, o) {
   t.near('hero\'s own extreme numbers do not pull the average', obs.vpip, 50);
 }
 
+// --- totalHands: sum of each qualifying player's own lifetime hand count ---
+
+{
+  const T = load();
+  T.STORE = T.emptyStore();
+  mk(T, 'a', { hands: 100, vpip: 50, pfr: 15 });
+  mk(T, 'b', { hands: 250, vpip: 50, pfr: 15 });
+  mk(T, 'c', { hands: 40, vpip: 50, pfr: 15 });
+  // Hero and an under-sample player must not count toward the total either —
+  // same qualifying set the rates themselves are averaged over.
+  T.heroXid = 'hero1';
+  mk(T, 'hero1', { hands: 9999, vpip: 50, pfr: 15 });
+  mk(T, 'thin', { hands: 5, vpip: 50, pfr: 15 });
+
+  const obs = T.observedPoolAverages();
+  t.eq('totalHands sums only the qualifying players', obs.totalHands, 100 + 250 + 40);
+}
+
+// --- poolStakesBreakdown: which stakes the pool read is drawn from ---------
+
+{
+  const T = load();
+  T.STORE = T.emptyStore();
+  // River Wizard ($1M BB) and Cat's Chance ($2.5M BB) are both confirmed
+  // TORN_STAKES entries (see CLAUDE.md "Stakes, and the BB-display hazard").
+  mk(T, 'a', { hands: 100, vpip: 50, pfr: 15, tables: { 1000000: 70, 2500000: 30 } });
+  mk(T, 'b', { hands: 100, vpip: 50, pfr: 15, tables: { 1000000: 30 } });
+  mk(T, 'c', { hands: 100, vpip: 50, pfr: 15 }); // no readable blind ever
+
+  const sb = T.poolStakesBreakdown();
+  t.eq('total is the sum of every qualifying player\'s tables entries', sb.total, 70 + 30 + 30);
+  t.eq('two distinct stakes reported', sb.stakes.length, 2);
+  t.eq('busiest stake first', sb.stakes[0].name, 'River Wizard');
+  t.eq('River Wizard hands are summed across both players', sb.stakes[0].hands, 100);
+  t.near('River Wizard share', sb.stakes[0].share, 100 / 130 * 100);
+  t.eq('second stake is Cat\'s Chance', sb.stakes[1].name, "Cat's Chance");
+
+  // Below POOL_OBS_MIN_HANDS — excluded from the qualifying set, so an
+  // enormous tables entry here must not appear in the breakdown.
+  mk(T, 'thin', { hands: 5, tables: { 100000000: 99999 } });
+  const sb2 = T.poolStakesBreakdown();
+  t.eq('an under-sample player\'s stakes are excluded, not just their rates',
+    sb2.total, 130);
+}
+
+{
+  const T = load();
+  T.STORE = T.emptyStore();
+  mk(T, 'a', { hands: 100, vpip: 50, pfr: 15 });
+  mk(T, 'b', { hands: 100, vpip: 50, pfr: 15 });
+  mk(T, 'c', { hands: 100, vpip: 50, pfr: 15 });
+  const sb = T.poolStakesBreakdown();
+  t.eq('no readable blind anywhere reads as an empty breakdown, not an error', sb.total, 0);
+  t.eq('and an empty stakes list', sb.stakes.length, 0);
+}
+
 // --- poolTendencyExport: report shape ---------------------------------------
 
 {
@@ -113,16 +169,31 @@ function mk(T, xid, o) {
       pfr: 15,
       foldTo3BetMade: 8,
       foldTo3BetOpp: 10, // 80% — well above POOL_AVG.foldTo3Bet, should read "extreme up" regardless of its exact value
+      tables: { 1000000: 100 },
     });
   }
   const text = T.poolTendencyExport();
   t.ok('names the player count', text.indexOf('5 tracked opponent') !== -1);
+  t.ok('names the total hand count', text.indexOf('500 hand(s) of evidence total') !== -1);
   t.ok('reports VPIP', text.indexOf('VPIP: 50.0%') !== -1);
   t.ok('reports a deviation label against the assumed pool figure', text.indexOf('extreme up') !== -1);
   t.ok('AFq is reported without a pool comparison', text.indexOf('AFq') !== -1
     && text.indexOf('AFq (aggression, folds excluded): not enough data') !== -1);
   t.ok('WTSD says no published figure exists, not a fabricated one',
     text.indexOf('WTSD') !== -1 && !/WTSD: [\d.]+% \(assumed/.test(text));
+  t.ok('names the stake', text.indexOf('River Wizard') !== -1);
+  t.ok('reports the stakes hand count and share', text.indexOf('500 hand(s), 100%') !== -1);
+}
+
+{
+  // No qualifying player has a readable blind level at all — the stakes
+  // section says so explicitly rather than rendering an empty/blank block.
+  const T = load();
+  T.STORE = T.emptyStore();
+  for (let i = 0; i < 3; i++) mk(T, 'p' + i, { hands: 100, vpip: 50, pfr: 15 });
+  const text = T.poolTendencyExport();
+  t.ok('stakes are reported as unknown, not silently omitted',
+    text.indexOf('Stakes: unknown') !== -1);
 }
 
 {
