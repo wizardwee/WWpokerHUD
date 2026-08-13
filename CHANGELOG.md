@@ -9,6 +9,45 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.15.0
+
+A self leak-finder — what DriveHUD calls its "MDA Exploit Report" and
+PokerTracker 4 calls LeakTracker, except aimed at your own game instead of an
+opponent's. Both are genuinely mainstream HUD features and both do the same
+underlying thing this file already does for opponents: compare a player's
+rates to a population baseline and rank the deviations. The only real gap was
+that this file only ever pointed that comparison at someone else.
+
+**`buildTendencyEntries(p, voice)`** is the detection pass extracted from the
+old `buildExploitPlan` — same rules, same `POOL_AVG`/`POOL_SPREAD` gates, same
+`gain`/`tag`/`when` relevance tagging. `buildExploitPlan(p)` is now a thin
+wrapper calling it with `'exploit'`; the new `buildLeakPlan(p)` calls it with
+`'leak'`. Every rule's `add()` call carries **both** phrasings side by side,
+so there is exactly one call site per rule rather than two independent copies
+that could quietly disagree about a threshold after the next `POOL_AVG`
+correction (see 1.11.0 for why that's not a hypothetical risk in this file).
+
+**Hero's own player panel shows a "Leaks" tab** in the same slot the "Exploit"
+tab occupies for anyone else — `buildExploitHtml` gained an `isSelf` flag that
+switches both the plan source and the empty-state copy ("No leaks found yet"
+vs "Nothing clearly exploitable yet"). Two things worth knowing about which
+rules actually fire for hero:
+
+- **Tilt and stack-swing entries DO fire for hero.** Being stuck 50bb or up
+  100bb this sitting is exactly when a player's own game tends to drift, hero
+  included — these aren't opponent-only reads.
+- **Shown-hand range entries never fire for hero**, because `harvestShownCards`
+  deliberately excludes hero's own cards (see "Showdown ranges" — recording
+  them would count a showdown every single hand). The leak-voice text for
+  those rules exists in the source as dead code by construction, not a gap
+  someone forgot to special-case.
+
+71 new assertions in `test/leak-plan.test.js`. Most of them are a parity
+check, which matters more here than any individual sentence: given the same
+player, both voices must produce identical `gain`/`tag`/`when` and genuinely
+different wording. A leak-finder that silently disagreed with the exploit
+plan it was built from would be worse than not having one.
+
 ## 1.14.0
 
 Hero's badge nudged down one more line, reported from a live table. The
