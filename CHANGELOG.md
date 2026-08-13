@@ -9,6 +9,39 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.16.0
+
+A recent-form sparkline on the Stats tab — rolling VPIP (blue) and PFR
+(amber), `TREND_WINDOW_HANDS` (10) hands per point, oldest to newest left to
+right. The blended VPIP/PFR figure already on that row says *where* a
+player's numbers are right now; this says *how they got there* — drifting
+looser, drifting tighter, or just bouncing around a stable number — which is
+invisible in any single blended figure. No new data collection: `p.recent`
+is the exact same bitfield array `blendedRates`/`sessionRates` already read
+for the badge's "recent form" mode.
+
+**Its own window size, deliberately not `STORE.settings.sessionWindow`.**
+That setting is tuned for one stable *estimate* — bigger is steadier. A trend
+needs the opposite: many noisier points to show a shape, not one smooth
+number. Sharing the setting would also have a real failure mode: a user who
+raises `sessionWindow` toward `RECENT_MAX` (40) would watch their sparkline
+disappear entirely, since a window equal to the whole buffer has exactly one
+possible reading — zero line segments to draw.
+
+**`recentTrendPoints`/`sparklineSvg` are pure functions**, deliberately kept
+DOM-free — the arithmetic (rolling VPIP/PFR over a sliding window) and the
+SVG string output are both directly testable, rather than only reachable
+through a render pass this test harness can't drive. 25 new assertions in
+`test/trend-sparkline.test.js`, including the one that actually matters for
+whether this reads correctly at a glance: a 100% point plots at the *top* of
+the track (`y=0`), so "trending up" on the stat actually points up on screen.
+
+One near-miss worth recording: an early draft of the CSS comment explaining
+why `.tph-sparkline` needs no declared colour used backticks around the word
+"color" — inside the stylesheet's own template literal, which is exactly the
+"no backticks in CSS comments" trap this file has been bitten by once already
+(v0.25.0, the word `td`). Caught by `node --check` before it shipped.
+
 ## 1.15.0
 
 A self leak-finder — what DriveHUD calls its "MDA Exploit Report" and

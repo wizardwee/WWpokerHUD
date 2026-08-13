@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.15.0
+// @version      1.16.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,26 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.16.0 - A recent-form sparkline on the Stats tab: rolling VPIP (blue) and
+ *          PFR (amber), TREND_WINDOW_HANDS (10) hands per point, oldest to
+ *          newest left to right. The blended figure already on that row says
+ *          WHERE a player is right now; this says whether they got there
+ *          drifting up, drifting down, or bouncing around — invisible in any
+ *          single blended number. No new data: p.recent is the same bitfield
+ *          array blendedRates/sessionRates already read.
+ *            - recentTrendPoints/sparklineSvg are pure functions (no DOM), so
+ *              the actual arithmetic and SVG output are directly tested rather
+ *              than only reachable through a render pass this harness can't
+ *              drive. 25 new assertions in test/trend-sparkline.test.js,
+ *              including that a 100% point plots at the TOP of the track
+ *              (y=0) — the thing that makes "trending up" actually point up.
+ *            - Its own window size (10), not STORE.settings.sessionWindow:
+ *              that setting is tuned for one STABLE estimate (bigger window,
+ *              steadier), this needs many NOISY points to show a shape.
+ *              Sharing it would also mean raising sessionWindow toward
+ *              RECENT_MAX (40) makes the sparkline disappear entirely — at
+ *              window==40 there is exactly one possible window to draw.
  *
  * 1.15.0 - A self leak-finder: what DriveHUD calls its "MDA Exploit Report" and
  *          PT4 calls LeakTracker, aimed at your own game instead of an
@@ -46,29 +66,6 @@
  *          the badge floating over empty felt above the name rather than on
  *          it. SELF_BADGE_DOWN_NUDGE_PX is now 1.5 badge-lines (was 0.5), so
  *          the badge covers the name and nothing else.
- *
- * 1.13.0 - Turn cue escalates: still your turn TURN_ESCALATE_MS (10s) after the
- *          first chime/buzz/glow, and it fires a second, stronger one — a
- *          phone dimmed or set down since the first cue gets a second chance.
- *          Not a repeating alarm: exactly one escalation per turn.
- *            - playTurnEscalationChime repeats the same rising two-note shape
- *              twice back to back, reusing playChimeNotes (pulled out of
- *              playTurnChime) rather than an unfamiliar sound needing its own
- *              "what was that?" moment to place. Vibration escalates too
- *              ([120,80,120] vs a single 120ms buzz).
- *            - tph-glow-escalated: brighter border, wider glow, faster pulse
- *              (0.6s vs 1.25s) — still green, since this never stops being
- *              "your turn", just louder about it. Gear and coach-head pick up
- *              a matching highlight.
- *            - shouldEscalateTurnCue is the actual timing decision, pulled out
- *              of renderTurnCue as a pure function specifically so it has real
- *              test coverage — renderTurnCue itself can't be driven through
- *              this harness (needs live seat/action-button DOM), which is
- *              exactly why the decision logic living inside it untested was
- *              the wrong place for it.
- *            - Settings gained a "Test escalation" button beside the existing
- *              chime test, and the section text states the 10s delay from the
- *              live TURN_ESCALATE_MS constant rather than a hardcoded copy.
  *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
@@ -132,7 +129,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.15.0';
+  const HUD_VERSION = '1.16.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -3395,6 +3392,62 @@
     return { hands: win.length, won, winPct: (100 * won) / win.length };
   }
 
+  // A rolling VPIP/PFR trend across p.recent, one point per TREND_WINDOW_HANDS
+  // window, oldest first — the shape a sparkline draws.
+  //
+  // Deliberately its OWN window size, not STORE.settings.sessionWindow: the
+  // badge's window is tuned for a single stable ESTIMATE (bigger is steadier),
+  // this is tuned for a TRAJECTORY (more, noisier points beat one smooth one —
+  // the point is the slope, not any single reading). Sharing sessionWindow
+  // would also mean a user who raises it toward RECENT_MAX (40) loses the
+  // sparkline entirely: at window==40 there is exactly one possible window,
+  // i.e. zero line segments to draw.
+  //
+  // Returns [] rather than null with too little data — callers can render
+  // "not enough data yet" off an empty array without a separate null check,
+  // same as shownRange/tablesPlayed already do.
+  const TREND_WINDOW_HANDS = 10;
+
+  function recentTrendPoints(p, windowSize) {
+    const w = windowSize || TREND_WINDOW_HANDS;
+    const recent = Array.isArray(p && p.recent) ? p.recent : [];
+    if (recent.length < w + 1) return []; // need 2+ points to draw a line
+    const points = [];
+    for (let end = w; end <= recent.length; end++) {
+      const win = recent.slice(end - w, end);
+      const played = win.filter((c) => (c & RECENT_PLAY_MASK) >= 1).length;
+      const raised = win.filter((c) => (c & RECENT_PLAY_MASK) >= 2).length;
+      points.push({ vpip: (100 * played) / w, pfr: (100 * raised) / w });
+    }
+    return points;
+  }
+
+  // A minimal inline sparkline: one polyline, 0-100 scale, no axes or labels —
+  // this sits inside a stats table cell, not a chart. `values` oldest first.
+  // Returns '' for fewer than 2 points, since a single point has no line to draw.
+  function sparklineSvg(values, opts) {
+    const o = opts || {};
+    const width = o.width || 90;
+    const height = o.height || 20;
+    const color = o.color || '#8ec5f0';
+    if (!values || values.length < 2) return '';
+    const n = values.length;
+    const stepX = width / (n - 1);
+    const pts = values.map((v, i) => {
+      const x = i * stepX;
+      const y = height - (Math.max(0, Math.min(100, v)) / 100) * height;
+      return x.toFixed(1) + ',' + y.toFixed(1);
+    }).join(' ');
+    // class carries tph- so pinTextColor leaves it alone (it walks .tph-panel
+    // content and would otherwise force `color: inherit`, which SVG stroke
+    // doesn't even read — but the skip is what the rest of this file relies on
+    // for anything with its own explicit colour, so staying consistent here
+    // costs nothing and avoids being the one exception to explain later).
+    return `<svg class="tph-sparkline" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" `
+      + `preserveAspectRatio="none"><polyline points="${pts}" fill="none" stroke="${color}" `
+      + 'stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/></svg>';
+  }
+
   // Tilt is BEHAVIOURAL: a player is tilting when they start playing differently
   // from how they normally play. It is not "they are losing" — losing money is
   // not tilt, and a player can be stuck three buy-ins and still play their game.
@@ -5765,6 +5818,14 @@
        letting it bleed onto the recent number would assert a verdict about a
        number it was not calculated from. */
     .tph-stat-rec { color: #8ec5f0 !important; font-size: 11px; font-weight: 600; }
+    /* The trend sparklines' V/P labels — same blue/amber as the two polylines
+       they sit beside, so the label and the line read as one thing without a
+       separate legend. .tph-sparkline itself needs no colour declared: its
+       stroke colour is set inline per SVG, and SVG stroke doesn't read the
+       CSS colour property pinTextColor forces onto non-tph- elements. */
+    .tph-trend-label-v { color: #8ec5f0 !important; font-size: 10px; font-weight: 700; margin-right: 2px; }
+    .tph-trend-label-p { color: #f0c674 !important; font-size: 10px; font-weight: 700; margin: 0 2px 0 6px; }
+    .tph-sparkline { vertical-align: middle; }
     .tph-stat-norm { color: #8d959c !important; font-size: 10px; }
     .tph-dev-n { font-size: 10px; opacity: .85; margin-left: 2px; }
     .tph-dev-typical { color: #9fb2c4 !important; }
@@ -6858,6 +6919,22 @@
           <tr><td class="tph-stat-l">Hands</td><td class="tph-stat-v"><b>${p.hands}</b></td><td class="tph-stat-n">${p.hands < STORE.settings.minHands ? '<span class="tph-stat-norm">low</span>' : ''}</td></tr>
           ${statRow('VPIP', r.vpip, s.vpip, 'vpip', recentStat(p, 'vpip'))}
           ${statRow('PFR', r.pfr, s.pfr, 'pfr', recentStat(p, 'pfr'))}
+          ${(() => {
+            // A shape, not a number: the blended VPIP/PFR figures above say
+            // WHERE they are right now, this says whether they got there by
+            // drifting up, drifting down, or bouncing around — invisible in
+            // any single blended figure. TREND_WINDOW_HANDS-hand windows
+            // across p.recent, oldest first.
+            const trend = recentTrendPoints(p, TREND_WINDOW_HANDS);
+            if (trend.length < 2) return '';
+            const vpipSpark = sparklineSvg(trend.map((t) => t.vpip), { width: 58, height: 16, color: '#8ec5f0' });
+            const pfrSpark = sparklineSvg(trend.map((t) => t.pfr), { width: 58, height: 16, color: '#f0c674' });
+            return `<tr title="Rolling VPIP (blue) and PFR (amber), ${TREND_WINDOW_HANDS} hands per point, `
+              + `oldest to newest left to right — the shape of recent play, not just where it is now.">`
+              + '<td class="tph-stat-l">Trend</td>'
+              + `<td class="tph-stat-v" colspan="2"><span class="tph-trend-label-v">V</span>${vpipSpark}`
+              + `<span class="tph-trend-label-p">P</span>${pfrSpark}</td></tr>`;
+          })()}
           ${statRow('3-Bet', r.threeBet, s.threeBet, 'threeBet')}
           ${statRow('Fold v 3B', r.foldTo3Bet, s.foldTo3Bet, 'foldTo3Bet')}
           ${statRow('C-Bet', r.cbet, s.cbet, 'cbet')}
@@ -8157,6 +8234,9 @@
       tiltRead,
       heatRead,
       sessionWinRate,
+      recentTrendPoints,
+      sparklineSvg,
+      TREND_WINDOW_HANDS,
       handsSinceBigLoss,
       tiltWindowSize,
       tiltText,
