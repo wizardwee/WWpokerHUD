@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.12.0
+// @version      1.13.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,29 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.13.0 - Turn cue escalates: still your turn TURN_ESCALATE_MS (10s) after the
+ *          first chime/buzz/glow, and it fires a second, stronger one — a
+ *          phone dimmed or set down since the first cue gets a second chance.
+ *          Not a repeating alarm: exactly one escalation per turn.
+ *            - playTurnEscalationChime repeats the same rising two-note shape
+ *              twice back to back, reusing playChimeNotes (pulled out of
+ *              playTurnChime) rather than an unfamiliar sound needing its own
+ *              "what was that?" moment to place. Vibration escalates too
+ *              ([120,80,120] vs a single 120ms buzz).
+ *            - tph-glow-escalated: brighter border, wider glow, faster pulse
+ *              (0.6s vs 1.25s) — still green, since this never stops being
+ *              "your turn", just louder about it. Gear and coach-head pick up
+ *              a matching highlight.
+ *            - shouldEscalateTurnCue is the actual timing decision, pulled out
+ *              of renderTurnCue as a pure function specifically so it has real
+ *              test coverage — renderTurnCue itself can't be driven through
+ *              this harness (needs live seat/action-button DOM), which is
+ *              exactly why the decision logic living inside it untested was
+ *              the wrong place for it.
+ *            - Settings gained a "Test escalation" button beside the existing
+ *              chime test, and the section text states the 10s delay from the
+ *              live TURN_ESCALATE_MS constant rather than a hardcoded copy.
  *
  * 1.12.0 - Pool tendencies export now says HOW MANY hands and WHICH STAKES.
  *          Asked directly after 1.11.0's POOL_AVG correction landed — the
@@ -59,28 +82,6 @@
  *             - Also confirmed by a fresh deep scan: the v1.6.0 hero-identity
  *               fix is holding — heroGhost(name:Wonkawee): none, heroRecord
  *               and STORE.hero match exactly, no drift.
- *
- * 1.5.1 - Ran `node test/run.js` for the first time since 1.0.0 — every version
- *          from 1.0.1 through 1.5.0 shipped verified only by a JXA parse-check,
- *          per their own commit messages. It crashed outright: the test-only
- *          export block (gated on window.__TPH_TEST_HOOKS, zero production
- *          effect) referenced `recordShownHand`, a name that was never a real
- *          function — 1.1.0 added the export line but the showdown recorder was
- *          always `noteShowdown`. That took down all 27 test files at once, not
- *          just the one testing it.
- *            - Two more failures were real once the suite could run at all, and
- *              both were the SAME shape: a test's expectation was never updated
- *              alongside an intentional behaviour change made without Node to
- *              check it. buildRangeHtml's group titles moved from a combined
- *              "raised" bucket to per-tier ones (1.1.0) — test/reads.test.js
- *              still looked for the old title. currentExploitTip stopped
- *              returning null for a player under minHands and started
- *              returning a flagged, provisional read instead (1.3.0) —
- *              test/exploit-plan.test.js still asserted null. Both tests are
- *              updated to match the shipped, intentional behaviour; neither
- *              required a code change.
- *            - Net effect: none of 1.0.1-1.5.0's actual runtime behaviour was
- *              wrong. The suite was just unable to say so.
  *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
@@ -144,7 +145,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.12.0';
+  const HUD_VERSION = '1.13.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -5790,6 +5791,16 @@
     .tph-gear.tph-turn { background: #1e7d51; animation: tph-turn-pulse 1.25s ease-in-out infinite; }
     .tph-gear.tph-next { background: #7a5a12; }
     .tph-coach-head.tph-turn { background: #1e7d51 !important; }
+    /* Second-stage cue: TURN_ESCALATE_MS after the turn cue first lit up, if
+       still your turn — reported as wanted after a first cue alone got missed
+       with the phone set down or dimmed. Brighter border, wider glow, faster
+       pulse; still green, since this never stops being "your turn", it's just
+       louder about it now. Declared AFTER .tph-gear.tph-turn/.tph-coach-head.
+       tph-turn above so it wins on equal specificity. */
+    .tph-glow-turn.tph-glow-escalated { box-shadow: inset 0 0 0 5px #4eff9e, inset 0 0 46px rgba(53,208,127,.7);
+                                         animation: tph-turn-pulse 0.6s ease-in-out infinite; }
+    .tph-gear.tph-turn-escalated { box-shadow: 0 0 0 3px #4eff9e; }
+    .tph-coach-head.tph-turn-escalated { box-shadow: inset 0 0 0 2px #4eff9e; }
 
     /* Fold misclick guard prompt. Bottom-centre and above everything, but
        pointer-events:none so it can never sit between you and the button you
@@ -6004,6 +6015,20 @@
   // WAITING, and cueing on those would leave the screen glowing for most of the
   // hand — which is the same as no cue at all.
   let turnCueActive = false;
+  // When the CURRENT turn-cue rising edge fired, and whether the escalation
+  // (see TURN_ESCALATE_MS below) has already fired for it. Both reset on the
+  // next rising edge, not on the falling edge — there is nothing to reset TO
+  // between hands, and resetting here would just be dead code that runs once
+  // per hand for no reason.
+  let turnCueSince = 0;
+  let turnCueEscalated = false;
+
+  // How long you can sit on your own turn before the cue intensifies. A
+  // second, more insistent signal at this point catches a phone that's been
+  // set down or dimmed since the first one — reported as wanted after the
+  // base cue alone was missed at the table. Not a repeating alarm: exactly
+  // one escalation per turn, matching what was actually asked for.
+  const TURN_ESCALATE_MS = 10000;
 
   // A short chime, synthesised rather than loaded. No asset to host, nothing to
   // fetch, and nothing for Torn PDA's webview to block.
@@ -6022,14 +6047,15 @@
     return audioCtx;
   }
 
-  function playTurnChime() {
+  // Shared note-scheduler behind both chimes below — pulled out so the
+  // escalation chime is a different NOTE SEQUENCE, not a duplicated copy of
+  // the oscillator/gain wiring with one array literal changed.
+  function playChimeNotes(notes) {
     const ctx = ensureAudio();
     if (!ctx) return false;
     if (ctx.state === 'suspended') ctx.resume().catch(() => {});
     const now = ctx.currentTime;
-    // Two short rising notes — distinct from Torn's own sounds, and quiet
-    // enough not to be startling if the phone is by your ear.
-    [[880, 0], [1320, 0.11]].forEach(([freq, at]) => {
+    notes.forEach(([freq, at]) => {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = 'sine';
@@ -6043,6 +6069,20 @@
       osc.stop(now + at + 0.12);
     });
     return true;
+  }
+
+  function playTurnChime() {
+    // Two short rising notes — distinct from Torn's own sounds, and quiet
+    // enough not to be startling if the phone is by your ear.
+    return playChimeNotes([[880, 0], [1320, 0.11]]);
+  }
+
+  // Fires once, TURN_ESCALATE_MS after playTurnChime, if it is STILL your
+  // turn — see renderTurnCue. The same rising two-note shape repeated twice
+  // back to back reads as more urgent without switching to an unfamiliar
+  // sound that would need its own "what was that?" moment to place.
+  function playTurnEscalationChime() {
+    return playChimeNotes([[880, 0], [1320, 0.11], [880, 0.28], [1320, 0.39]]);
   }
 
   // Satisfy the autoplay policy using a tap the user was making anyway.
@@ -6137,6 +6177,15 @@
     document.querySelectorAll('.tph-fold-prompt').forEach((el) => el.remove());
   }
 
+  // Pure decision, pulled out of renderTurnCue so the timing logic can be
+  // tested without a DOM: escalate only on a tick where the cue was ALREADY
+  // on (not this tick's own rising edge — that path resets the timer instead,
+  // see renderTurnCue), hasn't escalated yet this turn, and has been running
+  // at least TURN_ESCALATE_MS.
+  function shouldEscalateTurnCue(isOn, wasActive, alreadyEscalated, since, now) {
+    return !!(isOn && wasActive && !alreadyEscalated && (now - since) >= TURN_ESCALATE_MS);
+  }
+
   function renderTurnCue() {
     // Two states, deliberately different in strength:
     //   'turn' — green, pulsing. Act now.
@@ -6149,31 +6198,50 @@
       else if (STORE.settings.nextToActCue && isHeroNextToAct()) state = 'next';
     }
 
+    const on = state === 'turn';
+    // Checked against the OLD turnCueActive, before it is overwritten below.
+    const escalateNow = shouldEscalateTurnCue(on, turnCueActive, turnCueEscalated, turnCueSince, Date.now());
+    if (escalateNow) turnCueEscalated = true;
+
     const existing = document.querySelector('.tph-turn-glow');
     if (state) {
       const el = existing || document.createElement('div');
-      el.className = 'tph-turn-glow tph-glow-' + state;
+      el.className = 'tph-turn-glow tph-glow-' + state
+        + (state === 'turn' && turnCueEscalated ? ' tph-glow-escalated' : '');
       if (!existing) document.body.appendChild(el);
     } else if (existing) {
       existing.remove();
     }
 
-    const on = state === 'turn';
     const gear = document.querySelector('.tph-gear');
     if (gear) {
       gear.classList.toggle('tph-turn', on);
       gear.classList.toggle('tph-next', state === 'next');
+      gear.classList.toggle('tph-turn-escalated', on && turnCueEscalated);
     }
     const head = document.querySelector('.tph-coach-head');
-    if (head) head.classList.toggle('tph-turn', on);
+    if (head) {
+      head.classList.toggle('tph-turn', on);
+      head.classList.toggle('tph-turn-escalated', on && turnCueEscalated);
+    }
 
     // Fire once on the rising edge only. A buzz or chime every poll would be
     // unusable, and the poll runs at 400ms.
     if (on && !turnCueActive) {
+      turnCueSince = Date.now();
+      turnCueEscalated = false;
       if (STORE.settings.turnVibrate && navigator.vibrate) {
         try { navigator.vibrate(120); } catch (e) { /* not supported here */ }
       }
       if (STORE.settings.turnSound) playTurnChime();
+    } else if (escalateNow) {
+      // Still your turn TURN_ESCALATE_MS later — the same two channels again,
+      // stronger, plus tph-glow-escalated above for a phone that's dimmed or
+      // been set down since the first cue.
+      if (STORE.settings.turnVibrate && navigator.vibrate) {
+        try { navigator.vibrate([120, 80, 120]); } catch (e) { /* not supported here */ }
+      }
+      if (STORE.settings.turnSound) playTurnEscalationChime();
     }
     turnCueActive = on;
   }
@@ -7067,9 +7135,12 @@
       <label><input type="checkbox" class="tph-turnvib-toggle" ${STORE.settings.turnVibrate ? 'checked' : ''}> Also buzz once</label><br>
       <label><input type="checkbox" class="tph-turnsound-toggle" ${STORE.settings.turnSound ? 'checked' : ''}> Also play a chime</label>
       <button class="tph-test-chime">Test</button>
+      <button class="tph-test-escalation">Test escalation</button>
       <div style="opacity:.7;margin:2px 0 10px">A pulsing border plus a green button. It never covers the table's
         controls — the overlay ignores taps entirely. Pre-action buttons ("Check / Fold") don't count as your turn.
-        Phones block audio until you've tapped the page, so use Test to check the chime actually plays here.</div>
+        Phones block audio until you've tapped the page, so use Test to check the chime actually plays here.
+        Still your turn ${TURN_ESCALATE_MS / 1000}s later, and the cue repeats louder: a brighter, faster-pulsing
+        border and a second, stronger chime/buzz — for a phone that's dimmed or been set down since the first one.</div>
       <h4>Fold guard</h4>
       <label><input type="checkbox" class="tph-foldguard-toggle" ${STORE.settings.foldGuard ? 'checked' : ''}> Tap Fold twice to confirm</label>
       <div style="opacity:.7;margin:2px 0 10px">Guards against misclicking Fold next to Call. It never folds for you —
@@ -7218,6 +7289,10 @@
     });
     panel.querySelector('.tph-test-chime').addEventListener('click', (e) => {
       const ok = playTurnChime();
+      e.target.textContent = ok ? 'Played' : 'No audio here';
+    });
+    panel.querySelector('.tph-test-escalation').addEventListener('click', (e) => {
+      const ok = playTurnEscalationChime();
       e.target.textContent = ok ? 'Played' : 'No audio here';
     });
     panel.querySelector('.tph-foldguard-toggle').addEventListener('change', (e) => {
@@ -8010,6 +8085,8 @@
       poolStakesBreakdown,
       ACTION_BTN_RE,
       isPDA,
+      playTurnChime,
+      playTurnEscalationChime,
       fmtMoney,
       fmtSignedMoney,
       fmtBB,
@@ -8033,6 +8110,8 @@
       BADGE_HEIGHT_PX,
       COACH_MIN_W,
       COACH_MIN_H,
+      TURN_ESCALATE_MS,
+      shouldEscalateTurnCue,
 
       // --- stateful: reads or writes module-level STORE / heroXid ---
       playerHistoryExport,

@@ -9,6 +9,48 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.13.0
+
+The turn cue escalates. Still your turn `TURN_ESCALATE_MS` (10 seconds) after
+the first chime/buzz/glow, and it fires a second, stronger signal on all
+three channels — asked for directly, after the base cue alone got missed
+with the phone dimmed or set down. This is **not** a repeating alarm: exactly
+one escalation per turn, then it stays at that strength until the turn ends.
+
+**Sound.** `playTurnEscalationChime` repeats the same rising two-note shape
+`playTurnChime` already used, twice back to back, rather than introducing an
+unfamiliar sound that would need its own "what was that?" moment to place.
+Both now share `playChimeNotes`, pulled out of the original `playTurnChime`
+so the escalation chime is a different *note sequence*, not a duplicated copy
+of the oscillator/gain wiring with one array literal changed.
+
+**Vibration** escalates too — `[120, 80, 120]` instead of a single 120ms
+buzz.
+
+**Visual.** `tph-glow-escalated` brightens the border, widens the glow, and
+speeds the pulse from 1.25s to 0.6s. Still green: this never stops being
+"your turn," it just gets louder about saying so. The gear and the coach
+header pick up a matching highlight, same as the base cue already does for
+anyone with the panel collapsed.
+
+**The timing decision is a pure function on purpose.** `shouldEscalateTurnCue`
+was pulled out of `renderTurnCue` specifically so it has real test coverage —
+`renderTurnCue` itself can't be driven through this harness (it needs live
+seat/action-button DOM, the same boundary `name-boundary.test.js`'s header
+already documents for a different function), which is exactly why the timing
+logic living *inside* it, untested, was the wrong place for it. 10 new
+assertions in `test/turn-cue.test.js` cover the threshold boundary exactly,
+the rising-edge case (escalation must NOT fire on the same tick the cue turns
+on — that tick resets the timer instead), not double-firing within one turn,
+and that both chime functions fail to `false` rather than throwing when no
+`AudioContext` exists (true of this test harness, and of any browser that
+doesn't support it).
+
+Settings gained a "Test escalation" button beside the existing chime test,
+and the description text states the 10-second delay by reading the live
+`TURN_ESCALATE_MS` constant rather than a hardcoded copy that could drift
+out of sync with it.
+
 ## 1.12.0
 
 Pool tendencies export now says **how many hands** and **which stakes** it's
