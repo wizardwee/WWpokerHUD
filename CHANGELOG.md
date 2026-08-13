@@ -9,6 +9,50 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.17.0
+
+A hand replayer, Poker Copilot-style. Every stored hand in the History tab
+now has a "▶ Replay this hand" button that steps it forward one **street** at
+a time — not one action at a time, since the board and the equity quote only
+change at a street boundary, and grouping actions by street is what
+`formatHand`/`formatHandHtml` already do — showing the board as it was dealt
+and, when hero's cards were captured, hero's equity at that point using the
+same Monte Carlo engine and range-proxy tiering the live coach panel uses.
+
+**`recordHandHistory` now persists `hand.board`.** The board was tracked live
+the whole time — the flop/turn/river log handler has always accumulated it —
+but never written into the stored hand record, so there was nothing for a
+replayer to read. A hand recorded before this version has `board: undefined`
+on the stored object, which `replayStepsFor` reads as genuinely **unknown**
+(shown as "unknown — recorded before replay support") rather than an empty
+array that would misleadingly look like a hand that ended preflop.
+
+**`replayStepsFor`/`replayPreflopRaiseLevel`/`replayStepEquity`** are pure
+functions over the stored hand object (module-level `heroXid` aside, the same
+convention `buildTendencyEntries` already follows — testable by setting
+`T.heroXid` directly). The equity call reuses `estimateEquityCached` with
+`opponentRangeProxy`, counting preflop raise events (all-ins included, same
+"an all-in counts as a raise" rule `preflopRaiseEvents` uses live — open
+finding #3) from the stored action log, so a replayed read looks like the
+read you'd actually have gotten in the moment, not a naive "equity vs random"
+figure that ignores whether the pot got raised.
+
+**No per-step pot, on purpose.** `hand.actions` stores a raise's logged
+amount as the **total** bet-to figure ("raised $1,000,000 to $2,000,000" —
+the second number), not the increment over the previous bet. Summing that
+across steps would overcount the pot at every street after the first raise.
+Rather than ship a subtly-wrong running total, the replayer shows the final
+pot once as context (already DOM-corrected at recording time — see "the pot
+had no cross-check", closed v0.18.0) and leaves per-step pot out entirely.
+
+`cardGlyph`/`cardsGlyphText` are new, small display helpers (`{rank:'A',
+suit:'s'}` → `"A♠"`) — the first place in this file that needed to print a
+card back out rather than only read one.
+
+31 new assertions in `test/hand-replay.test.js`, most of them the honest-null
+cases for equity: no hero cards captured, hero already folded by that step,
+board unknown, or nobody left to have equity against.
+
 ## 1.16.0
 
 A recent-form sparkline on the Stats tab — rolling VPIP (blue) and PFR

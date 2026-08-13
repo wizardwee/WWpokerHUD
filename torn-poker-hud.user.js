@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.16.0
+// @version      1.17.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,28 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.17.0 - A hand replayer, Poker Copilot-style: step a stored hand forward one
+ *          STREET at a time from the History tab ("▶ Replay this hand"),
+ *          showing the board as it was dealt and hero's equity at each point.
+ *            - recordHandHistory now persists hand.board — tracked live since
+ *              the flop/turn/river log handler always existed, but never
+ *              written into the stored record until now. A hand recorded
+ *              before this version has board: undefined, read as "unknown"
+ *              rather than an empty (misleadingly complete-looking) board.
+ *            - replayStepsFor/replayPreflopRaiseLevel/replayStepEquity are
+ *              pure functions over the stored hand (module-level heroXid
+ *              aside, same convention buildTendencyEntries already follows).
+ *              Equity uses estimateEquityCached with the SAME range-proxy
+ *              tiering the live coach panel uses, so a replayed read looks
+ *              like the read you'd actually have gotten.
+ *            - Deliberately NO per-step pot: hand.actions stores a raise's
+ *              TOTAL bet-to figure, not the increment (see the log pattern),
+ *              so summing it into a running pot would overcount. The final
+ *              pot (already DOM-corrected at recording time) is shown once
+ *              as context instead of a per-step number this file has no
+ *              honest way to derive.
+ *            - 31 new assertions in test/hand-replay.test.js.
  *
  * 1.16.0 - A recent-form sparkline on the Stats tab: rolling VPIP (blue) and
  *          PFR (amber), TREND_WINDOW_HANDS (10) hands per point, oldest to
@@ -60,12 +82,6 @@
  *              parity check: both voices must produce the same gain/tag/when
  *              for the same player and DIFFERENT wording — the property that
  *              actually matters here, more than any individual sentence.
- *
- * 1.14.0 - Hero's badge nudged down one more line, reported from a live table:
- *          the v1.7.0 half-line nudge cleared the action timer but still left
- *          the badge floating over empty felt above the name rather than on
- *          it. SELF_BADGE_DOWN_NUDGE_PX is now 1.5 badge-lines (was 0.5), so
- *          the badge covers the name and nothing else.
  *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
@@ -129,7 +145,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.16.0';
+  const HUD_VERSION = '1.17.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -2500,6 +2516,12 @@
       winners: hand.winners,
       shown: hand.shown,
       heroCards: hand.heroCards || null,
+      // Community cards as they stood at the end of the hand — was tracked
+      // live on hand.board (see the flop/turn/river log handler) but never
+      // persisted until v1.17.0's replayer needed it. A hand recorded before
+      // this has board: undefined; replayStepsFor treats that as "unknown"
+      // rather than an empty (and misleadingly complete-looking) board.
+      board: hand.board || [],
       pinned: isNotableHand(hand),
     });
     const limit = STORE.settings.historyLimit || 200;
@@ -2654,6 +2676,75 @@
   function handsInvolving(xid) {
     return (STORE.hands || []).filter((h) => (h.players || []).includes(xid)
       || (h.actions || []).some((a) => a.x === xid));
+  }
+
+  // --- Hand replayer (v1.17.0) -------------------------------------------
+  //
+  // Steps a stored hand forward one STREET at a time (not one action at a
+  // time — a street is the natural unit here, since the board and the equity
+  // quote only change at a street boundary, and grouping actions by street is
+  // what formatHand/formatHandHtml already do). Pure and deterministic other
+  // than reading module-level heroXid, same convention buildTendencyEntries
+  // and friends already follow — testable by setting T.heroXid directly.
+  //
+  // Deliberately does NOT reconstruct a running pot per step. hand.actions
+  // stores a raise's TOTAL-bet-to figure (see the 'raised $X to $Y' log
+  // pattern), not the increment — summing that into a running total would
+  // overcount. The final pot (h.pot, DOM-corrected at recording time — see
+  // "the pot had no cross-check", closed v0.18.0) is shown once as context
+  // instead of a per-step figure this file has no honest way to derive.
+  function replayStepsFor(h) {
+    if (!h) return [];
+    const boardKnown = Array.isArray(h.board);
+    const boardCountFor = { preflop: 0, flop: 3, turn: 4, river: 5 };
+    const byStreet = {};
+    (h.actions || []).forEach((a) => { (byStreet[a.s] = byStreet[a.s] || []).push(a); });
+
+    const live = new Set(h.players || []);
+    const steps = [];
+    ['preflop', 'flop', 'turn', 'river'].forEach((street) => {
+      const acts = byStreet[street];
+      if (!acts || !acts.length) return; // the hand never reached this street
+      acts.forEach((a) => { if (a.a === 'fold') live.delete(a.x); });
+      steps.push({
+        street,
+        // Sliced fresh each street rather than accumulated, so a street with
+        // NO board entry at all (hero folded before a flop that later ran out
+        // in the log, or an old hand with no board data) reads as unknown
+        // rather than silently reusing the previous street's cards.
+        board: boardKnown ? h.board.slice(0, boardCountFor[street]) : null,
+        actions: acts,
+        // Who is still contesting the pot AFTER this street's folds — the
+        // opponent count the NEXT street's equity quote should use.
+        live: Array.from(live),
+      });
+    });
+    return steps;
+  }
+
+  // Preflop raise events across the WHOLE hand, replayed from the stored
+  // action log — same "an all-in counts as a raise" rule preflopRaiseEvents
+  // uses live (open finding #3), so a replayed equity quote tiers against the
+  // same opponentRangeProxy the live coach panel would have used.
+  function replayPreflopRaiseLevel(steps) {
+    const pre = steps.find((s) => s.street === 'preflop');
+    if (!pre) return 0;
+    return pre.actions.filter((a) => a.a === 'raise' || a.a === 'all-in').length;
+  }
+
+  // Hero's equity as of one replay step, or null when it can't be shown:
+  // hero's cards were never captured, hero has already folded by this step,
+  // the board isn't known (a hand recorded before v1.17.0), or nobody is left
+  // to have equity against. Uses estimateEquityCached, same range-proxy
+  // tiering (see opponentRangeProxy/equityBasisLabel) the live coach uses —
+  // a replayed read should look like the read you'd actually have gotten.
+  function replayStepEquity(h, step, raiseLevel) {
+    if (!h || !h.heroCards || h.heroCards.length !== 2 || heroUnresolved()) return null;
+    if (!step.board) return null;
+    if (!step.live.some((xid) => String(xid) === String(heroXid))) return null;
+    const nOpp = step.live.filter((xid) => String(xid) !== String(heroXid)).length;
+    if (nOpp <= 0) return null;
+    return estimateEquityCached(h.heroCards, step.board, nOpp, raiseLevel);
   }
 
   // The whole recorded history against one player, as a plain-text file.
@@ -4252,6 +4343,13 @@
   // ===========================================================================
 
   const SUIT_CHARS = ['s', 'h', 'd', 'c'];
+  // Letter -> glyph, the reverse of SUIT_SYMBOLS below (glyph -> letter, for
+  // PARSING). This is for DISPLAY — the replayer is the first thing in this
+  // file that needs to print a {rank,suit} card back out rather than just read one.
+  const SUIT_GLYPH = { s: '♠', h: '♥', d: '♦', c: '♣' };
+  function cardGlyph(c) { return c ? c.rank + (SUIT_GLYPH[c.suit] || '') : ''; }
+  function cardsGlyphText(cards) { return (cards || []).map(cardGlyph).join(' '); }
+
   const RANK_WORDS = {
     ace: 'A', king: 'K', queen: 'Q', jack: 'J', ten: 'T', nine: '9', eight: '8',
     seven: '7', six: '6', five: '5', four: '4', three: '3', two: '2',
@@ -5938,6 +6036,20 @@
     .tph-hh-me { color: #ffc94d !important; font-weight: 700; }
     .tph-hh-sd { font-size: 11.5px; color: #d4b3f0 !important; margin-top: 4px; }
     .tph-hh-win { font-size: 12.5px; color: #8ce89a !important; margin-top: 4px; }
+    /* Sits right under each history card, not inside .tph-hh itself — the card
+       is the RECORD, the button is an action on it, and formatHandHtml (which
+       also serves the plain-text clipboard/file exports) stays untouched by
+       adding it as a sibling rather than teaching that function about buttons. */
+    .tph-hh-wrap { margin-bottom: 4px; }
+    .tph-hh-replay { width: 100%; margin: -4px 0 9px; font-size: 11px !important;
+      padding: 5px 10px !important; }
+    .tph-replay-nav { display: flex; align-items: center; justify-content: space-between;
+      gap: 8px; margin: 8px 0; }
+    .tph-replay-step { color: #dfe5ea !important; font-size: 12px; text-transform: capitalize; }
+    .tph-replay-board { color: #f2f4f6 !important; font-size: 14px; margin-bottom: 4px; }
+    .tph-replay-hero { color: #dfe5ea !important; font-size: 12.5px; margin-bottom: 8px; }
+    .tph-replay-acts { background: #24242b !important; border-radius: 5px; padding: 6px 9px; }
+    .tph-replay-act { color: #d5dbe1 !important; font-size: 12.5px; line-height: 1.6; }
     .tph-close { position: absolute; top: 8px; right: 10px; cursor: pointer; }
     .tph-warn { background: #4a2c12 !important; color: #ffd9a0 !important; border: 1px solid #8a5a24;
       border-radius: 5px; padding: 7px 9px; margin: 6px 0 10px; font-size: 12px; line-height: 1.45; }
@@ -7047,10 +7159,14 @@
         body.innerHTML = `<div style="color:#c9d1d9 !important;margin-bottom:8px">${hands.length} hand(s) recorded`
           + `${hands.length > shown.length ? `, showing ${shown.length}` : ''} — `
           + `<span style="${HH.me}">their actions highlighted</span></div>`
-          + shown.map((h) => formatHandHtml(h, openPlayerXid)).join('')
+          + shown.map((h, i) => `<div class="tph-hh-wrap" data-idx="${i}">${formatHandHtml(h, openPlayerXid)}`
+            + `<button class="tph-hh-replay">▶ Replay this hand</button></div>`).join('')
           + `<button class="tph-copy-hist">Copy shown (${shown.length})</button>`
           + `<button class="tph-export-hist">${isPDA() ? 'Save / share all' : 'Download all'}`
           + ` (${hands.length})</button>`;
+        body.querySelectorAll('.tph-hh-replay').forEach((btn, i) => {
+          btn.addEventListener('click', () => openReplayHand(shown[i]));
+        });
         body.querySelector('.tph-copy-hist').addEventListener('click', () => {
           navigator.clipboard && navigator.clipboard.writeText(text);
         });
@@ -7156,6 +7272,100 @@
     return `<br><b>Pool:</b> yours ${fmtPct(obs.vpip)}/${fmtPct(obs.pfr)} VPIP/PFR `
       + `over ${obs.players} tracked &nbsp;|&nbsp; assumed `
       + `${POOL_AVG.vpip.toFixed(0)}%/${POOL_AVG.pfr.toFixed(0)}%`;
+  }
+
+  // --- Hand replayer panel (v1.17.0) ------------------------------------
+
+  let replayHand = null;
+  let replayStepIndex = 0;
+
+  function openReplayHand(h) {
+    replayHand = h;
+    replayStepIndex = 0;
+    renderReplayPanel();
+  }
+
+  function renderReplayStepHtml(h, steps, idx) {
+    if (!steps.length) {
+      return '<span class="tph-close">✕</span><h3>Replay</h3><i>No actions recorded for this hand.</i>';
+    }
+    const step = steps[idx];
+    const raiseLevel = replayPreflopRaiseLevel(steps);
+    const eq = replayStepEquity(h, step, raiseLevel);
+    const when = new Date(h.t).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+    const boardText = step.board == null ? 'unknown — recorded before replay support'
+      : step.board.length ? cardsGlyphText(step.board) : '—';
+
+    const oppCount = step.live.filter((x) => heroUnresolved() || String(x) !== String(heroXid)).length;
+    const heroLine = h.heroCards && h.heroCards.length === 2
+      ? `<div class="tph-replay-hero">Your cards: <b>${escapeHtml(cardsGlyphText(h.heroCards))}</b>`
+        + (eq != null
+          ? ` — equity <b>${eq.toFixed(0)}%</b> (${escapeHtml(equityBasisLabel(raiseLevel))}, ${oppCount} opp)`
+          : '') + '</div>'
+      : '';
+
+    const actsHtml = step.actions.map((a) => {
+      const amt = a.amt ? ` ${fmtMoney(a.amt)}` : '';
+      const isHero = !heroUnresolved() && String(a.x) === String(heroXid);
+      const txt = `${escapeHtml(playerDisplayName(a.x))} ${escapeHtml(a.a)}${amt}`;
+      return `<div class="tph-replay-act">${isHero ? `<span class="tph-hh-me" style="${HH.me}">${txt}</span>` : txt}</div>`;
+    }).join('');
+
+    const isLast = idx === steps.length - 1;
+    const endParts = [];
+    if (isLast) {
+      Object.keys(h.shown || {}).forEach((xid) => {
+        endParts.push(`<div class="tph-hh-sd" style="${HH.showdown}">shows ${escapeHtml(playerDisplayName(xid))}: `
+          + `${escapeHtml(h.shown[xid])}</div>`);
+      });
+      (h.winners || []).forEach((w) => {
+        endParts.push(`<div class="tph-hh-win" style="${HH.win}">→ ${escapeHtml(playerDisplayName(w.xid))} `
+          + `wins ${fmtMoney(w.amount)}</div>`);
+      });
+    }
+
+    // Pot-per-step is deliberately not shown — see replayStepsFor's own
+    // comment: a raise's logged amount is the total bet-to figure, not the
+    // increment, so summing it across steps here would overcount.
+    const potNote = 'Pot-per-step is not shown — see the note in replayStepsFor.';
+    return `<span class="tph-close">✕</span>
+      <h3>Replay — ${escapeHtml(when)}</h3>
+      <div style="opacity:.7;margin-bottom:8px" title="${escapeHtml(potNote)}">Final pot ${fmtMoney(h.pot)} `
+      + `· reached ${escapeHtml(h.street || 'preflop')}</div>
+      <div class="tph-replay-nav">
+        <button class="tph-replay-prev"${idx === 0 ? ' disabled' : ''}>‹ Prev</button>
+        <span class="tph-replay-step">${escapeHtml(step.street)} — step ${idx + 1} of ${steps.length}</span>
+        <button class="tph-replay-next"${idx === steps.length - 1 ? ' disabled' : ''}>Next ›</button>
+      </div>
+      <div class="tph-replay-board">Board: <b>${escapeHtml(boardText)}</b></div>
+      ${heroLine}
+      <div class="tph-replay-acts">${actsHtml}</div>
+      ${endParts.join('')}
+    `;
+  }
+
+  function renderReplayPanel() {
+    const h = replayHand;
+    const steps = h ? replayStepsFor(h) : [];
+    const idx = steps.length ? Math.max(0, Math.min(replayStepIndex, steps.length - 1)) : 0;
+    renderPanel({
+      marker: 'tph-replay',
+      open: !!h,
+      onClose: () => { replayHand = null; renderReplayPanel(); },
+      html: !h ? '' : renderReplayStepHtml(h, steps, idx),
+      wire: (panel) => {
+        const prev = panel.querySelector('.tph-replay-prev');
+        const next = panel.querySelector('.tph-replay-next');
+        if (prev) prev.addEventListener('click', () => { replayStepIndex = Math.max(0, replayStepIndex - 1); renderReplayPanel(); });
+        if (next) {
+          next.addEventListener('click', () => {
+            replayStepIndex = Math.min(steps.length - 1, replayStepIndex + 1);
+            renderReplayPanel();
+          });
+        }
+      },
+    });
   }
 
   function renderPlayersList() {
@@ -8346,7 +8556,13 @@
       poolTendencyExport,
       handsInvolving,
       formatHand,
+      formatHandHtml,
       recordHandHistory,
+      replayStepsFor,
+      replayPreflopRaiseLevel,
+      replayStepEquity,
+      cardGlyph,
+      cardsGlyphText,
       isNotableHand,
       trimHandHistory,
       mergeHands,
