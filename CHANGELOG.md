@@ -9,6 +9,24 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.17.1
+
+"Stack this sitting"'s staleness gap cut from 4h to 2h10m, and split into its
+own `STACK_SESSION_GAP_MS` — `trackStacks` no longer shares `SESSION_GAP_MS`
+with `touchSession` (hero's own lifetime-session tracker, still 4h,
+untouched).
+
+Reported from a live table at River Wizard: the stack bar's "high" read well
+above the table's own max buy-in. The staleness check already resets a
+sitting on a gap OR a stake change, but the stake check compares `bb`
+(the blind level), which does not change if a player leaves and re-buys
+smaller at the *same* table — so a return inside the old 4h window silently
+carried the previous buy-in's high into the new one, alongside the new
+(smaller) low/start. 2h10m is a judgement call, not a measurement: long
+enough that an ordinary break doesn't manufacture a false "new sitting" (and
+lose the low/high context that makes the bar useful), short enough to catch
+a genuine cash-out-and-rebuy before it corrupts the range.
+
 ## 1.17.0
 
 A hand replayer, Poker Copilot-style. Every stored hand in the History tab

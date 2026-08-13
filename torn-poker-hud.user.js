@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.17.0
+// @version      1.17.1
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,17 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.17.1 - Stack-sitting's staleness gap cut from 4h to 2h10m, its own
+ *          STACK_SESSION_GAP_MS rather than reusing hero-session's
+ *          SESSION_GAP_MS (unchanged at 4h — this only touches trackStacks).
+ *          Reported from a live table: "Stack this sitting" showed a high
+ *          well above the table's own max buy-in. The stake-change check
+ *          (s.bb !== bb) can't catch a player leaving and re-buying smaller
+ *          at the SAME table, so a return inside the old 4h window carried
+ *          the previous buy-in's high into the new one. 2h10m is a judgement
+ *          call, not a measurement — long enough to survive an ordinary
+ *          break, short enough to catch a genuine cash-out-and-rebuy.
  *
  * 1.17.0 - A hand replayer, Poker Copilot-style: step a stored hand forward one
  *          STREET at a time from the History tab ("▶ Replay this hand"),
@@ -59,29 +70,6 @@
  *              Sharing it would also mean raising sessionWindow toward
  *              RECENT_MAX (40) makes the sparkline disappear entirely — at
  *              window==40 there is exactly one possible window to draw.
- *
- * 1.15.0 - A self leak-finder: what DriveHUD calls its "MDA Exploit Report" and
- *          PT4 calls LeakTracker, aimed at your own game instead of an
- *          opponent's. Same population-deviation detection buildExploitPlan
- *          already ran, now also runnable against hero's own stats with the
- *          advice phrased as "fix this" instead of "exploit this."
- *            - buildTendencyEntries(p, voice) is the shared detection pass
- *              behind both: buildExploitPlan(p) = 'exploit' voice (unchanged
- *              behaviour), buildLeakPlan(p) = new 'leak' voice. Same gates,
- *              same gain/tag/when for both — only the wording differs — so a
- *              future threshold correction can't apply to one voice and not
- *              the other by accident.
- *            - Hero's own player panel now shows a "Leaks" tab instead of
- *              "Exploit" in the same slot (buildExploitHtml gained an isSelf
- *              flag). Tilt and stack-swing entries fire for hero same as any
- *              opponent — being stuck or way up is exactly when YOUR OWN game
- *              tends to drift. Shown-hand range entries never fire for hero
- *              (harvestShownCards deliberately excludes hero's own cards),
- *              left in as dead code by construction rather than special-cased.
- *            - 71 new assertions in test/leak-plan.test.js, most of them a
- *              parity check: both voices must produce the same gain/tag/when
- *              for the same player and DIFFERENT wording — the property that
- *              actually matters here, more than any individual sentence.
  *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
@@ -145,7 +133,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.17.0';
+  const HUD_VERSION = '1.17.1';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -1628,6 +1616,15 @@
   // lost a stack, which is the state tilt actually follows from. Lifetime
   // low/high would be meaningless — it would just record the smallest and
   // largest table they have ever sat at.
+  //
+  // Own constant, deliberately NOT the hero-session SESSION_GAP_MS (4h,
+  // touchSession) — that one governs hero's own lifetime P/L session
+  // boundary and changing it would be a second, unrelated behaviour change.
+  // A gap this short exists because leaving and coming back within it — a
+  // stake unchanged, so the bb check below never fires — otherwise carries a
+  // stale `high` into a fresh buy-in, which can then read as impossibly
+  // above the table's max buy-in.
+  const STACK_SESSION_GAP_MS = (2 * 60 + 10) * 60 * 1000; // 2h10m
   function trackStacks() {
     const stacks = readAllStacks();
     const bb = plausibleBB(lastSeenBB) ? lastSeenBB : 0;
@@ -1640,7 +1637,7 @@
       const p = getPlayer(xid);
       const s = p.stack;
       // A gap longer than a session, or a different stake, starts a new sitting.
-      const stale = !s || (now - (s.at || 0)) > SESSION_GAP_MS || (bb && s.bb && s.bb !== bb);
+      const stale = !s || (now - (s.at || 0)) > STACK_SESSION_GAP_MS || (bb && s.bb && s.bb !== bb);
       if (stale) {
         p.stack = { now: v, low: v, high: v, start: v, bb: bb || null, at: now };
       } else {
