@@ -9,6 +9,21 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.14.0
+
+Hero's badge nudged down one more line, reported from a live table. The
+v1.7.0 half-badge-line nudge cleared the action timer, but that only solved
+the collision — it left the badge floating over empty felt above the name
+rather than sitting on it. `SELF_BADGE_DOWN_NUDGE_PX` moves from half a
+badge-line to 1.5 (one more full line down), so the badge now covers the
+name specifically and nothing else. `SELF_BADGE_RIGHT_NUDGE_PX` (the
+horizontal clearance from the timer) is untouched.
+
+Same as every other screen-real-estate adjustment in this file: nobody
+working on this can see the layout, so this is the latest report acted on,
+not a claim that it's now exactly right — needs one more look at the table
+to confirm.
+
 ## 1.13.0
 
 The turn cue escalates. Still your turn `TURN_ESCALATE_MS` (10 seconds) after

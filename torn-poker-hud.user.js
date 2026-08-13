@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.13.0
+// @version      1.14.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,12 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.14.0 - Hero's badge nudged down one more line, reported from a live table:
+ *          the v1.7.0 half-line nudge cleared the action timer but still left
+ *          the badge floating over empty felt above the name rather than on
+ *          it. SELF_BADGE_DOWN_NUDGE_PX is now 1.5 badge-lines (was 0.5), so
+ *          the badge covers the name and nothing else.
  *
  * 1.13.0 - Turn cue escalates: still your turn TURN_ESCALATE_MS (10s) after the
  *          first chime/buzz/glow, and it fires a second, stronger one — a
@@ -56,32 +62,6 @@
  *             - p.tables is only written when a hand's blind was readable, so
  *               its sum typically runs slightly BELOW totalHands — reported
  *               as its own total rather than silently assumed equal.
- *
- * 1.11.0 - POOL_AVG is measured now, not borrowed. Corrected from
- *           observedPoolAverages() output over 173 tracked opponents (25+
- *           hands each), replacing the figures carried since v0.22.0 from
- *           HopesG's script and never independently verified.
- *             - Old -> new: VPIP 50.9->42.5, PFR 13.4->9.4, 3-bet 3.7->1.5,
- *               fold-to-3-bet 14.9->48.1 (more than TRIPLED), C-bet
- *               40.3->38.7, fold-to-C-bet 56.1->44.9, limp-share 44.8->42.4.
- *               This pool is tighter than assumed, not looser, and folds to
- *               3-bets dramatically more than assumed.
- *             - A.tight/A.loose are algebraic functions of POOL_AVG.vpip, so
- *               they moved automatically — no separate archetype-boundary
- *               edit needed. A.aggRatio/A.passiveRatio and every POOL_SPREAD
- *               entry are independent judgement calls, NOT re-derived here —
- *               left alone rather than adjusted without evidence for the
- *               right new distance.
- *             - A handful of tests hardcoded expected values computed from
- *               the OLD anchor instead of the live POOL_AVG/A (an exact
- *               classification boundary, a rendered delta string, a
- *               shrinkage-arithmetic result) — fixed to compute expectations
- *               dynamically in archetype/deviation/exploit-plan/blended-rates/
- *               stats tests, so the NEXT correction shouldn't need to touch
- *               test code at all. `A` is now exported to the test seam.
- *             - Also confirmed by a fresh deep scan: the v1.6.0 hero-identity
- *               fix is holding — heroGhost(name:Wonkawee): none, heroRecord
- *               and STORE.hero match exactly, no drift.
  *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
@@ -145,7 +125,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.13.0';
+  const HUD_VERSION = '1.14.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -5983,10 +5963,12 @@
   const SELF_BADGE_LIFT_PX = 5 * BADGE_HEIGHT_PX;
 
   // Nudges off the lifted position above, reported from a live table: at the
-  // full lift the badge sat over the action timer. Half a badge-line down and
-  // ~10 characters right (at the badge's own 10px font) clears it without
-  // giving back enough height to land on the chip figure again.
-  const SELF_BADGE_DOWN_NUDGE_PX = BADGE_HEIGHT_PX / 2;
+  // full lift the badge sat over the action timer. ~10 characters right (at
+  // the badge's own 10px font) clears the timer horizontally; down moved in
+  // two steps — half a badge-line first (v1.7.0), then one more full line
+  // (v1.14.0, "cover the name and nothing else") once that half-line still
+  // left it floating over empty felt above the name rather than on it.
+  const SELF_BADGE_DOWN_NUDGE_PX = 1.5 * BADGE_HEIGHT_PX;
   const SELF_BADGE_RIGHT_NUDGE_PX = 60;
 
   // One place each, so the badge tooltip, the players list, the Stats tab and

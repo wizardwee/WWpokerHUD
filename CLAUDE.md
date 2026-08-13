@@ -1224,6 +1224,13 @@ not "done", just the latest report acted on. `badgeStats: false` remains the
 escape hatch, and nobody working on this can see the layout, so **each
 adjustment still needs one report back before the next one.**
 
+**`SELF_BADGE_DOWN_NUDGE_PX` moved again in v1.14.0**, still unconfirmed. The
+v1.7.0 half-line nudge solved the timer collision but, per the next report,
+left the badge floating over empty felt above the name rather than sitting on
+it — now 1.5 badge-lines down (was 0.5), aiming to cover the name and nothing
+else. Same rule: this is a guess informed by the last report, not a fact
+until the next one confirms it landed right.
+
 **New in v1.8.0, and needs a live check the same way a selector does:**
 shared-affiliation badges (🔗/💍, see the section above) need a Torn API key
 set in Settings and a real fetch to confirm `parseAffiliationProfile`'s field
