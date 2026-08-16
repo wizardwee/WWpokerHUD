@@ -9,6 +9,39 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.20.0
+
+The Gist sync status line now shows the gist itself — reported live, right
+after v1.19.0 shipped: Copy and Save/share *still* both failed on a large
+Backup export, exactly the same as before that fix. That's expected, not a
+regression: v1.19.0 only stopped both buttons lying about success, it never
+made either path capable of carrying more data. The follow-up question was
+"could this be the export's size?" — plausible, since both the clipboard and
+Flutter's app-bridge have real, low payload ceilings in a mobile webview, and
+neither was ever built to move a multi-hundred-KB blob.
+
+The fix isn't to fight those two paths further. This HUD already has GitHub
+Gist sync built — a plain HTTPS `PATCH` to the GitHub API, which doesn't share
+either limit — for exactly this reason. What was missing was any way to
+actually **find** the result: the Settings panel said "Connected. Last sync:
+..." once sync was working, but never surfaced the gist itself. The only way
+to get the data afterward was to leave the HUD entirely and go hunting on
+github.com.
+
+- New `gistUrl()` — the bare `https://gist.github.com/<id>` form, which
+  resolves without needing the username and so costs no extra API call — is
+  folded into `syncStatusText()` once a gist exists, and a new **"Copy gist
+  link"** button appears alongside it.
+- That link is about 40 characters, nothing like the full export. `copyText`'s
+  `execCommand` fallback (from v1.19.0) has no size-related reason to fail on
+  something this small, even on a device where the full Backup copy does.
+- The actual point of having the URL: opened in the phone's **regular
+  browser** — not Torn PDA's constrained in-app page — a gist has full,
+  unrestricted clipboard access. That's the way out of this entire class of
+  bug for an export too large to move through this webview at all.
+
+11 new assertions in `test/gist-sync.test.js`.
+
 ## 1.19.0
 
 Copy and Save/share, actually working — reported live, right after 1.18.0

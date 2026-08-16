@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.19.0
+// @version      1.20.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,30 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.20.0 - The Gist sync status line now shows the gist itself. Reported live,
+ *          right after v1.19.0: Copy and Save/share still both failed on a
+ *          large Backup export, exactly as before that fix — v1.19.0 only
+ *          stopped them lying about success, it didn't make either path
+ *          bigger. Suspected cause: the clipboard and Flutter's app-bridge
+ *          both have real, low payload ceilings in a mobile webview; a plain
+ *          HTTPS PATCH to the GitHub API does not share that limit, and this
+ *          HUD already has Gist sync built for exactly that reason — but
+ *          "Connected" never told you WHERE the data went. The only way to
+ *          find the gist afterward was to leave the HUD and hunt on
+ *          github.com.
+ *            - New gistUrl() (bare https://gist.github.com/<id> — resolves
+ *              without needing the username, one less API round trip) is
+ *              folded into syncStatusText() once a gist exists, and a new
+ *              "Copy gist link" button appears alongside it. The link itself
+ *              is ~40 characters, nothing like the multi-hundred-KB export,
+ *              so copyText's execCommand fallback has no size-related reason
+ *              to fail on it even on a device where the full Backup copy does.
+ *            - The real point of the gist: opened in the phone's REGULAR
+ *              browser (not Torn PDA's constrained page), it has full,
+ *              unrestricted clipboard access — the way out of this whole class
+ *              of bug for an export too big to move through this webview at all.
+ *            - 11 new assertions in test/gist-sync.test.js.
  *
  * 1.19.0 - Copy and Save/share, actually working. Reported live: the Settings
  *          Copy button failed outright ("failed to copy to clipboard"), and
@@ -87,17 +111,6 @@
  *                  reason: "a test of a copy cannot fail when the original is
  *                  wrong."
  *
- * 1.17.1 - Stack-sitting's staleness gap cut from 4h to 2h10m, its own
- *          STACK_SESSION_GAP_MS rather than reusing hero-session's
- *          SESSION_GAP_MS (unchanged at 4h — this only touches trackStacks).
- *          Reported from a live table: "Stack this sitting" showed a high
- *          well above the table's own max buy-in. The stake-change check
- *          (s.bb !== bb) can't catch a player leaving and re-buying smaller
- *          at the SAME table, so a return inside the old 4h window carried
- *          the previous buy-in's high into the new one. 2h10m is a judgement
- *          call, not a measurement — long enough to survive an ordinary
- *          break, short enough to catch a genuine cash-out-and-rebuy.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -160,7 +173,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.19.0';
+  const HUD_VERSION = '1.20.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -7896,6 +7909,7 @@
       <label>OAuth App Client ID: <input type="text" class="tph-client-id" value="${escapeHtml(STORE.settings.githubClientId)}" style="width:70%"></label><br>
       <button class="tph-connect">${GistSync.status === 'connected' ? 'Re-sync now' : 'Connect'}</button>
       <div class="tph-sync-status">${escapeHtml(syncStatusText())}</div>
+      ${gistUrl() ? '<button class="tph-copy-gist-link">Copy gist link</button>' : ''}
       ${storageSettingsHtml()}
       <h4>Backup</h4>
       <textarea class="tph-export" readonly></textarea>
@@ -8093,6 +8107,17 @@
       if (GistSync.status === 'connected') GistSync.syncNow();
       else GistSync.startDeviceFlow();
     });
+    // Only rendered once a gist exists (see gistUrl() above). A ~40-char URL,
+    // not the multi-hundred-KB export — copyText's execCommand fallback
+    // should never have a reason to fail on something this small even on a
+    // device where the full Backup copy does.
+    const copyGistBtn = panel.querySelector('.tph-copy-gist-link');
+    if (copyGistBtn) {
+      copyGistBtn.addEventListener('click', async (e) => {
+        const ok = await copyText(gistUrl());
+        e.target.textContent = ok ? 'Copied ✓' : 'Copy failed — select the link in the status line above';
+      });
+    }
     panel.querySelector('.tph-copy-export').addEventListener('click', async (e) => {
       // Passes the visible .tph-export textarea itself as copyText's
       // existingEl — if even execCommand fails, the JSON is left selected on
@@ -8127,12 +8152,29 @@
     });
   }
 
+  // https://gist.github.com/<id> resolves without a username prefix — one
+  // less API round trip (and one less thing to cache) just to show a link.
+  function gistUrl() {
+    return STORE.settings.gistId ? `https://gist.github.com/${STORE.settings.gistId}` : null;
+  }
+
   function syncStatusText() {
     if (GistSync.status === 'waiting-for-user') {
       return `Open ${GistSync.verificationUri} on this phone's regular browser and enter code: ${GistSync.userCode}`;
     }
     if (GistSync.status === 'polling') return 'Waiting for authorization…';
-    if (GistSync.status === 'connected') return `Connected. Last sync: ${STORE.settings.lastSync ? new Date(STORE.settings.lastSync).toLocaleString() : 'never'}`;
+    if (GistSync.status === 'connected') {
+      // The connect flow never surfaced the gist itself anywhere — "connected"
+      // told you sync was happening but not where the data actually went.
+      // Reported live: it's the only way to get a large backup off a device
+      // where Copy/Save can both fail on size (v1.19.0's copyText/
+      // downloadTextFile fixes only made those failures honest, not larger).
+      // A gist opened in the phone's REGULAR browser has full, unrestricted
+      // clipboard access, unlike the constrained page this HUD runs inside.
+      const url = gistUrl();
+      return `Connected. Last sync: ${STORE.settings.lastSync ? new Date(STORE.settings.lastSync).toLocaleString() : 'never'}.`
+        + (url ? ` Gist: ${url}` : '');
+    }
     if (GistSync.status === 'error') return `Error: ${GistSync.error}`;
     return 'Not connected.';
   }
@@ -8696,6 +8738,11 @@
       downloadTextFile,
       copyText,
       exportJson,
+      GistSync,
+      syncStatusText,
+      gistUrl,
+      GIST_FILENAME,
+      GITHUB_API,
       LOG_PATTERNS,
       LOG_NOISE_RE,
       cleanLogLine,
