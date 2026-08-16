@@ -91,6 +91,8 @@ the table, **Settings → Calibration mode → run a deep scan → copy the repo
 and paste it into whichever one you use — that's the fastest way to get a fix,
 since nobody maintaining this can log into Torn and see your table directly.
 
+Contact me: wonkaweegh@gmail.com
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
