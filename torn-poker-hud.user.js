@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.17.1
+// @version      1.18.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,46 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.18.0 - Two additions, both closing gaps the History tab and the coach had
+ *          carried since showdown tracking was added:
+ *            - The board is now printed in a hand's history entry (tab, Copy,
+ *              and file export — all three go through formatHand/
+ *              formatHandHtml, so all three gained it at once). hand.board has
+ *              been persisted since v1.17.0's replayer; nothing had ever
+ *              printed it, so a hand's history showed every bet size but never
+ *              the cards that fell — the exact thing needed to read whether a
+ *              bet was into a wet or dry board. Omitted entirely (not a blank
+ *              line) for a hand recorded before v1.17.0, which has
+ *              board: undefined rather than a known-empty board.
+ *            - Bet-sizing and slowplay, split by hand strength AT THE MOMENT
+ *              of the action: a new `texture` field per player, banked at
+ *              settlement alongside noteShowdown from the same showdown
+ *              evidence (same "floor on a range, never the whole of it"
+ *              caveat as shownHands — there is no other way to know what a
+ *              player was actually holding mid-hand). categoryAt (reuses
+ *              evaluate7, so "made" always means what category 2+ means
+ *              everywhere else that number is read) and hasDrawAt (coarse on
+ *              purpose, same tradeoff as RFI_RANGES: a four-flush or an
+ *              open/gutshot counts, without distinguishing which) classify
+ *              hole+board at each flop/turn/river action. Two things fall out
+ *              of that split: average bet size as % of pot while still only
+ *              drawing vs already holding two pair+ (does their bet SIZE tell
+ *              you what they have), and how often they check a hand that's
+ *              already made instead of betting it (the slowplay/trap rate).
+ *              Both surface on the Stats tab, in the tendency report, and as
+ *              new Sizing/Trap entries in the coach's exploit plan, all gated
+ *              at TEXTURE_MIN (5) — a showdown sample is inherently small.
+ *                - logAction gained an optional `extra` param so bet/raise/
+ *                  all-in actions can carry their own `.p` (bet-as-%-of-pot,
+ *                  betSizePctOf) on the stored action record itself, which is
+ *                  what lets settlement-time code know what a SPECIFIC
+ *                  showdown-street bet cost without replaying the pot.
+ *                - 31 new assertions in test/bet-texture.test.js, including an
+ *                  end-to-end run through handleLogLine with real log wording
+ *                  (not a hand-built hand object) — the project's own stated
+ *                  reason: "a test of a copy cannot fail when the original is
+ *                  wrong."
  *
  * 1.17.1 - Stack-sitting's staleness gap cut from 4h to 2h10m, its own
  *          STACK_SESSION_GAP_MS rather than reusing hero-session's
@@ -50,26 +90,6 @@
  *              as context instead of a per-step number this file has no
  *              honest way to derive.
  *            - 31 new assertions in test/hand-replay.test.js.
- *
- * 1.16.0 - A recent-form sparkline on the Stats tab: rolling VPIP (blue) and
- *          PFR (amber), TREND_WINDOW_HANDS (10) hands per point, oldest to
- *          newest left to right. The blended figure already on that row says
- *          WHERE a player is right now; this says whether they got there
- *          drifting up, drifting down, or bouncing around — invisible in any
- *          single blended number. No new data: p.recent is the same bitfield
- *          array blendedRates/sessionRates already read.
- *            - recentTrendPoints/sparklineSvg are pure functions (no DOM), so
- *              the actual arithmetic and SVG output are directly tested rather
- *              than only reachable through a render pass this harness can't
- *              drive. 25 new assertions in test/trend-sparkline.test.js,
- *              including that a 100% point plots at the TOP of the track
- *              (y=0) — the thing that makes "trending up" actually point up.
- *            - Its own window size (10), not STORE.settings.sessionWindow:
- *              that setting is tuned for one STABLE estimate (bigger window,
- *              steadier), this needs many NOISY points to show a shape.
- *              Sharing it would also mean raising sessionWindow toward
- *              RECENT_MAX (40) makes the sparkline disappear entirely — at
- *              window==40 there is exactly one possible window to draw.
  *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
@@ -133,7 +153,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.17.1';
+  const HUD_VERSION = '1.18.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -397,6 +417,21 @@
       plBBEst: 0,
       betSizePctSum: 0, // sum of bet-as-%-of-pot, for average sizing tells
       betSizeCount: 0,
+      // Bet-sizing and slowplay split by hand strength AT THE MOMENT of the
+      // action — derived only from showdowns, same evidence source and same
+      // "floor on a range, never the whole of it" caveat as shownHands.
+      // drawBets/madeBets are bet-or-raise counts on flop/turn only for draws
+      // (the river has no draw left to hold, so a river bet is scored toward
+      // madeBets or not counted at all, never drawBets); checkMade is how often
+      // they checked when they ALREADY held two pair or better instead of
+      // betting it — the slowplay/trap signal. The *PctSum/*PctN pairs average
+      // the sizing (as % of pot, read off the action's own `.p` field — see
+      // logAction) separately for the two categories.
+      texture: {
+        drawBets: 0, drawPctSum: 0, drawPctN: 0,
+        madeBets: 0, madePctSum: 0, madePctN: 0,
+        checkMade: 0,
+      },
       notes: '',
       lastSeen: 0,
       // Cached from a Torn API profile lookup — see refreshSeatedAffiliations.
@@ -2062,10 +2097,11 @@
     if (type === 'bet') {
       const xid = nameToXidGuess(cleanName(m[1]));
       const amt = m[2] ? parseAmount(m[2]) : 0;
-      noteBetSizing(xid, amt, hand.pot); // pot BEFORE this bet
+      const potBefore = hand.pot;
+      noteBetSizing(xid, amt, potBefore);
       addContribution(hand, xid, amt);
       recordStreetAction(xid, 'bet', hand);
-      logAction(hand, xid, 'bet', amt);
+      logAction(hand, xid, 'bet', amt, { p: betSizePctOf(amt, potBefore) });
       maybeCountVpip(xid, hand);
       markAggressor(xid, hand);
       maybeCountCbet(xid, hand);
@@ -2075,10 +2111,11 @@
     if (type === 'raise') {
       const xid = nameToXidGuess(cleanName(m[1]));
       const amt = m[2] ? parseAmount(m[2]) : 0;
-      noteBetSizing(xid, amt, hand.pot); // pot BEFORE this raise
+      const potBefore = hand.pot;
+      noteBetSizing(xid, amt, potBefore);
       addContribution(hand, xid, amt);
       recordStreetAction(xid, 'raise', hand);
-      logAction(hand, xid, 'raise', amt);
+      logAction(hand, xid, 'raise', amt, { p: betSizePctOf(amt, potBefore) });
       markAsPreflopRaiseAction(xid, hand);
       return;
     }
@@ -2086,9 +2123,10 @@
     if (type === 'allin') {
       const xid = nameToXidGuess(cleanName(m[1]));
       const amt = m[2] ? parseAmount(m[2]) : 0;
-      if (amt) { noteBetSizing(xid, amt, hand.pot); addContribution(hand, xid, amt); }
+      const potBefore = hand.pot;
+      if (amt) { noteBetSizing(xid, amt, potBefore); addContribution(hand, xid, amt); }
       recordStreetAction(xid, 'raise', hand);
-      logAction(hand, xid, 'all-in', amt);
+      logAction(hand, xid, 'all-in', amt, { p: betSizePctOf(amt, potBefore) });
       markAsPreflopRaiseAction(xid, hand);
       return;
     }
@@ -2144,9 +2182,12 @@
   }
 
   // Short keys — this array is persisted for every retained hand, so verbose
-  // field names would multiply storage for no benefit.
-  function logAction(hand, xid, action, amount) {
-    hand.actions.push({ x: xid, a: action, amt: amount || 0, s: hand.street });
+  // field names would multiply storage for no benefit. `extra` merges in a
+  // couple more short-keyed fields for specific action types — currently just
+  // `p` (bet-as-%-of-pot, see betSizePctOf) on bet/raise/all-in — rather than
+  // widening the signature every time one more is needed.
+  function logAction(hand, xid, action, amount, extra) {
+    hand.actions.push({ x: xid, a: action, amt: amount || 0, s: hand.street, ...(extra || {}) });
     // Seat scraping can't identify players on every table layout, and when it
     // fails dealtInXids stays empty — which would leave `hands` at zero and make
     // EVERY rate stat undefined. Treat anyone observed acting as dealt in.
@@ -2166,11 +2207,26 @@
   // the Stats tab used to print the figure with no indication of the sample.
   const BET_SIZE_MIN = 12;
 
+  // Same idea for the draw/made sizing split and the trap rate, but lower:
+  // both are drawn from showdowns alone, which are inherently rarer than bets
+  // in general (BET_SIZE_MIN's sample), so gating at the same figure would
+  // mean these almost never show. Still a real floor, not "off on the first
+  // occurrence" — see the "floor on a range" caveat on showdown data generally.
+  const TEXTURE_MIN = 5;
+
   function noteBetSizing(xid, amt, potBefore) {
     if (!amt || potBefore <= 0) return;
     const p = getPlayer(xid);
     p.betSizePctSum += (amt / potBefore) * 100;
     p.betSizeCount += 1;
+  }
+
+  // Same figure noteBetSizing folds into the running average, but kept per
+  // ACTION (rounded, on the action record itself via logAction's `extra`)
+  // rather than only ever summed — noteBetTexture needs to know what a
+  // SPECIFIC bet cost, at settlement, without replaying the whole pot.
+  function betSizePctOf(amt, potBefore) {
+    return (amt && potBefore > 0) ? Math.round((amt / potBefore) * 100) : null;
   }
 
   function addContribution(hand, xid, amt) {
@@ -2446,6 +2502,7 @@
     // that never reached settlement doesn't pollute the range.
     Object.keys(hand.shownCards || {}).forEach((xid) => {
       noteShowdown(xid, hand.shownCards[xid], hand);
+      noteBetTexture(xid, hand.shownCards[xid], hand);
     });
 
     recordHandHistory(hand);
@@ -2587,6 +2644,11 @@
     const when = new Date(h.t).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
     const pin = h.pinned ? ' 📌' : '';
     const lines = [`[${when}] pot ${fmtMoney(h.pot)} — reached ${h.street}${pin}`];
+    // A hand recorded before v1.17.0 has board: undefined, not an empty board
+    // — the replayer treats those differently ("unknown" vs "no cards fell"),
+    // and so does this: silently omit the line rather than claim a known-empty
+    // board for a hand this HUD never actually captured one on.
+    if (Array.isArray(h.board) && h.board.length) lines.push(`  board: ${cardsGlyphText(h.board)}`);
     const byStreet = {};
     (h.actions || []).forEach((a) => { (byStreet[a.s] = byStreet[a.s] || []).push(a); });
     ['preflop', 'flop', 'turn', 'river'].forEach((street) => {
@@ -2644,6 +2706,11 @@
     const pin = h.pinned ? ' <span title="Notable — kept longer than the usual cap">📌</span>' : '';
     const parts = [`<div class="tph-hh-head" style="${HH.head}">${escapeHtml(when)} · pot ${fmtMoney(h.pot)}`
       + ` · reached ${escapeHtml(h.street || 'preflop')}${pin}</div>`];
+    // Same omission rule as formatHand: no line at all for a hand recorded
+    // before board was persisted (v1.17.0), rather than claiming an empty one.
+    if (Array.isArray(h.board) && h.board.length) {
+      parts.push(`<div class="tph-hh-row" style="${HH.row}">board: <b>${escapeHtml(cardsGlyphText(h.board))}</b></div>`);
+    }
 
     const byStreet = {};
     (h.actions || []).forEach((a) => { (byStreet[a.s] = byStreet[a.s] || []).push(a); });
@@ -3332,6 +3399,13 @@
       + p.streetActions[s].raise + p.streetActions[s].call + p.streetActions[s].fold, 0);
     const byStreet = {};
     POSTFLOP_STREETS.forEach((s) => { byStreet[s] = streetRates(p.streetActions[s]); });
+    // Bet-sizing and slowplay split by hand strength, from showdowns only —
+    // see the `texture` field on emptyPlayer and noteBetTexture. `tex.*` reads
+    // are all `||`-guarded rather than relying on the field's presence, since a
+    // caller may hand computeRates a bare literal (tests do) with no texture
+    // object at all.
+    const tex = p.texture || {};
+    const madeSpots = (tex.checkMade || 0) + (tex.madeBets || 0);
     return {
       vpip: pct(p.vpip, p.hands),
       pfr: pct(p.pfr, p.hands),
@@ -3356,6 +3430,17 @@
       rrSample: rrFaced,
       wtsd: pct(p.wtsd, p.hands),
       avgBetPct: p.betSizeCount ? (p.betSizePctSum / p.betSizeCount) : null,
+      // Average bet/raise size as % of pot, split by whether they were caught
+      // (at showdown) already holding two pair+ or still only drawing to one.
+      betDrawPct: tex.drawPctN ? (tex.drawPctSum / tex.drawPctN) : null,
+      betMadePct: tex.madePctN ? (tex.madePctSum / tex.madePctN) : null,
+      betDrawCount: tex.drawBets || 0,
+      betMadeCount: tex.madeBets || 0,
+      // Slowplay/trap rate: of the times they were already sitting on two
+      // pair+ (checked or bet), how often did they check it instead. Null with
+      // no such spots yet — "never slowplays" needs at least one to claim.
+      trapRate: madeSpots ? pct(tex.checkMade || 0, madeSpots) : null,
+      trapSample: madeSpots,
       byStreet,
     };
   }
@@ -3403,6 +3488,77 @@
     else if (tier >= 3) e.r4 = (e.r4 || 0) + 1;
     if (hand && hand.limpRaised && typeof hand.limpRaised.has === 'function'
         && hand.limpRaised.has(xid)) e.lr = (e.lr || 0) + 1;
+  }
+
+  // Hand category of hole+board at a given point in the hand, {r,s} numeric
+  // form — reuses evaluate7 rather than a second evaluator, so "made" here
+  // always means what category 2+ (two pair or better) means everywhere else
+  // that number is read. Works on 5 or 6 cards (flop/turn) exactly as it does
+  // on 7 (river); evaluate7 is generic over the input length.
+  function categoryAt(holeCards, boardCards) {
+    return evaluate7((holeCards || []).concat(boardCards || []).map(cardToNum))[0];
+  }
+
+  // Four cards toward a flush, or an open/gutshot straight, in hole+board
+  // combined — a draw, not yet a made hand. Coarse on purpose, same tradeoff
+  // as RFI_RANGES elsewhere in this file: it does not distinguish a gutshot
+  // from a double-belly-buster, only that some single card would complete
+  // something. Straight check mirrors evaluate7's own wheel handling (ace
+  // also counts low) so the two never disagree about what a straight is.
+  function hasDrawAt(holeCards, boardCards) {
+    const nums = (holeCards || []).concat(boardCards || []).map(cardToNum);
+    const suitCounts = {};
+    nums.forEach((c) => { suitCounts[c.s] = (suitCounts[c.s] || 0) + 1; });
+    if (Object.keys(suitCounts).some((s) => suitCounts[s] === 4)) return true;
+    const ranks = new Set(nums.map((c) => c.r));
+    if (ranks.has(14)) ranks.add(1);
+    for (let hi = 14; hi >= 5; hi--) {
+      let have = 0;
+      for (let i = 0; i < 5; i++) { if (ranks.has(hi - i)) have++; }
+      if (have === 4) return true;
+    }
+    return false;
+  }
+
+  // Only flop and turn have a draw left to hold — the river is the last card,
+  // so "drawing" there is meaningless. A river bet can only be a made hand or
+  // pure air, and a showdown record alone cannot tell those apart, so it is
+  // scored toward madeBets when it qualifies and simply not counted otherwise.
+  const TEXTURE_DRAW_STREETS = ['flop', 'turn'];
+
+  // Bet-sizing and slowplay, split by hand strength — see the `texture` field
+  // on emptyPlayer. Banked from the same showdown loop as noteShowdown, at the
+  // same point (settlement, after hand.winners and hand.board are both final)
+  // and for the same reason: a hand that never reaches settlement should not
+  // pollute this any more than it pollutes the range.
+  function noteBetTexture(xid, holeCards, hand) {
+    if (!holeCards || holeCards.length !== 2) return;
+    const board = (hand && hand.board) || [];
+    const boardAt = { flop: board.slice(0, 3), turn: board.slice(0, 4), river: board.slice(0, 5) };
+    const need = { flop: 3, turn: 4, river: 5 };
+    const p = getPlayer(xid);
+    if (!p.texture || typeof p.texture !== 'object') {
+      p.texture = {
+        drawBets: 0, drawPctSum: 0, drawPctN: 0, madeBets: 0, madePctSum: 0, madePctN: 0, checkMade: 0,
+      };
+    }
+    (hand.actions || []).forEach((a) => {
+      if (a.x !== xid) return;
+      const bc = boardAt[a.s];
+      if (!bc || bc.length < need[a.s]) return; // preflop, or a street the log never reached
+      const cat = categoryAt(holeCards, bc);
+      if (a.a === 'bet' || a.a === 'raise' || a.a === 'all-in') {
+        if (cat >= 2) {
+          p.texture.madeBets += 1;
+          if (typeof a.p === 'number') { p.texture.madePctSum += a.p; p.texture.madePctN += 1; }
+        } else if (TEXTURE_DRAW_STREETS.indexOf(a.s) >= 0 && hasDrawAt(holeCards, bc)) {
+          p.texture.drawBets += 1;
+          if (typeof a.p === 'number') { p.texture.drawPctSum += a.p; p.texture.drawPctN += 1; }
+        }
+      } else if (a.a === 'check' && cat >= 2) {
+        p.texture.checkMade += 1;
+      }
+    });
   }
 
   // Everything a player has shown down, newest counts first. Optionally split
@@ -5346,6 +5502,55 @@
       }
     }
 
+    // --- Sizing by hand strength, and slowplay — both from showdowns only ---
+    // Never fires for hero, same shownHands gap as the range rule below: hero's
+    // own cards are never harvested as a showdown, so p.texture stays empty.
+    if ((r.betDrawCount + r.betMadeCount) >= TEXTURE_MIN
+        && r.betDrawPct != null && r.betMadePct != null
+        && Math.abs(r.betMadePct - r.betDrawPct) >= 20) {
+      if (r.betMadePct > r.betDrawPct) {
+        add(50, 'Sizing',
+          `Sizes up with a made hand (${r.betMadePct.toFixed(0)}% pot, ${r.betMadeCount} spots) vs a `
+            + `draw (${r.betDrawPct.toFixed(0)}%, ${r.betDrawCount} spots) — their bet SIZE tells you which `
+            + 'one you\'re facing. A bigger-than-usual bet from them is the goods; call their small ones down '
+            + 'lighter and give the big ones more respect.',
+          `You size up with a made hand (${r.betMadePct.toFixed(0)}% pot, ${r.betMadeCount} spots) vs a draw `
+            + `(${r.betDrawPct.toFixed(0)}%, ${r.betDrawCount} spots) — a sharp opponent can read your size `
+            + 'and play accordingly. Mix your sizing so a big bet doesn\'t always mean the same thing.',
+          'read their bet size', 'randomize your sizing', ['facing']);
+      } else {
+        add(50, 'Sizing',
+          `Sizes UP on a draw (${r.betDrawPct.toFixed(0)}% pot, ${r.betDrawCount} spots) vs down with a made `
+            + `hand (${r.betMadePct.toFixed(0)}%, ${r.betMadeCount} spots) — backwards from the pool norm. `
+            + 'A big bet from them is more likely a draw than the nuts; their small ones are where the value is.',
+          `You size UP on a draw (${r.betDrawPct.toFixed(0)}% pot, ${r.betDrawCount} spots) vs down with a `
+            + `made hand (${r.betMadePct.toFixed(0)}%, ${r.betMadeCount} spots) — backwards from the norm, and `
+            + 'exploitable the same way. Even out your sizing across both.',
+          'their big bet = draw', 'randomize your sizing', ['facing']);
+      }
+    }
+    if (r.trapSample >= TEXTURE_MIN) {
+      if (r.trapRate > 40) {
+        add(78, 'Trap',
+          `Slowplays made hands — checks two pair+ instead of betting it ${fmtPct(r.trapRate)} of the time `
+            + `(${r.trapSample} spots). Don't read their check as weakness; check back marginal hands rather `
+            + 'than betting into a checked-through big hand, and expect a check-raise when you do bet.',
+          `You slowplay made hands — check two pair+ instead of betting it ${fmtPct(r.trapRate)} of the time `
+            + `(${r.trapSample} spots). It wins the occasional big pot but also lets a free card that could `
+            + 'cost you the hand; make sure the trap line is actually the better line here, not just habit.',
+          'their check ≠ weak', 'bet your big hands more');
+      } else if (r.trapRate < 10) {
+        add(58, 'Trap',
+          `Almost never slowplays — checks two pair+ only ${fmtPct(r.trapRate)} of the time `
+            + `(${r.trapSample} spots). A bet from them with a big hand is close to automatic, so treat a `
+            + 'check as closer to genuine weakness and bet into it more freely.',
+          `You almost never slowplay (${fmtPct(r.trapRate)} of ${r.trapSample} made-hand spots) — your checks `
+            + 'are read as weak because they always are. Mix in the occasional slowplay so a check doesn\'t '
+            + 'give it away.',
+          'their check = weak', 'mix in a slowplay');
+      }
+    }
+
     // --- What they've actually shown ----------------------------------------
     // Never fires for hero: harvestShownCards deliberately excludes hero's own
     // cards (see CLAUDE.md "Showdown ranges"), so p.shownHands stays empty.
@@ -5737,6 +5942,21 @@
       add(show, `Goes to showdown ${fmtPct(r.wtsd)} of hands played.`,
         r.wtsd > 40 ? 'A station — three-street value, and never try to bluff them off a made hand.'
           : r.wtsd < 18 ? 'Gives up a lot — barrel more; they fold before the river.' : null);
+    }
+    if ((r.betDrawCount + r.betMadeCount) >= TEXTURE_MIN) {
+      add(show, `When shown down, sizes ${fmtPct(r.betDrawPct)} of pot betting a draw `
+        + `(${r.betDrawCount}) vs ${fmtPct(r.betMadePct)} already made (${r.betMadeCount}).`,
+        r.betDrawPct != null && r.betMadePct != null && Math.abs(r.betMadePct - r.betDrawPct) >= 20
+          ? (r.betMadePct > r.betDrawPct
+            ? 'Bets bigger with the goods than on a draw — a size jump is a real hand.'
+            : 'Bets bigger ON draws than with a made hand — a big bet from them is more likely a draw.')
+          : null);
+    }
+    if (r.trapSample >= TEXTURE_MIN) {
+      add(show, `Slowplays a made hand (checks two pair+ instead of betting it) `
+        + `${fmtPct(r.trapRate)} of the time (${r.trapSample} spots).`,
+        r.trapRate > 40 ? "Don't read their check as weakness — they trap. Check back marginal hands instead of betting into it."
+          : r.trapRate < 10 ? 'Rarely slowplays — a bet from them with a big hand is close to automatic, so a check-through is closer to real weakness.' : null);
     }
     const shown3 = shownRange(p, 'threebet');
     if (shown3.length) {
@@ -7065,6 +7285,16 @@
             <td class="tph-stat-l">Bet size</td>
             <td class="tph-stat-v"><b>${r.avgBetPct != null ? r.avgBetPct.toFixed(0) + '%' : '—'}</b></td>
             <td class="tph-stat-n"><span class="tph-stat-norm">of pot${p.betSizeCount ? ` · ${p.betSizeCount} bet${p.betSizeCount === 1 ? '' : 's'}` : ''}${p.betSizeCount && p.betSizeCount < BET_SIZE_MIN ? ', low' : ''}</span></td>
+          </tr>
+          <tr title="Average bet/raise as % of pot, split by what they actually had at showdown: DRAW = no made hand yet but a four-flush or an open/gutshot straight draw on the board; MADE = two pair or better already. Flop and turn only for draw — no draw left to hold on the river. From showdowns only, a floor on their range, same caveat as the Range tab.">
+            <td class="tph-stat-l">Size: draw/made</td>
+            <td class="tph-stat-v"><b>${fmtPct(r.betDrawPct)}</b> / <b>${fmtPct(r.betMadePct)}</b></td>
+            <td class="tph-stat-n"><span class="tph-stat-norm">${r.betDrawCount}d · ${r.betMadeCount}m${(r.betDrawCount + r.betMadeCount) < TEXTURE_MIN ? ', low' : ''}</span></td>
+          </tr>
+          <tr title="How often they check a hand that's already two pair or better instead of betting it — the slowplay/trap rate. From showdowns only, so a small sample is normal; the count is shown beside the percentage for that reason.">
+            <td class="tph-stat-l">Slowplay</td>
+            <td class="tph-stat-v"><b>${fmtPct(r.trapRate)}</b></td>
+            <td class="tph-stat-n"><span class="tph-stat-norm">${r.trapSample} made-hand spot${r.trapSample === 1 ? '' : 's'}${r.trapSample < TEXTURE_MIN ? ', low' : ''}</span></td>
           </tr>
           <tr><td colspan="3" class="tph-stat-legend">Bet size = average bet/raise as a share of the pot before it; 100% is pot-sized.
             Tick = pool average (reference figures, not measured here).
@@ -8466,6 +8696,11 @@
       roleTagText,
       handClassFromCards,
       noteShowdown,
+      noteBetTexture,
+      categoryAt,
+      hasDrawAt,
+      betSizePctOf,
+      TEXTURE_MIN,
       harvestShownCards,
       readSeatFaceUpCards,
       get currentHand() { return currentHand; },

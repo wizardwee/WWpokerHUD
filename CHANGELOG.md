@@ -9,6 +9,60 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.18.0
+
+Two additions, both closing gaps the History tab and the coach had carried
+since showdown tracking was added — the first from user feedback ("hand
+history for players only includes bet sizes, not the actual cards run out";
+"I need to know the way players bet or call pot sizes... do they like to bet
+draws, or tend to be trappy").
+
+**The board is now printed in a hand's history entry.** The tab, the Copy
+button and the file export all go through `formatHand`/`formatHandHtml`, so
+all three gained it in one change. `hand.board` has been persisted since
+v1.17.0's replayer; nothing had ever printed it, so a hand's history showed
+every bet size but never the cards that actually fell — exactly the thing
+needed to read whether a bet was into a wet or dry board. Omitted entirely
+(not a blank "board:" line) for a hand recorded before v1.17.0, which has
+`board: undefined` rather than a known-empty board — same distinction the
+replayer already makes.
+
+**Bet-sizing and slowplay, split by hand strength AT THE MOMENT of the
+action.** A new `texture` field per player, banked at settlement alongside
+`noteShowdown` from the same showdown evidence — same "floor on a range,
+never the whole of it" caveat as `shownHands`, because a showdown is the only
+point this file ever learns what a player was actually holding mid-hand.
+
+- `categoryAt` reuses `evaluate7` rather than a second evaluator, so "made"
+  here always means what category 2+ (two pair or better) means everywhere
+  else that number is read.
+- `hasDrawAt` is coarse on purpose, the same tradeoff `RFI_RANGES` already
+  makes elsewhere in this file: a four-flush or an open/gutshot straight draw
+  counts, without distinguishing a gutshot from a double-belly-buster.
+- Both are evaluated against hole+board at each flop/turn/river action a
+  shown-down player took, and split two things out of it: their average bet
+  size as % of pot while still only drawing vs. already holding two pair+
+  (does their bet SIZE tell you what they have), and how often they check a
+  hand that's already made instead of betting it — the slowplay/trap rate.
+- All of it surfaces in three places: the Stats tab (a "Size: draw/made" row
+  and a "Slowplay" row), the tendency report ("Sizing & showdown" section),
+  and two new entry types in the coach's exploit plan (`Sizing`, `Trap`) with
+  the usual leak-voice mirror for the Leaks tab. Everything is gated at
+  `TEXTURE_MIN` (5) — a showdown sample is inherently small, smaller than the
+  general bet-size sample `BET_SIZE_MIN` already gates on.
+- `logAction` gained an optional `extra` param so bet/raise/all-in actions can
+  carry their own `.p` (bet-as-%-of-pot, `betSizePctOf`) on the stored action
+  record itself — settlement-time code needs to know what a SPECIFIC
+  showdown-street bet cost, and there is no honest way to recover that later
+  by replaying the pot (a raise's logged amount is a total-bet-to figure, not
+  an increment — the same fact that already rules out a per-step pot in the
+  v1.17.0 replayer).
+
+31 new assertions in `test/bet-texture.test.js`, including an end-to-end run
+through `handleLogLine` with real log wording rather than a hand-built `hand`
+object — this project's own stated reason for preferring that: "a test of a
+copy cannot fail when the original is wrong."
+
 ## 1.17.1
 
 "Stack this sitting"'s staleness gap cut from 4h to 2h10m, and split into its

@@ -116,6 +116,31 @@ function hand(i, players, actions) {
   t.ok('with a margin, so it is not flush to the edge', s.w < W && s.h < H);
 }
 
+// --- The board, in the hand history (v1.18.0) --------------------------------
+//
+// hand.board has been persisted since v1.17.0's replayer, but formatHand and
+// formatHandHtml never printed it — the actual cards run out were the one
+// thing missing from a hand's history entry, next to the bet sizes already
+// there. A hand recorded before v1.17.0 has board: undefined, which must
+// render as no line at all, not a misleadingly-empty "board: " line.
+
+{
+  const T = load();
+  const withBoard = { t: 1700000000000, pot: 7000000, street: 'river', pinned: false,
+    board: [{ rank: 'A', suit: 's' }, { rank: 'K', suit: 'h' }, { rank: '2', suit: 'd' }],
+    actions: [], winners: [], shown: {} };
+  const noBoard = { t: 1700000000000, pot: 7000000, street: 'preflop', pinned: false,
+    actions: [], winners: [], shown: {} };
+
+  t.ok('the board appears in the plain-text form',
+    T.formatHand(withBoard, null).includes('board: A♠ K♥ 2♦'));
+  t.ok('...and in the markup form',
+    T.formatHandHtml(withBoard, null).includes('board: <b>A♠ K♥ 2♦</b>'));
+  t.eq('a hand with no board data at all gets no board line (plain text)',
+    /board:/.test(T.formatHand(noBoard, null)), false);
+  t.eq('...and none in markup either', /board:/.test(T.formatHandHtml(noBoard, null)), false);
+}
+
 // --- Hero's badge lift -------------------------------------------------------
 
 {
