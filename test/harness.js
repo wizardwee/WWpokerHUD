@@ -204,6 +204,14 @@ function load(opts = {}) {
       }
     },
     fetch: () => Promise.reject(new Error('network disabled in harness')),
+    // Real browsers/webviews always have these; Node's own vm sandbox does
+    // not inherit them from the outer process, unlike the rest of Node's
+    // globals. Only downloadTextFile's PDA branch uses btoa, and nothing
+    // exercised that branch until test/clipboard-export.test.js — Node 16+
+    // has both as real globals, so this just forwards them rather than
+    // reimplementing base64.
+    btoa,
+    atob,
   };
   sandbox.globalThis = sandbox;
 

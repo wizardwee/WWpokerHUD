@@ -9,6 +9,59 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.19.0
+
+Copy and Save/share, actually working — reported live, right after 1.18.0
+shipped, by the user trying to use the Backup export to pull data out for
+analysis: the Settings Copy button failed outright ("failed to copy to
+clipboard"), and Save/share flipped its label to "Sent" while nothing was
+ever actually shared.
+
+**Bug 1: Save/share claimed success it never checked for.**
+`downloadTextFile`'s PDA branch called
+`window.flutter_inappwebview.callHandler('shareFile', ...)` — a call into a
+native handler Torn PDA is expected to register on the Flutter side — and
+returned `true` immediately, without awaiting the Promise `callHandler`
+actually returns. If Torn PDA has no `'shareFile'` handler registered at all
+(as reported), that promise rejects — but by then this function had already
+told its caller "sent", and the caller had already flipped the button to
+"Sent ✓". `downloadTextFile` is now `async` and awaits the call, only
+reporting success once it has genuinely resolved. No `<a download>` fallback
+is attempted after a PDA failure: that path is already documented (in the
+function's own comment, from an earlier report) as silently doing nothing
+inside this webview, so trying it would just reproduce the exact same
+false-positive this fix exists to close.
+
+**Bug 2: no fallback at all when the Clipboard API is blocked.** Every Copy
+button was a bare `navigator.clipboard && navigator.clipboard.writeText(...)`
+with nothing catching a rejection. `navigator.clipboard.writeText` is
+permission-gated, and an embedding app frequently never wires up that grant —
+which is exactly what "failed to copy to clipboard" looks like. A new
+`copyText(text, existingEl)` replaces all 7 call sites: it tries the
+Clipboard API first, and on rejection or absence falls back to
+`execCommand('copy')` against a real, selected textarea — deprecated, but
+with no permission gate, and the mechanism the deep-scan panel's copy button
+already relied on before this change generalised it. Passing an
+already-visible textarea (Backup's `.tph-export`, the deep-scan report's) as
+`existingEl` means that even total failure leaves the text selected on
+screen, ready for a manual long-press-copy, instead of vanishing into an
+invisible removed node.
+
+Every Copy/Save button across Settings, the player History tab, the Report
+tab, and the pool-tendency export now reports what actually happened instead
+of assuming success — including "Copy report" on the Report tab, which
+previously gave no feedback of any kind, success or failure.
+
+17 new assertions in `test/clipboard-export.test.js`: a rejecting
+`callHandler` is asserted to report failure (not "Sent"), and `copyText` is
+driven through a working Clipboard API, a rejecting one, and an
+execCommand-only path, including that the text lands on a passed-in existing
+element even when every path fails. Needed `btoa`/`atob` added to the test
+harness's sandbox — Node has both as real globals, but a `vm` context doesn't
+inherit them from the outer process, and nothing had exercised
+`downloadTextFile`'s PDA branch (the only user of `btoa` in this file) before
+this test.
+
 ## 1.18.0
 
 Two additions, both closing gaps the History tab and the coach had carried

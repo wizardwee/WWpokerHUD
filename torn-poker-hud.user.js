@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.18.0
+// @version      1.19.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,35 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.19.0 - Copy and Save/share, actually working. Reported live: the Settings
+ *          Copy button failed outright ("failed to copy to clipboard"), and
+ *          Save/share flipped to "Sent" while nothing was ever shared.
+ *            - downloadTextFile's PDA branch called
+ *              flutter_inappwebview.callHandler('shareFile', ...) and
+ *              returned true IMMEDIATELY without awaiting the Promise it
+ *              actually returns. With no 'shareFile' handler registered on
+ *              this Torn PDA build, that promise rejects — but the button had
+ *              already been told "sent" a moment earlier. Now awaited, and
+ *              only reports success once the call has genuinely resolved.
+ *            - New copyText() replaces every bare
+ *              `navigator.clipboard && navigator.clipboard.writeText(...)`
+ *              (7 call sites) with a Promise<bool> that falls back to
+ *              execCommand('copy') on a real, selected textarea when the
+ *              Clipboard API is absent, unpermitted, or rejects — no
+ *              permission gate the way the async Clipboard API has. Passing
+ *              an already-visible textarea (Backup's, the deep-scan panel's)
+ *              means even a total failure leaves the text selected on screen
+ *              for a manual copy, rather than vanishing into a removed node.
+ *            - Every Copy/Save button across Settings, the player History tab
+ *              and the pool-tendency export now reports what actually
+ *              happened instead of assuming success, including buttons that
+ *              previously gave no feedback at all ("Copy report" on the
+ *              Report tab had none).
+ *            - 17 new assertions in test/clipboard-export.test.js, covering
+ *              both bugs directly: a rejecting callHandler no longer reports
+ *              "Sent", and copyText is exercised through Clipboard-API-works,
+ *              Clipboard-API-rejects, and execCommand-only paths.
  *
  * 1.18.0 - Two additions, both closing gaps the History tab and the coach had
  *          carried since showdown tracking was added:
@@ -68,28 +97,6 @@
  *          the previous buy-in's high into the new one. 2h10m is a judgement
  *          call, not a measurement — long enough to survive an ordinary
  *          break, short enough to catch a genuine cash-out-and-rebuy.
- *
- * 1.17.0 - A hand replayer, Poker Copilot-style: step a stored hand forward one
- *          STREET at a time from the History tab ("▶ Replay this hand"),
- *          showing the board as it was dealt and hero's equity at each point.
- *            - recordHandHistory now persists hand.board — tracked live since
- *              the flop/turn/river log handler always existed, but never
- *              written into the stored record until now. A hand recorded
- *              before this version has board: undefined, read as "unknown"
- *              rather than an empty (misleadingly complete-looking) board.
- *            - replayStepsFor/replayPreflopRaiseLevel/replayStepEquity are
- *              pure functions over the stored hand (module-level heroXid
- *              aside, same convention buildTendencyEntries already follows).
- *              Equity uses estimateEquityCached with the SAME range-proxy
- *              tiering the live coach panel uses, so a replayed read looks
- *              like the read you'd actually have gotten.
- *            - Deliberately NO per-step pot: hand.actions stores a raise's
- *              TOTAL bet-to figure, not the increment (see the log pattern),
- *              so summing it into a running pot would overcount. The final
- *              pot (already DOM-corrected at recording time) is shown once
- *              as context instead of a per-step number this file has no
- *              honest way to derive.
- *            - 31 new assertions in test/hand-replay.test.js.
  *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
@@ -153,7 +160,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.18.0';
+  const HUD_VERSION = '1.19.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -195,15 +202,28 @@
   // `<a download>` silently does nothing inside PDA's webview, which is why
   // backup has only ever been copy-a-textarea. PDA exposes a native handler
   // that opens the system share sheet, so a real file can be saved or sent to
-  // another app. Returns true if the file was handed off, false if the caller
-  // should fall back to the clipboard.
-  function downloadTextFile(text, fileName, mimeType) {
+  // another app. Returns a Promise<boolean>: true if the file was handed off,
+  // false if the caller should fall back to the clipboard.
+  //
+  // callHandler returns a Promise, and it is AWAITED here — v1.19.0 fix.
+  // Before this, the call was fired and the function returned true
+  // immediately, which is exactly wrong when Torn PDA has no 'shareFile'
+  // handler registered at all: the promise then rejects (or the plugin
+  // throws "No handler registered for method 'shareFile'"), but by the time
+  // that happens this function has already told its caller "sent", and the
+  // caller has already flipped the button to "Sent ✓". Reported live: the
+  // button changes to "Sent" but nothing is actually shared — this is why.
+  // No `<a download>` fallback is attempted after a PDA failure: it is
+  // already confirmed (see above) to silently do nothing in this webview, so
+  // trying it would just repeat the exact same false-positive failure mode
+  // this fix exists to close. The caller falls back to copyText instead.
+  async function downloadTextFile(text, fileName, mimeType) {
     if (isPDA() && window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
       try {
         // base64 via unescape(encodeURIComponent(...)): btoa throws on any
         // non-Latin1 character, and player names are free text.
         const b64 = btoa(unescape(encodeURIComponent(text)));
-        window.flutter_inappwebview.callHandler('shareFile', fileName, b64, mimeType || 'application/json');
+        await window.flutter_inappwebview.callHandler('shareFile', fileName, b64, mimeType || 'application/json');
         return true;
       } catch (e) {
         console.warn('[TornPokerHUD] PDA shareFile failed, falling back', e);
@@ -224,6 +244,52 @@
     } catch (e) {
       return false;
     }
+  }
+
+  // Best-effort clipboard write that does not depend on the async Clipboard
+  // API being available or permitted. Reported failing outright on a real
+  // Torn PDA device ("failed to copy to clipboard") — navigator.clipboard
+  // exists in most webviews but writeText is gated behind a permission model
+  // an embedding app frequently never wires up. execCommand('copy') is
+  // deprecated but has no such permission gate: it works by actually
+  // selecting real DOM text and asking the OS to copy the selection, the same
+  // mechanism a manual long-press-and-copy uses — the deep-scan panel's copy
+  // button already relied on exactly this before v1.19.0 generalised it here.
+  //
+  // `existingEl` lets a caller pass an already-visible textarea (e.g. the
+  // Backup panel's) so the fallback selects the real on-screen element rather
+  // than an invisible one — if execCommand ALSO fails, the text is left
+  // selected and visible for a manual copy, which is strictly better than a
+  // temporary off-screen element the user never sees. Returns Promise<bool>.
+  async function copyText(text, existingEl) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch (e) {
+        // fall through to execCommand
+      }
+    }
+    const ta = existingEl || document.createElement('textarea');
+    ta.value = text; // set even on an existing element — never trust it already matches
+    if (!existingEl) {
+      ta.readOnly = true;
+      ta.style.position = 'fixed';
+      ta.style.top = '0';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+    }
+    let ok = false;
+    try {
+      ta.focus();
+      ta.select();
+      ta.setSelectionRange(0, text.length); // iOS needs the explicit range
+      ok = document.execCommand('copy');
+    } catch (e) {
+      ok = false;
+    }
+    if (!existingEl) ta.remove();
+    return ok;
   }
 
   // Wrap a PDA_http* call — a plain (..args, callback) function — as a
@@ -7369,8 +7435,9 @@
       const text = buildReport(openPlayerXid);
       body.innerHTML = buildReportHtml(openPlayerXid)
         + '<button class="tph-copy-report">Copy report</button>';
-      body.querySelector('.tph-copy-report').addEventListener('click', () => {
-        navigator.clipboard && navigator.clipboard.writeText(text);
+      body.querySelector('.tph-copy-report').addEventListener('click', async (e) => {
+        const ok = await copyText(text);
+        e.target.textContent = ok ? 'Copied ✓' : 'Copy failed — see Settings ▸ Backup to export by hand';
       });
     } else if (openPlayerTab === 'history') {
       const hands = handsInvolving(openPlayerXid);
@@ -7394,22 +7461,25 @@
         body.querySelectorAll('.tph-hh-replay').forEach((btn, i) => {
           btn.addEventListener('click', () => openReplayHand(shown[i]));
         });
-        body.querySelector('.tph-copy-hist').addEventListener('click', () => {
-          navigator.clipboard && navigator.clipboard.writeText(text);
+        body.querySelector('.tph-copy-hist').addEventListener('click', async (e) => {
+          const ok = await copyText(text);
+          e.target.textContent = ok ? 'Copied ✓' : 'Copy failed — try Save / share instead';
         });
-        body.querySelector('.tph-export-hist').addEventListener('click', (e) => {
+        body.querySelector('.tph-export-hist').addEventListener('click', async (e) => {
           const stamp = new Date().toISOString().slice(0, 10);
           const file = `torn-poker-hud-history-${fileSafeName(playerDisplayName(openPlayerXid))}-${stamp}.txt`;
           const full = playerHistoryExport(openPlayerXid);
           // Same fallback as the Backup button: `<a download>` does nothing in
           // some webviews, and a button that appears to work and produces no
-          // file is worse than one that says it can't.
-          const ok = downloadTextFile(full, file, 'text/plain');
+          // file is worse than one that says it can't. copyText (not the raw
+          // Clipboard API) because that has also been reported failing on its
+          // own — see downloadTextFile/copyText.
+          const ok = await downloadTextFile(full, file, 'text/plain');
           if (ok) {
             e.target.textContent = 'Sent ✓';
           } else {
-            e.target.textContent = 'Copied instead ✓';
-            if (navigator.clipboard) navigator.clipboard.writeText(full);
+            const copied = await copyText(full);
+            e.target.textContent = copied ? 'Copied instead ✓' : 'Failed — use Copy shown above';
           }
         });
       }
@@ -7713,32 +7783,33 @@
         // Aggregate stats across every tracked player, never a hand-by-hand
         // dump — see poolTendencyExport for why that's the honest choice.
         //
-        // Copy goes straight to the clipboard — no PDA share-sheet detour.
-        // "Sent ✓" on the button below only means the native share handler
-        // was CALLED, not that a share actually completed (that's async OS
-        // UI outside this webview's visibility) — reported as confusing on a
-        // real device, hence this plain, unambiguous alternative existing at
-        // all. Same two-button split History already uses (Copy vs Save/share).
-        panel.querySelector('.tph-copy-pool').addEventListener('click', (e) => {
+        // Copy goes straight to the clipboard (via copyText — see there for
+        // why that's not just navigator.clipboard.writeText any more) — no
+        // PDA share-sheet detour. "Sent ✓" on the button below now means
+        // downloadTextFile's native call actually resolved, not merely that
+        // it was fired (v1.19.0), but a share sheet completing is still async
+        // OS UI outside this webview's visibility, so it still can't promise
+        // the user actually finished the share — hence this plain,
+        // unambiguous alternative existing at all. Same two-button split
+        // History already uses (Copy vs Save/share).
+        panel.querySelector('.tph-copy-pool').addEventListener('click', async (e) => {
           const text = poolTendencyExport();
-          if (navigator.clipboard) {
-            navigator.clipboard.writeText(text);
-            e.target.textContent = 'Copied ✓';
-          }
+          const ok = await copyText(text);
+          e.target.textContent = ok ? 'Copied ✓' : 'Copy failed — try Save / share instead';
         });
-        panel.querySelector('.tph-export-pool').addEventListener('click', (e) => {
+        panel.querySelector('.tph-export-pool').addEventListener('click', async (e) => {
           const stamp = new Date().toISOString().slice(0, 10);
           const file = `torn-poker-hud-pool-tendencies-${stamp}.txt`;
           const text = poolTendencyExport();
           // Same fallback as every other export button here: `<a download>`
           // does nothing in some webviews, and a button that appears to work
           // and produces no file is worse than one that says it can't.
-          const ok = downloadTextFile(text, file, 'text/plain');
+          const ok = await downloadTextFile(text, file, 'text/plain');
           if (ok) {
             e.target.textContent = 'Sent ✓';
           } else {
-            e.target.textContent = 'Copied instead ✓';
-            if (navigator.clipboard) navigator.clipboard.writeText(text);
+            const copied = await copyText(text);
+            e.target.textContent = copied ? 'Copied instead ✓' : 'Failed — use Copy above';
           }
         });
       },
@@ -8022,14 +8093,19 @@
       if (GistSync.status === 'connected') GistSync.syncNow();
       else GistSync.startDeviceFlow();
     });
-    panel.querySelector('.tph-copy-export').addEventListener('click', () => {
-      navigator.clipboard && navigator.clipboard.writeText(exportJson());
+    panel.querySelector('.tph-copy-export').addEventListener('click', async (e) => {
+      // Passes the visible .tph-export textarea itself as copyText's
+      // existingEl — if even execCommand fails, the JSON is left selected on
+      // screen (not in some invisible off-DOM element), ready for a manual
+      // long-press-copy as the last resort.
+      const ok = await copyText(exportJson(), panel.querySelector('.tph-export'));
+      e.target.textContent = ok ? 'Copied ✓' : 'Copy failed — the box above is selected, copy it manually';
     });
-    panel.querySelector('.tph-save-export').addEventListener('click', (e) => {
+    panel.querySelector('.tph-save-export').addEventListener('click', async (e) => {
       const stamp = new Date().toISOString().slice(0, 10);
       // exportJson(), not the raw store — it is the single choke point that
       // strips githubToken and anything else in LOCAL_ONLY_SETTINGS.
-      const ok = downloadTextFile(exportJson(), `torn-poker-hud-${stamp}.json`, 'application/json');
+      const ok = await downloadTextFile(exportJson(), `torn-poker-hud-${stamp}.json`, 'application/json');
       e.target.textContent = ok ? 'Sent ✓' : 'Not supported here — use Copy';
     });
     panel.querySelector('.tph-do-import').addEventListener('click', () => {
@@ -8339,15 +8415,13 @@
       el.remove();
     });
     el.querySelector('.tph-deep').addEventListener('click', () => { out.value = runDeepScan(); });
-    el.querySelector('.tph-deep-copy').addEventListener('click', () => {
+    el.querySelector('.tph-deep-copy').addEventListener('click', async (e) => {
       if (!out.value) out.value = runDeepScan();
-      out.removeAttribute('readonly');
-      out.select();
-      out.setSelectionRange(0, out.value.length); // iOS needs the explicit range
-      try { document.execCommand('copy'); } catch (e) { /* fall through */ }
-      if (navigator.clipboard) navigator.clipboard.writeText(out.value).catch(() => {});
-      out.setAttribute('readonly', '');
-      el.querySelector('.tph-deep-copy').textContent = 'Copied ✓';
+      // Passes `out` itself as copyText's existingEl: if even execCommand
+      // fails, the report is left selected on the visible textarea, ready
+      // for a manual copy — the same reasoning the Backup Copy button uses.
+      const ok = await copyText(out.value, out);
+      e.target.textContent = ok ? 'Copied ✓' : 'Copy failed — the box above is selected, copy it manually';
     });
   }
 
@@ -8619,6 +8693,9 @@
   if (window.__TPH_TEST_HOOKS) {
     window.__TPH_TEST = {
       // --- pure logic: no DOM, no STORE ---
+      downloadTextFile,
+      copyText,
+      exportJson,
       LOG_PATTERNS,
       LOG_NOISE_RE,
       cleanLogLine,
