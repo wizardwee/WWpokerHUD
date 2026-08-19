@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.20.0
+// @version      1.23.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,98 +18,81 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
- * 1.20.0 - The Gist sync status line now shows the gist itself. Reported live,
- *          right after v1.19.0: Copy and Save/share still both failed on a
- *          large Backup export, exactly as before that fix — v1.19.0 only
- *          stopped them lying about success, it didn't make either path
- *          bigger. Suspected cause: the clipboard and Flutter's app-bridge
- *          both have real, low payload ceilings in a mobile webview; a plain
- *          HTTPS PATCH to the GitHub API does not share that limit, and this
- *          HUD already has Gist sync built for exactly that reason — but
- *          "Connected" never told you WHERE the data went. The only way to
- *          find the gist afterward was to leave the HUD and hunt on
- *          github.com.
- *            - New gistUrl() (bare https://gist.github.com/<id> — resolves
- *              without needing the username, one less API round trip) is
- *              folded into syncStatusText() once a gist exists, and a new
- *              "Copy gist link" button appears alongside it. The link itself
- *              is ~40 characters, nothing like the multi-hundred-KB export,
- *              so copyText's execCommand fallback has no size-related reason
- *              to fail on it even on a device where the full Backup copy does.
- *            - The real point of the gist: opened in the phone's REGULAR
- *              browser (not Torn PDA's constrained page), it has full,
- *              unrestricted clipboard access — the way out of this whole class
- *              of bug for an export too big to move through this webview at all.
- *            - 11 new assertions in test/gist-sync.test.js.
+ * 1.23.0 - Maniac was silently absorbing most of LAG and Station's population.
+ *          Reported directly: most tracked players read as Maniac or
+ *          Balanced, almost never Station or LAG, regardless of what the
+ *          pool actually looked like.
+ *            - The Maniac rule tested ONLY `afq > 60 && vpip > loose`, with no
+ *              PFR/VPIP shape at all — so it fired for ANY loose player with
+ *              high postflop aggression, including a loose-PASSIVE one (a
+ *              Station who bets big the one time they wake up) as well as a
+ *              loose-aggressive one (an actual LAG). Checked first in
+ *              ARCHETYPE_RULES, it caught both before LAG or Station were
+ *              ever evaluated. The thresholds ARE pool-relative (A.tight/
+ *              A.loose are multiples of POOL_AVG.vpip, by design), so this
+ *              was not a stale-pool-average problem — it reproduces on any
+ *              pool, because it's a rule-ordering/shape problem.
+ *            - Fixed by giving Maniac the SAME loose+aggressive-preflop shape
+ *              LAG already tests (`vpip > loose && pfr/vpip >= aggRatio`),
+ *              with `afq > 60` as the one extra condition that promotes a LAG
+ *              into a Maniac — the same "shared shape, split by one more
+ *              condition, more specific checked first" pattern Nit/TAG
+ *              already used. A loose-passive player can no longer reach
+ *              Maniac at all, whatever their postflop AFq is.
+ *            - 4 new assertions in test/archetype.test.js, including the
+ *              regression case directly: loose + passive + AFq 80% now
+ *              classifies Station, not Maniac.
  *
- * 1.19.0 - Copy and Save/share, actually working. Reported live: the Settings
- *          Copy button failed outright ("failed to copy to clipboard"), and
- *          Save/share flipped to "Sent" while nothing was ever shared.
- *            - downloadTextFile's PDA branch called
- *              flutter_inappwebview.callHandler('shareFile', ...) and
- *              returned true IMMEDIATELY without awaiting the Promise it
- *              actually returns. With no 'shareFile' handler registered on
- *              this Torn PDA build, that promise rejects — but the button had
- *              already been told "sent" a moment earlier. Now awaited, and
- *              only reports success once the call has genuinely resolved.
- *            - New copyText() replaces every bare
- *              `navigator.clipboard && navigator.clipboard.writeText(...)`
- *              (7 call sites) with a Promise<bool> that falls back to
- *              execCommand('copy') on a real, selected textarea when the
- *              Clipboard API is absent, unpermitted, or rejects — no
- *              permission gate the way the async Clipboard API has. Passing
- *              an already-visible textarea (Backup's, the deep-scan panel's)
- *              means even a total failure leaves the text selected on screen
- *              for a manual copy, rather than vanishing into a removed node.
- *            - Every Copy/Save button across Settings, the player History tab
- *              and the pool-tendency export now reports what actually
- *              happened instead of assuming success, including buttons that
- *              previously gave no feedback at all ("Copy report" on the
- *              Report tab had none).
- *            - 17 new assertions in test/clipboard-export.test.js, covering
- *              both bugs directly: a rejecting callHandler no longer reports
- *              "Sent", and copyText is exercised through Clipboard-API-works,
- *              Clipboard-API-rejects, and execCommand-only paths.
+ * 1.22.0 - Session-over-session trends: win rate, VPIP, aggression and P/L
+ *          charted across your completed sessions. A "session" already
+ *          existed (STORE.session, touchSession, SESSION_GAP_MS's 4h gap) —
+ *          it just overwrote itself in place on every gap, so the moment a
+ *          session ended its numbers were gone for good.
+ *            - The just-ended session is now snapshotted into
+ *              STORE.sessionHistory (archiveSession, called from touchSession
+ *              right before it resets) — hands, net chips/bb, VPIP, PFR and
+ *              AFq counts, and the last stake seen — before the live counters
+ *              clear for the next one. Bounded at SESSION_HISTORY_MAX (60),
+ *              oldest dropped first, same reasoning as recentTables/betSizes.
+ *            - New "Trends" tab on hero's own player panel (isSelf-gated,
+ *              same pattern as Leaks/Exploit): four sparkline charts plus a
+ *              table of the last 12 sessions. sparklineSvg gained optional
+ *              min/max/zeroLine so it can plot a signed, unbounded metric
+ *              (P/L, win rate) alongside the 0-100 percentages it already
+ *              drew — existing 0-100 callers are unchanged.
+ *            - resetHeroStats now also clears sessionHistory: unlike hand
+ *              history, every field in it describes hero's own play, so it
+ *              gets the same clean-slate treatment as STORE.hero.
+ *            - 33 new assertions in test/session-trends.test.js.
  *
- * 1.18.0 - Two additions, both closing gaps the History tab and the coach had
- *          carried since showdown tracking was added:
- *            - The board is now printed in a hand's history entry (tab, Copy,
- *              and file export — all three go through formatHand/
- *              formatHandHtml, so all three gained it at once). hand.board has
- *              been persisted since v1.17.0's replayer; nothing had ever
- *              printed it, so a hand's history showed every bet size but never
- *              the cards that fell — the exact thing needed to read whether a
- *              bet was into a wet or dry board. Omitted entirely (not a blank
- *              line) for a hand recorded before v1.17.0, which has
- *              board: undefined rather than a known-empty board.
- *            - Bet-sizing and slowplay, split by hand strength AT THE MOMENT
- *              of the action: a new `texture` field per player, banked at
- *              settlement alongside noteShowdown from the same showdown
- *              evidence (same "floor on a range, never the whole of it"
- *              caveat as shownHands — there is no other way to know what a
- *              player was actually holding mid-hand). categoryAt (reuses
- *              evaluate7, so "made" always means what category 2+ means
- *              everywhere else that number is read) and hasDrawAt (coarse on
- *              purpose, same tradeoff as RFI_RANGES: a four-flush or an
- *              open/gutshot counts, without distinguishing which) classify
- *              hole+board at each flop/turn/river action. Two things fall out
- *              of that split: average bet size as % of pot while still only
- *              drawing vs already holding two pair+ (does their bet SIZE tell
- *              you what they have), and how often they check a hand that's
- *              already made instead of betting it (the slowplay/trap rate).
- *              Both surface on the Stats tab, in the tendency report, and as
- *              new Sizing/Trap entries in the coach's exploit plan, all gated
- *              at TEXTURE_MIN (5) — a showdown sample is inherently small.
- *                - logAction gained an optional `extra` param so bet/raise/
- *                  all-in actions can carry their own `.p` (bet-as-%-of-pot,
- *                  betSizePctOf) on the stored action record itself, which is
- *                  what lets settlement-time code know what a SPECIFIC
- *                  showdown-street bet cost without replaying the pot.
- *                - 31 new assertions in test/bet-texture.test.js, including an
- *                  end-to-end run through handleLogLine with real log wording
- *                  (not a hand-built hand object) — the project's own stated
- *                  reason: "a test of a copy cannot fail when the original is
- *                  wrong."
+ * 1.21.0 - Bet size is a median now, not a sum/count average.
+ *          Reported directly: the "Bet size" sizing tell was a running
+ *          `sum / count` average, and one enormous all-in shove could drag it
+ *          a long way on its own — a player who bets ~50% of pot all day
+ *          read as "oversized" (>85%) off a single 500%-pot shove, exactly
+ *          backwards, since a shove forced by stack depth says nothing about
+ *          voluntary sizing habits.
+ *            - `betSizePctSum`/`betSizeCount` (a running total, divided on
+ *              read) is replaced by `betSizes`, a bounded rolling window of
+ *              the most recent bet-as-%-of-pot values. `BET_SIZE_HISTORY_MAX`
+ *              (40) caps it — same reasoning as `recentTables`: this is
+ *              stored for every player forever, so it must not grow with
+ *              hand count (open finding #2). The sizing tell is now
+ *              `median(p.betSizes)`, not a mean: one outlier sitting among 40
+ *              ordinary bets moves a median by very little, however far
+ *              outside the pot it was.
+ *            - `betSizeCount` is kept as the LIFETIME count, unaffected by
+ *              the window, so the sample-size gate (`BET_SIZE_MIN`) and the
+ *              "N bets" display still describe everything ever observed, not
+ *              just the window the median is drawn from.
+ *            - Every surfaced line changed wording along with the number:
+ *              "Averages X% of pot" is now "Typically bets X% of pot (median
+ *              of N bets)" in the exploit plan, the leak plan, the player
+ *              report, and the Stats tab legend — so the UI does not claim
+ *              to be reporting a mean it no longer computes. The v1.18.0
+ *              draw-vs-made `texture` sizing split (`betDrawPct`/
+ *              `betMadePct`) is untouched — same latent skew risk, but out
+ *              of scope for this pass.
  *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
@@ -173,7 +156,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.20.0';
+  const HUD_VERSION = '1.23.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -414,7 +397,21 @@
       players: {},
       hands: [],   // newest-first ring buffer of recent hand records
       hero: { hands: 0, netChips: 0, netBB: 0, bbHands: 0 },
-      session: { startedAt: 0, hands: 0, net: 0, lastHandAt: 0 },
+      // The CURRENT, still-open session — see touchSession/SESSION_GAP_MS.
+      // vpip/pfr/aggActions/passActions are hero's own counts for THIS session
+      // only, same definitions as the player-level stats (aggActions/
+      // passActions specifically mirror computeRates' AFq: postflop bet+raise
+      // vs call, folds and checks excluded — see the comment there for why).
+      // bb is the last blind level seen this session, used to tag the session
+      // by stake once archived; sessions rarely span stakes in this game, so a
+      // single "last seen" value is treated as good enough rather than a full
+      // per-stake breakdown.
+      session: { startedAt: 0, hands: 0, net: 0, lastHandAt: 0, vpip: 0, pfr: 0, aggActions: 0, passActions: 0, bb: 0 },
+      // Archive of COMPLETED sessions, oldest first, for session-over-session
+      // trend charts. Written only by archiveSession (see touchSession) and
+      // capped at SESSION_HISTORY_MAX for the same reason recentTables/
+      // betSizes are bounded — this is stored forever otherwise.
+      sessionHistory: [],
       settings: settings || { ...DEFAULT_SETTINGS },
     };
   }
@@ -494,8 +491,15 @@
       // recovered later from plChipsEst. Starts at 0 for players tracked before
       // v0.23.0, so it lags the chip figure until they are seen again.
       plBBEst: 0,
-      betSizePctSum: 0, // sum of bet-as-%-of-pot, for average sizing tells
+      // Bet-as-%-of-pot, for sizing tells. betSizeCount is the LIFETIME count
+      // — used for the sample-size gate and the "N bets" display. betSizes is
+      // a bounded rolling window of the most recent values (see
+      // BET_SIZE_HISTORY_MAX) that the sizing tell is computed from, as a
+      // MEDIAN rather than a sum/count average: a single 400%-pot all-in used
+      // to drag the old average up on its own, and a median barely moves for
+      // one outlier sitting among the rest of the window.
       betSizeCount: 0,
+      betSizes: [],
       // Bet-sizing and slowplay split by hand strength AT THE MOMENT of the
       // action — derived only from showdowns, same evidence source and same
       // "floor on a range, never the whole of it" caveat as shownHands.
@@ -535,7 +539,8 @@
       parsed.players = parsed.players || {};
       parsed.hands = parsed.hands || [];
       parsed.hero = ensureHeroShape(parsed.hero);
-      parsed.session = parsed.session || { startedAt: 0, hands: 0, net: 0, lastHandAt: 0 };
+      parsed.session = ensureSessionShape(parsed.session);
+      parsed.sessionHistory = Array.isArray(parsed.sessionHistory) ? parsed.sessionHistory : [];
       normalizePlayers(parsed);
       migrateStore(parsed);
       return parsed;
@@ -709,6 +714,17 @@
     return h;
   }
 
+  // Same idea as ensureHeroShape, for STORE.session — a store written before
+  // the session-trends fields existed has {startedAt, hands, net, lastHandAt}
+  // only, and incrementing an undefined vpip/pfr/aggActions/passActions/bb
+  // would poison it with NaN on the very next hand.
+  function ensureSessionShape(session) {
+    const s = session && typeof session === 'object' ? session : {};
+    const t = { startedAt: 0, hands: 0, net: 0, lastHandAt: 0, vpip: 0, pfr: 0, aggActions: 0, passActions: 0, bb: 0 };
+    Object.keys(t).forEach((k) => { if (typeof s[k] !== 'number' || isNaN(s[k])) s[k] = t[k]; });
+    return s;
+  }
+
   // Records written by an older version lack fields added since; backfill from
   // the template so new stats don't surface as NaN on long-tracked players.
   function ensurePlayerShape(p, xid) {
@@ -833,7 +849,8 @@
     parsed.players = parsed.players || {};
     parsed.hands = parsed.hands || [];
     parsed.hero = ensureHeroShape(parsed.hero);
-    parsed.session = parsed.session || { startedAt: 0, hands: 0, net: 0, lastHandAt: 0 };
+    parsed.session = ensureSessionShape(parsed.session);
+    parsed.sessionHistory = Array.isArray(parsed.sessionHistory) ? parsed.sessionHistory : [];
     normalizePlayers(parsed); // imported JSON is hand-editable and often stale
     migrateStore(parsed);     // a backup taken before 0.20.0 carries frozen P/L
     STORE = parsed;
@@ -891,6 +908,16 @@
     STORE.hero = { hands: 0, netChips: 0, netBB: 0, bbHands: 0 };
     STORE.session.hands = 0;
     STORE.session.net = 0;
+    STORE.session.vpip = 0;
+    STORE.session.pfr = 0;
+    STORE.session.aggActions = 0;
+    STORE.session.passActions = 0;
+    // sessionHistory is 100% hero data (every field describes hero's own
+    // play), unlike hand HISTORY above which stays because it still describes
+    // opponents too — so it gets the same clean-slate treatment as STORE.hero,
+    // for the same reason: a split-identity or misattributed period should not
+    // linger in the Trends chart after the counters that caused it are fixed.
+    STORE.sessionHistory = [];
     saveStore();
   }
 
@@ -902,6 +929,13 @@
       hands: mergeHands(local.hands || [], remote.hands || [], local.settings.historyLimit),
       hero: local.hero,
       session: local.session, // session is per-device; never taken from remote
+      // Same call as session, for the same reason: a "session" is a physical
+      // sitting at THIS device. Unioning two devices' histories would need a
+      // real dedup key (nothing here identifies "the same session" across
+      // devices the way an xid does for a player), so this stays local-only
+      // rather than risk a merged chart with duplicated or interleaved
+      // sessions. A real cross-device merge is a known gap, not solved here.
+      sessionHistory: local.sessionHistory,
       settings: local.settings,
     };
     for (const xid of Object.keys(remote.players || {})) {
@@ -2281,10 +2315,18 @@
     }
   }
 
-  // Bets needed before an average sizing is worth acting on. One 300%-pot
+  // Bets needed before a sizing read is worth acting on. One 300%-pot
   // shove is not a sizing habit. The exploit plan has always gated on this;
   // the Stats tab used to print the figure with no indication of the sample.
   const BET_SIZE_MIN = 12;
+
+  // Cap on betSizes, the rolling window the sizing median is computed from.
+  // Bounded for the same reason recentTables is bounded (see emptyPlayer):
+  // this is stored for every player forever, so it must not grow with hand
+  // count the way the player list itself does (open finding #2). 40 is
+  // comfortably above BET_SIZE_MIN and gives a stable median without turning
+  // into a hand-by-hand log.
+  const BET_SIZE_HISTORY_MAX = 40;
 
   // Same idea for the draw/made sizing split and the trap rate, but lower:
   // both are drawn from showdowns alone, which are inherently rarer than bets
@@ -2294,13 +2336,16 @@
   const TEXTURE_MIN = 5;
 
   function noteBetSizing(xid, amt, potBefore) {
-    if (!amt || potBefore <= 0) return;
+    const sizePct = betSizePctOf(amt, potBefore);
+    if (sizePct == null) return;
     const p = getPlayer(xid);
-    p.betSizePctSum += (amt / potBefore) * 100;
     p.betSizeCount += 1;
+    if (!Array.isArray(p.betSizes)) p.betSizes = [];
+    p.betSizes.push(sizePct);
+    if (p.betSizes.length > BET_SIZE_HISTORY_MAX) p.betSizes.shift();
   }
 
-  // Same figure noteBetSizing folds into the running average, but kept per
+  // Same figure noteBetSizing folds into the rolling window, but kept per
   // ACTION (rounded, on the action record itself via logAction's `extra`)
   // rather than only ever summed — noteBetTexture needs to know what a
   // SPECIFIC bet cost, at settlement, without replaying the whole pot.
@@ -2489,6 +2534,7 @@
 
     const settleBB = plausibleBB(hand.bbAmount || lastSeenBB) ? (hand.bbAmount || lastSeenBB) : 0;
 
+    let heroPlayCode = null; // captured below, for the session vpip/pfr tally
     hand.dealtInXids.forEach((xid) => {
       const p = getPlayer(xid);
       p.hands += 1;
@@ -2501,6 +2547,7 @@
         noteRecentTable(p, settleBB);
       }
       const play = inSet(hand.countedPfr, xid) ? 2 : inSet(hand.countedVpip, xid) ? 1 : 0;
+      if (xid === heroXid) heroPlayCode = play;
       pushRecent(p, play | (wonByXid[xid] > 0 ? RECENT_WON : 0));
 
       // A pot lost big enough to plausibly set someone off. Recorded against
@@ -2510,8 +2557,27 @@
         if (net / settleBB <= -BIG_LOSS_BB) p.lastBigLossHand = p.hands;
       }
     });
-    if (heroXid && hand.dealtInXids.has(heroXid)) STORE.hero.hands += 1;
-    touchSession(0, heroXid && hand.dealtInXids.has(heroXid));
+    const heroDealtIn = !!(heroXid && hand.dealtInXids.has(heroXid));
+    if (heroDealtIn) STORE.hero.hands += 1;
+    touchSession(0, heroDealtIn);
+    // Session-level VPIP/PFR/AFq, for the Trends tab — touchSession above has
+    // already rolled the session over if a gap fired, so STORE.session is
+    // guaranteed to be THIS hand's session by the time these run.
+    if (heroDealtIn) {
+      if (settleBB > 0) STORE.session.bb = settleBB;
+      if (heroPlayCode >= 1) STORE.session.vpip += 1;
+      if (heroPlayCode >= 2) STORE.session.pfr += 1;
+      // Same aggressive/passive split as computeRates' AFq (bet+raise+all-in
+      // vs call; checks and folds excluded, see the comment on that field) —
+      // tallied here from hand.actions rather than streetActions because
+      // there is no per-player postflop total to read back from that machinery,
+      // only the running per-street counters it writes into.
+      hand.actions.forEach((a) => {
+        if (a.x !== heroXid || a.s === 'preflop') return;
+        if (a.a === 'bet' || a.a === 'raise' || a.a === 'all-in') STORE.session.aggActions += 1;
+        else if (a.a === 'call') STORE.session.passActions += 1;
+      });
+    }
 
     if (hand.winners.length > 0) {
       // wonByXid was built above, before the per-hand window was written — it
@@ -3337,6 +3403,17 @@
     return v == null ? '—' : v.toFixed(0) + '%';
   }
 
+  // Middle value of a list, sorted ascending; average of the two middles on an
+  // even count. Used for bet sizing instead of a sum/count mean specifically
+  // because that mean is one all-in shove away from being wrong — see
+  // noteBetSizing / BET_SIZE_HISTORY_MAX.
+  function median(arr) {
+    if (!arr || !arr.length) return null;
+    const s = arr.slice().sort((a, b) => a - b);
+    const mid = Math.floor(s.length / 2);
+    return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+  }
+
   // Percentage without the sign, for the seat badge where three "%" glyphs per
   // seat is more clutter than information.
   function fmtNum(v) {
@@ -3508,7 +3585,7 @@
       postflopRR: pct(rrMade, rrFaced),
       rrSample: rrFaced,
       wtsd: pct(p.wtsd, p.hands),
-      avgBetPct: p.betSizeCount ? (p.betSizePctSum / p.betSizeCount) : null,
+      medianBetPct: median(p.betSizes),
       // Average bet/raise size as % of pot, split by whether they were caught
       // (at showdown) already holding two pair+ or still only drawing to one.
       betDrawPct: tex.drawPctN ? (tex.drawPctSum / tex.drawPctN) : null,
@@ -3745,9 +3822,17 @@
     return points;
   }
 
-  // A minimal inline sparkline: one polyline, 0-100 scale, no axes or labels —
-  // this sits inside a stats table cell, not a chart. `values` oldest first.
-  // Returns '' for fewer than 2 points, since a single point has no line to draw.
+  // A minimal inline sparkline: one polyline, no axes or labels — this sits
+  // inside a stats table cell, not a chart. `values` oldest first. Returns ''
+  // for fewer than 2 points, since a single point has no line to draw.
+  //
+  // Scale defaults to 0-100 (VPIP/PFR/AFq's own range, the only callers this
+  // had until the session-trends chart). opts.min/opts.max override it for a
+  // signed, unbounded metric like P/L — existing 0-100 callers are unaffected,
+  // since Math.max(0, Math.min(100, v))/100 and the min/max form below agree
+  // exactly when min=0, max=100. opts.zeroLine draws a faint dashed reference
+  // line at v=0, only when the range actually straddles zero — useful for a
+  // signed metric where "above/below the line" is the whole point of looking.
   function sparklineSvg(values, opts) {
     const o = opts || {};
     const width = o.width || 90;
@@ -3755,20 +3840,99 @@
     const color = o.color || '#8ec5f0';
     if (!values || values.length < 2) return '';
     const n = values.length;
+    const min = typeof o.min === 'number' ? o.min : 0;
+    const max = typeof o.max === 'number' ? o.max : 100;
+    const range = (max - min) || 1; // guards a degenerate zero-width range
+    const yOf = (v) => height - ((Math.max(min, Math.min(max, v)) - min) / range) * height;
     const stepX = width / (n - 1);
-    const pts = values.map((v, i) => {
-      const x = i * stepX;
-      const y = height - (Math.max(0, Math.min(100, v)) / 100) * height;
-      return x.toFixed(1) + ',' + y.toFixed(1);
-    }).join(' ');
+    const pts = values.map((v, i) => (i * stepX).toFixed(1) + ',' + yOf(v).toFixed(1)).join(' ');
+    const zeroLine = (o.zeroLine && min < 0 && max > 0)
+      ? `<line x1="0" y1="${yOf(0).toFixed(1)}" x2="${width}" y2="${yOf(0).toFixed(1)}" `
+        + 'stroke="currentColor" stroke-width="1" stroke-dasharray="2,2" opacity="0.35"/>'
+      : '';
     // class carries tph- so pinTextColor leaves it alone (it walks .tph-panel
     // content and would otherwise force `color: inherit`, which SVG stroke
     // doesn't even read — but the skip is what the rest of this file relies on
     // for anything with its own explicit colour, so staying consistent here
     // costs nothing and avoids being the one exception to explain later).
     return `<svg class="tph-sparkline" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" `
-      + `preserveAspectRatio="none"><polyline points="${pts}" fill="none" stroke="${color}" `
+      + `preserveAspectRatio="none">${zeroLine}<polyline points="${pts}" fill="none" stroke="${color}" `
       + 'stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/></svg>';
+  }
+
+  // How many archived sessions the Trends chart plots. A phone-width sparkline
+  // has no room for SESSION_HISTORY_MAX (60) points — this is a display limit,
+  // separate from the storage cap, so it can be tuned without touching how
+  // much history is kept.
+  const SESSION_TREND_POINTS = 20;
+  // Rows shown in the session-by-session table beneath the charts.
+  const SESSION_TABLE_ROWS = 12;
+
+  // Session-over-session trends: win rate, VPIP, aggression and P/L across
+  // STORE.sessionHistory. Hero-only — see the isSelf gate in
+  // renderPlayerPanelBody — a "session" is hero's own sitting, not a concept
+  // that applies to any other tracked player.
+  function buildSessionTrendsHtml() {
+    const hist = Array.isArray(STORE.sessionHistory) ? STORE.sessionHistory : [];
+    if (!hist.length) {
+      return `<i>No completed sessions yet. A session ends after a `
+        + `${(SESSION_GAP_MS / 3600000).toFixed(0)}h gap in play, and the just-finished one lands here.</i>`;
+    }
+
+    // hist is oldest-first already (see archiveSession); charts want the same
+    // order, the table wants newest-first, same convention as the hand
+    // history tab (newest at the top).
+    const plotted = hist.slice(-SESSION_TREND_POINTS);
+    const winRates = plotted.map((se) => (se.hands ? (100 * se.netBB) / se.hands : 0));
+    const vpips = plotted.map((se) => (se.hands ? (100 * se.vpip) / se.hands : 0));
+    const afqs = plotted.map((se) => {
+      const total = se.aggActions + se.passActions;
+      return total ? (100 * se.aggActions) / total : 0;
+    });
+    const pls = plotted.map((se) => se.netBB);
+
+    // Signed metrics get their own range, padded 10%, so the line actually
+    // uses the chart height instead of sitting flat against a fixed 0-100
+    // scale built for percentages. VPIP/AFq stay on the default 0-100.
+    const signedRange = (values) => {
+      const lo = Math.min(0, ...values);
+      const hi = Math.max(0, ...values);
+      const pad = Math.max(1, (hi - lo) * 0.1);
+      return { min: lo - pad, max: hi + pad };
+    };
+
+    const chartRow = (label, values, opts) => {
+      const svg = sparklineSvg(values, Object.assign({ width: 150, height: 26 }, opts));
+      const last = values[values.length - 1];
+      return `<div class="tph-trend-row"><span class="tph-trend-l">${escapeHtml(label)}</span>`
+        + `<span class="tph-trend-chart">${svg || '<i>not enough sessions yet</i>'}</span>`
+        + `<span class="tph-trend-last">${last.toFixed(1)}</span></div>`;
+    };
+
+    const charts = chartRow('Win rate, bb/100', winRates, Object.assign({ color: '#8ec5f0', zeroLine: true }, signedRange(winRates)))
+      + chartRow('P/L, bb', pls, Object.assign({ color: '#7ed957', zeroLine: true }, signedRange(pls)))
+      + chartRow('VPIP %', vpips, { color: '#f0c674', min: 0, max: 100 })
+      + chartRow('Aggression %', afqs, { color: '#e06c75', min: 0, max: 100 });
+
+    const rows = hist.slice().reverse().slice(0, SESSION_TABLE_ROWS).map((se) => {
+      const when = new Date(se.startedAt).toLocaleDateString([], { month: 'short', day: 'numeric' });
+      const stakeName = se.bb ? (tableNameForBB(se.bb) || fmtMoney(se.bb) + ' BB') : '—';
+      const vpipPct = se.hands ? fmtPct((100 * se.vpip) / se.hands) : '—';
+      const pfrPct = se.hands ? fmtPct((100 * se.pfr) / se.hands) : '—';
+      return `<tr><td>${escapeHtml(when)}</td><td>${se.hands}</td><td>${escapeHtml(stakeName)}</td>`
+        + `<td style="color:${se.netChips >= 0 ? '#7ed957' : '#ff6b6b'} !important">${fmtSignedMoney(se.netChips)}</td>`
+        + `<td>${fmtBB(se.netBB)}</td><td>${vpipPct}/${pfrPct}</td></tr>`;
+    }).join('');
+
+    return `<div class="tph-trend-charts">${charts}</div>`
+      + `<table class="tph-stats tph-trend-table"><thead><tr>`
+      + `<th>Date</th><th>Hands</th><th>Stake</th><th>P/L</th><th>bb</th><th>V/P</th></tr></thead>`
+      + `<tbody>${rows}</tbody></table>`
+      + `<div class="tph-stat-legend">One row per completed session — a session ends after a `
+      + `${(SESSION_GAP_MS / 3600000).toFixed(0)}h gap in play. Charts plot the most recent `
+      + `${Math.min(SESSION_TREND_POINTS, hist.length)} of ${hist.length} sessions, oldest to newest, left to right. `
+      + `Win rate and aggression are estimates over a single session's sample — read the trend across `
+      + `several sessions, not any one point.</div>`;
   }
 
   // Tilt is BEHAVIOURAL: a player is tilting when they start playing differently
@@ -3946,7 +4110,7 @@
       // shrunk toward a number that was never measured. See the WTSD note above.
       wtsd: raw.wtsd,
       afq: raw.afq,
-      avgBetPct: raw.avgBetPct,
+      medianBetPct: raw.medianBetPct,
       byStreet: raw.byStreet,
     };
   }
@@ -4208,10 +4372,26 @@
   };
 
   // Order matters — first match wins.
+  //
+  // Maniac used to test ONLY afq > 60 && vpip > loose, with no PFR/VPIP shape
+  // at all — so it fired for ANY loose player with high postflop aggression,
+  // including a loose-PASSIVE one (a Station who happens to bet big when they
+  // do wake up) and a loose-aggressive one (a LAG). Checked first, it caught
+  // both before LAG or Station ever got evaluated, which is why those two
+  // read as rare regardless of the actual pool: Maniac was structurally
+  // absorbing most of their population, not a symptom of POOL_AVG being off.
+  //
+  // Fixed by giving Maniac the SAME loose+aggressive-preflop shape as LAG
+  // (vpip > loose && pfr/vpip >= aggRatio) and treating afq > 60 as the extra
+  // condition that promotes a LAG into a Maniac — same "shared shape, split by
+  // one more condition, more specific checked first" pattern Nit/TAG already
+  // use above. A loose-PASSIVE player (pfr/vpip < passiveRatio) can no longer
+  // be swept into Maniac at all; they fall through to Station like they
+  // should, whatever their postflop AFq happens to be.
   const ARCHETYPE_RULES = [
     { name: 'Nit', test: (r) => r.vpip != null && r.vpip < A.tight && (r.pfr == null || r.pfr / r.vpip < A.aggRatio) },
     { name: 'TAG', test: (r) => r.vpip != null && r.vpip < A.tight && r.pfr != null && r.pfr / r.vpip >= A.aggRatio },
-    { name: 'Maniac', test: (r) => r.afq != null && r.afq > 60 && r.vpip != null && r.vpip > A.loose },
+    { name: 'Maniac', test: (r) => r.afq != null && r.afq > 60 && r.vpip != null && r.vpip > A.loose && r.pfr != null && r.pfr / r.vpip >= A.aggRatio },
     { name: 'LAG', test: (r) => r.vpip != null && r.vpip > A.loose && r.pfr != null && r.pfr / r.vpip >= A.aggRatio },
     { name: 'Station', test: (r) => r.vpip != null && r.vpip > A.loose && (r.pfr == null || r.pfr / r.vpip < A.passiveRatio) },
     { name: 'Fish', test: (r) => r.vpip != null && r.vpip > POOL_AVG.vpip && (r.pfr == null || r.pfr / r.vpip < A.aggRatio) },
@@ -5138,11 +5318,44 @@
 
   // A "session" is just play separated by a gap; no explicit start/stop to forget.
   const SESSION_GAP_MS = 4 * 60 * 60 * 1000;
+
+  // How many completed sessions to keep for the Trends chart. Bounded for the
+  // same reason recentTables/betSizes are — this is written every time a
+  // session ends and would otherwise grow forever. 60 is comfortably more than
+  // a sparkline over a phone-width panel can usefully show at once, so the
+  // chart itself decides how much of this history it actually plots.
+  const SESSION_HISTORY_MAX = 60;
+
+  // Snapshot a just-ended session into STORE.sessionHistory before touchSession
+  // resets it for the next one. A session with zero hands (the HUD loaded, the
+  // gap fired, but nothing was ever played) leaves nothing worth charting.
+  function archiveSession(s) {
+    if (!s || !s.hands) return;
+    if (!Array.isArray(STORE.sessionHistory)) STORE.sessionHistory = [];
+    STORE.sessionHistory.push({
+      startedAt: s.startedAt,
+      endedAt: s.lastHandAt,
+      hands: s.hands,
+      netChips: s.net,
+      // bb is "last stake seen this session" (see emptyStore's comment on
+      // session.bb) — an estimate, same caveat as plBBEst elsewhere.
+      netBB: s.bb > 0 ? s.net / s.bb : 0,
+      vpip: s.vpip || 0,
+      pfr: s.pfr || 0,
+      aggActions: s.aggActions || 0,
+      passActions: s.passActions || 0,
+      bb: s.bb || 0,
+    });
+    if (STORE.sessionHistory.length > SESSION_HISTORY_MAX) STORE.sessionHistory.shift();
+  }
+
   function touchSession(deltaChips, countHand) {
     const s = STORE.session;
     const now = Date.now();
     if (!s.startedAt || (s.lastHandAt && now - s.lastHandAt > SESSION_GAP_MS)) {
+      archiveSession(s);
       s.startedAt = now; s.hands = 0; s.net = 0;
+      s.vpip = 0; s.pfr = 0; s.aggActions = 0; s.passActions = 0; s.bb = 0;
     }
     s.lastHandAt = now;
     if (countHand) s.hands += 1;
@@ -5561,20 +5774,20 @@
     }
 
     // --- Sizing tells --------------------------------------------------------
-    if (r.avgBetPct != null && p.betSizeCount >= BET_SIZE_MIN) {
-      if (r.avgBetPct > 85) {
+    if (r.medianBetPct != null && p.betSizeCount >= BET_SIZE_MIN) {
+      if (r.medianBetPct > 85) {
         add(45, 'Sizing',
-          `Averages ${r.avgBetPct.toFixed(0)}% of pot when betting (${p.betSizeCount} bets) — `
+          `Typically bets ${r.medianBetPct.toFixed(0)}% of pot (median of ${p.betSizeCount} bets) — `
             + 'oversized. At this pool that usually means value, not a bluff.',
-          `You average ${r.avgBetPct.toFixed(0)}% of pot when betting (${p.betSizeCount} bets) — oversized. `
+          `You typically bet ${r.medianBetPct.toFixed(0)}% of pot (median of ${p.betSizeCount} bets) — oversized. `
             + 'Observant opponents will read your big bets as value and fold correctly, costing you thin '
             + 'value and making your bluffs too expensive to profitably fire.',
           'big bet = value', 'size down', ['facing']);
-      } else if (r.avgBetPct < 40) {
+      } else if (r.medianBetPct < 40) {
         add(45, 'Sizing',
-          `Averages only ${r.avgBetPct.toFixed(0)}% of pot (${p.betSizeCount} bets) — `
+          `Typically bets only ${r.medianBetPct.toFixed(0)}% of pot (median of ${p.betSizeCount} bets) — `
             + 'small sizing. Raise their weak bets; they are pricing you in.',
-          `You average only ${r.avgBetPct.toFixed(0)}% of pot (${p.betSizeCount} bets) — undersized. `
+          `You typically bet only ${r.medianBetPct.toFixed(0)}% of pot (median of ${p.betSizeCount} bets) — undersized. `
             + "You're pricing opponents in to call with worse hands and leaving value behind when you're "
             + 'ahead. Size up.',
           'raise their small bets', 'size up', ['facing']);
@@ -6011,9 +6224,9 @@
     }
 
     const show = sec('Sizing & showdown');
-    if (r.avgBetPct != null) {
-      const sz = r.avgBetPct;
-      add(show, `Averages ${sz.toFixed(0)}% of pot when betting (${p.betSizeCount} sized bets).`,
+    if (r.medianBetPct != null) {
+      const sz = r.medianBetPct;
+      add(show, `Typically bets ${sz.toFixed(0)}% of pot (median of ${p.betSizeCount} sized bets).`,
         sz > 85 ? 'Oversized — usually polarised to strong hands or bluffs.'
           : sz < 45 ? 'Consistently small — float and take it away on a later street.' : null);
     }
@@ -6220,6 +6433,14 @@
     .tph-trend-label-v { color: #8ec5f0 !important; font-size: 10px; font-weight: 700; margin-right: 2px; }
     .tph-trend-label-p { color: #f0c674 !important; font-size: 10px; font-weight: 700; margin: 0 2px 0 6px; }
     .tph-sparkline { vertical-align: middle; }
+    /* Session-trends chart rows (Trends tab, hero-only) — label / sparkline /
+       latest-value, one per metric, stacked. */
+    .tph-trend-charts { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+    .tph-trend-row { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+    .tph-trend-l { width: 82px; flex: 0 0 auto; color: #9fb2c4 !important; }
+    .tph-trend-chart { flex: 1 1 auto; }
+    .tph-trend-last { width: 40px; flex: 0 0 auto; text-align: right; font-weight: 700; }
+    .tph-trend-table { font-size: 11px; }
     .tph-stat-norm { color: #8d959c !important; font-size: 10px; }
     .tph-dev-n { font-size: 10px; opacity: .85; margin-left: 2px; }
     .tph-dev-typical { color: #9fb2c4 !important; }
@@ -7292,6 +7513,7 @@
         <div class="tph-tab ${openPlayerTab === 'report' ? 'active' : ''}" data-tab="report">Report</div>
         <div class="tph-tab ${openPlayerTab === 'history' ? 'active' : ''}" data-tab="history">History</div>
         <div class="tph-tab ${openPlayerTab === 'notes' ? 'active' : ''}" data-tab="notes">Notes</div>
+        ${isSelf ? `<div class="tph-tab ${openPlayerTab === 'trends' ? 'active' : ''}" data-tab="trends">Trends</div>` : ''}
       </div>
       <div class="tph-tab-body"></div>
     `,
@@ -7360,9 +7582,9 @@
             <td class="tph-stat-n"><span class="tph-stat-norm">${r.rrSample} faced${r.rrSample > 0 && r.rrSample < 10 ? ', low' : ''}</span></td>
           </tr>
           ${statRow('WTSD', r.wtsd, r.wtsd, null)}
-          <tr title="Average bet or raise as a percentage of the pot as it stood BEFORE that bet. 100% is a pot-sized bet. Every bet and raise on every street counts, so it is a sizing habit, not a street-specific one.">
+          <tr title="Median bet or raise as a percentage of the pot as it stood BEFORE that bet, over the most recent bets (see legend). 100% is a pot-sized bet. Every bet and raise on every street counts, so it is a sizing habit, not a street-specific one. A median, not an average, so one huge all-in shove does not drag the whole figure with it.">
             <td class="tph-stat-l">Bet size</td>
-            <td class="tph-stat-v"><b>${r.avgBetPct != null ? r.avgBetPct.toFixed(0) + '%' : '—'}</b></td>
+            <td class="tph-stat-v"><b>${r.medianBetPct != null ? r.medianBetPct.toFixed(0) + '%' : '—'}</b></td>
             <td class="tph-stat-n"><span class="tph-stat-norm">of pot${p.betSizeCount ? ` · ${p.betSizeCount} bet${p.betSizeCount === 1 ? '' : 's'}` : ''}${p.betSizeCount && p.betSizeCount < BET_SIZE_MIN ? ', low' : ''}</span></td>
           </tr>
           <tr title="Average bet/raise as % of pot, split by what they actually had at showdown: DRAW = no made hand yet but a four-flush or an open/gutshot straight draw on the board; MADE = two pair or better already. Flop and turn only for draw — no draw left to hold on the river. From showdowns only, a floor on their range, same caveat as the Range tab.">
@@ -7375,7 +7597,7 @@
             <td class="tph-stat-v"><b>${fmtPct(r.trapRate)}</b></td>
             <td class="tph-stat-n"><span class="tph-stat-norm">${r.trapSample} made-hand spot${r.trapSample === 1 ? '' : 's'}${r.trapSample < TEXTURE_MIN ? ', low' : ''}</span></td>
           </tr>
-          <tr><td colspan="3" class="tph-stat-legend">Bet size = average bet/raise as a share of the pot before it; 100% is pot-sized.
+          <tr><td colspan="3" class="tph-stat-legend">Bet size = median bet/raise as a share of the pot before it, over their last ${BET_SIZE_HISTORY_MAX} sized bets; 100% is pot-sized. A median rather than an average, so a single oversized all-in shove cannot skew it the way it used to.
             Tick = pool average (reference figures, not measured here).
             The blue <span class="tph-stat-rec">· figure</span> is recent form over the last ${STORE.settings.sessionWindow || 15} hands —
             only VPIP and PFR can be windowed, so the rest show lifetime only.</td></tr>
@@ -7505,6 +7727,8 @@
         p.notes = e.target.value;
         saveStore();
       });
+    } else if (openPlayerTab === 'trends' && isSelf) {
+      body.innerHTML = buildSessionTrendsHtml();
     }
   }
 
@@ -8840,6 +9064,23 @@
       stackSwingBB,
       stackBarHtml,
       BET_SIZE_MIN,
+      BET_SIZE_HISTORY_MAX,
+      median,
+      noteBetSizing,
+      touchSession,
+      archiveSession,
+      ensureSessionShape,
+      SESSION_GAP_MS,
+      SESSION_HISTORY_MAX,
+      SESSION_TREND_POINTS,
+      SESSION_TABLE_ROWS,
+      buildSessionTrendsHtml,
+      resetHeroStats,
+      resetProfitLoss,
+      resetAllData,
+      mergeStores,
+      loadStore,
+      importJson,
       // Exposed so a test can assert a CSS invariant that only the stylesheet
       // can guarantee — e.g. the storage banner's pointer-events: none.
       CSS,

@@ -60,7 +60,7 @@ t.eq('an undefined pot does not throw', T.betSizePctOf(500000, undefined), null)
   const r = T.computeRates({
     hands: 0, vpip: 0, pfr: 0, threeBetMade: 0, foldTo3BetMade: 0, foldTo3BetOpp: 0,
     cbetMade: 0, cbetOpp: 0, foldToCbetMade: 0, foldToCbetOpp: 0, wtsd: 0,
-    limpMade: 0, betSizeCount: 0, betSizePctSum: 0,
+    limpMade: 0, betSizeCount: 0, betSizes: [],
     streetActions: { flop: { bet: 0, raise: 0, call: 0, check: 0, fold: 0 },
       turn: { bet: 0, raise: 0, call: 0, check: 0, fold: 0 },
       river: { bet: 0, raise: 0, call: 0, check: 0, fold: 0 } },

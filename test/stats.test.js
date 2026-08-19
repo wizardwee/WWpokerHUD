@@ -237,4 +237,47 @@ t.ok('nothing on the badge face is ever 3 chars',
 // display cap silently becoming a wrong number.
 t.eq('fmtNum still tells the truth at 100', T.fmtNum(100), '100');
 
+// --- Bet sizing is a median now, not a sum/count average (v1.21.0) ----------
+//
+// The old figure was a running sum/count average, which one enormous all-in
+// shove could drag a long way on its own — a player who bets ~50% of pot all
+// day looked like a big-bet merchant after a single 500%-pot shove. A median
+// of the recent window barely moves for one outlier sitting among the rest.
+
+t.eq('median of an odd-length list is the middle value', T.median([1, 5, 9]), 5);
+t.eq('median of an even-length list averages the two middles', T.median([1, 2, 3, 4]), 2.5);
+t.eq('median of nothing is null', T.median([]), null);
+t.eq('median of a missing list is null', T.median(undefined), null);
+
+{
+  const S = load();
+  S.STORE = S.emptyStore();
+
+  // Sixteen ordinary half-pot bets, then one 500%-pot shove.
+  for (let i = 0; i < 16; i++) S.noteBetSizing('sz', 50, 100); // 50% of pot each
+  S.noteBetSizing('sz', 500, 100); // one shove at 500% of pot
+
+  const p = S.STORE.players.sz;
+  t.eq('every sized bet is counted, all-ins included', p.betSizeCount, 17);
+  t.eq('median sizing barely moves off the ordinary bet', S.computeRates(p).medianBetPct, 50);
+
+  const meanWouldHaveBeen = (16 * 50 + 500) / 17;
+  t.ok(`the old average (${meanWouldHaveBeen.toFixed(0)}%) would have called this an oversized player; the median does not`,
+    meanWouldHaveBeen > 75 && S.computeRates(p).medianBetPct < 75);
+}
+
+{
+  // The rolling window is bounded (BET_SIZE_HISTORY_MAX), same reasoning as
+  // recentTables: this is stored for every player forever and must not grow
+  // with hand count.
+  const S = load();
+  S.STORE = S.emptyStore();
+  for (let i = 0; i < S.BET_SIZE_HISTORY_MAX + 10; i++) S.noteBetSizing('w', 100, 100);
+  const p = S.STORE.players.w;
+  t.eq('betSizes is capped at BET_SIZE_HISTORY_MAX', p.betSizes.length, S.BET_SIZE_HISTORY_MAX);
+  t.eq('betSizeCount keeps the true lifetime total past the cap', p.betSizeCount, S.BET_SIZE_HISTORY_MAX + 10);
+}
+
+t.eq('no sized bets yields no sizing figure', T.computeRates(player({ hands: 50 })).medianBetPct, null);
+
 process.exit(t.report());

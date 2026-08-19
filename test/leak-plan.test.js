@@ -30,7 +30,7 @@ const station = () => Object.assign(T.emptyPlayer('h', 'Hero'), {
   hands: N, vpip: pct(74), pfr: pct(6), limpMade: pct(52),
   foldTo3BetMade: 1, foldTo3BetOpp: 9,
   cbetMade: 12, cbetOpp: 40, foldToCbetMade: 9, foldToCbetOpp: 55,
-  wtsd: pct(44), betSizePctSum: 5400, betSizeCount: 60,
+  wtsd: pct(44), betSizes: Array(40).fill(90), betSizeCount: 60,
   streetActions: streets({
     flop: { bet: 28, raise: 2, call: 40, check: 12, fold: 9 },
     turn: { bet: 3, raise: 1, call: 28, check: 20, fold: 6 },

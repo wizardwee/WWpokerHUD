@@ -86,6 +86,42 @@ t.eq('very loose + aggressive is a LAG',
 t.eq('very loose + no raising is a Station',
   T.classifyProvisional(withRates(A.loose * 1.3, A.loose * 1.3 * 0.05)), 'Station');
 
+// --- Maniac (v1.22.0 fix) ----------------------------------------------------
+//
+// Maniac used to test ONLY afq > 60 && vpip > loose, with no PFR/VPIP shape —
+// so it fired for ANY loose player with high postflop aggression, including a
+// loose-PASSIVE one, and it was checked before LAG/Station ever got a look.
+// That silently absorbed most of what should have been LAG or Station,
+// regardless of what POOL_AVG was set to. This pins the fix: Maniac now shares
+// LAG's exact loose+aggressive-preflop shape and is promoted from it by afq
+// alone, so a loose-passive player can never land there.
+
+const streets = (o) => Object.assign({
+  flop: { bet: 0, raise: 0, call: 0, check: 0, fold: 0 },
+  turn: { bet: 0, raise: 0, call: 0, check: 0, fold: 0 },
+  river: { bet: 0, raise: 0, call: 0, check: 0, fold: 0 },
+}, o);
+
+// bet=afqPct, call=100-afqPct on the flop alone gives afq == afqPct exactly.
+const withAfq = (vpipPct, pfrPct, afqPct) => withRates(vpipPct, pfrPct, {
+  streetActions: streets({ flop: { bet: afqPct, raise: 0, call: 100 - afqPct, check: 0, fold: 0 } }),
+});
+
+// The regression: loose + PASSIVE preflop (Station's own shape) + high
+// postflop AFq must NOT be swept into Maniac — it has to reach Station.
+t.eq('loose + passive + high AFq is a Station, not a Maniac (the old bug)',
+  T.classifyProvisional(withAfq(A.loose * 1.3, A.loose * 1.3 * 0.05, 80)), 'Station');
+
+// Loose + aggressive preflop (LAG's shape) + high postflop AFq IS a Maniac —
+// the extra condition promotes it off LAG.
+t.eq('loose + aggressive + high AFq is a Maniac',
+  T.classifyProvisional(withAfq(A.loose * 1.3, A.loose * 1.3 * 0.6, 80)), 'Maniac');
+
+// Same loose+aggressive preflop shape, but AFq at or under the 60 cutoff stays
+// a LAG rather than being promoted.
+t.eq('loose + aggressive + moderate AFq stays a LAG',
+  T.classifyProvisional(withAfq(A.loose * 1.3, A.loose * 1.3 * 0.6, 55)), 'LAG');
+
 // Strictly between the pool average and A.loose (1.0x-1.15x), with weak
 // raising — the gap the Fish rule exists to catch. 1.075x always sits
 // inside that gap by construction, whatever POOL_AVG.vpip happens to be.

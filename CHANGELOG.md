@@ -9,6 +9,103 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.23.0
+
+Maniac was silently absorbing most of LAG and Station's population.
+
+Reported directly: most tracked players read as Maniac or Balanced, almost
+never Station or LAG, regardless of what the pool actually looked like.
+
+The Maniac rule tested only `afq > 60 && vpip > loose`, with no PFR/VPIP
+shape at all — so it fired for any loose player with high postflop
+aggression, including a loose-PASSIVE one (a Station who bets big the one
+time they wake up) as well as a loose-aggressive one (an actual LAG). Checked
+first in `ARCHETYPE_RULES` ("order matters, first match wins"), it caught
+both before LAG or Station were ever evaluated.
+
+Worth being precise about what this was and wasn't: the thresholds ARE
+pool-relative by design — `A.tight`/`A.loose` are multiples of
+`POOL_AVG.vpip`, not hardcoded numbers, so correcting `POOL_AVG` does move
+them. This was not that. It was a rule-ordering and rule-shape bug that
+reproduces on any pool, whatever `POOL_AVG` happens to be set to.
+
+Fixed by giving Maniac the same loose+aggressive-preflop shape LAG already
+tests (`vpip > loose && pfr/vpip >= aggRatio`), with `afq > 60` as the one
+extra condition that promotes a LAG into a Maniac — the same "shared shape,
+split by one more condition, more specific checked first" pattern Nit/TAG
+already used one rule up. A loose-passive player can no longer reach Maniac
+at all, whatever their postflop AFq is; they now correctly reach Station.
+
+4 new assertions in `test/archetype.test.js`, including the regression case
+directly: loose + passive + 80% AFq now classifies Station, not Maniac.
+
+## 1.22.0
+
+Session-over-session trends: win rate, VPIP, aggression, and P/L charted
+across your completed sessions.
+
+A "session" already existed — `STORE.session`, `touchSession`,
+`SESSION_GAP_MS`'s 4-hour gap — it just overwrote itself in place every time
+the gap fired, so the moment a session ended its numbers were gone for good.
+There was no way to see whether last Tuesday's session was better or worse
+than tonight's.
+
+The just-ended session is now snapshotted into `STORE.sessionHistory`
+(`archiveSession`, called from `touchSession` right before it resets the live
+counters) — hands played, net chips and bb, VPIP/PFR/AFq counts, and the last
+stake seen. Bounded at `SESSION_HISTORY_MAX` (60 sessions), oldest dropped
+first, same reasoning as `recentTables`/`betSizes`: this is written every time
+a session ends and would otherwise grow forever.
+
+A new "Trends" tab appears on hero's own player panel — same `isSelf` gate
+that already swaps Exploit for Leaks, since a session is hero's own sitting,
+not something that applies to any other tracked player. It shows four
+sparkline charts (win rate in bb/100, P/L in bb, VPIP%, aggression%) over the
+most recent sessions, plus a table of the last 12. `sparklineSvg` gained
+optional `min`/`max`/`zeroLine` options so it can plot a signed, unbounded
+metric — P/L and win rate can be negative and have no natural ceiling — right
+alongside the 0-100% metrics it already drew; every existing caller is
+unaffected, since the new min/max form agrees exactly with the old hardcoded
+0-100 one when no options are passed.
+
+`resetHeroStats` now also clears `sessionHistory`. Hand history stays on that
+reset because it still describes opponents too, but every field in
+`sessionHistory` describes hero's own play alone, so it gets the same
+clean-slate treatment `STORE.hero` does.
+
+## 1.21.0
+
+Bet size is a median now, not a sum/count average.
+
+Reported directly: the "Bet size" sizing tell was a running `sum / count`
+average, and one enormous all-in shove could drag it a long way on its own.
+A player who bets around 50% of pot all day, after a single 500%-pot shove,
+read as an "oversized" bettor to the exploit plan, the leak plan, and the
+Stats tab — exactly backwards, since a shove forced by stack depth says
+nothing about voluntary sizing habits.
+
+`betSizePctSum` / `betSizeCount` (a running total, divided on read) is
+replaced by `betSizes`, a bounded rolling window of the most recent
+bet-as-%-of-pot values. `BET_SIZE_HISTORY_MAX` (40) caps it — same reasoning
+as `recentTables`: this is stored for every player forever, so it must not
+grow with hand count the way the player list itself does (open finding #2).
+The sizing tell is now `median(p.betSizes)` rather than a mean: one outlier
+sitting among 40 ordinary bets moves a median by very little, however far
+outside the pot it was. `betSizeCount` is kept as the LIFETIME count,
+unaffected by the window, so the sample-size gate (`BET_SIZE_MIN`) and the
+"N bets" display still describe everything ever observed, not just the
+window the median is drawn from.
+
+Every surfaced line changed wording along with the number: "Averages X% of
+pot" is now "Typically bets X% of pot (median of N bets)" in the exploit
+plan, the leak plan, the player report, and the Stats tab legend — so the UI
+does not claim to be reporting a mean it no longer computes.
+
+Untouched, on purpose: v1.18.0's draw-vs-made `texture` sizing split
+(`betDrawPct`/`betMadePct`) is the same shape of sum/count average and
+carries the same latent skew risk from an all-in caught at showdown. Out of
+scope for this pass — flagged, not fixed.
+
 ## 1.20.0
 
 The Gist sync status line now shows the gist itself — reported live, right
