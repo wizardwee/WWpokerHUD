@@ -9,6 +9,42 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.25.0
+
+The player panel forgot where you were every time you had to close it.
+
+Reported directly, and specific about the mechanism: the whole reason to open
+Stats or the new Trends tab mid-hand is the few seconds available before it's
+your turn — but closing the panel to hit fold/call/raise and reopening it
+seconds later always landed back at the top of whatever you'd been reading.
+`renderPanel` tears its element down and rebuilds a fresh one on literally
+every call (open, close, tab switch), so there was never anywhere for a
+scroll position to survive.
+
+- `renderPanel` now accepts an optional `scrollKey`. Before removing an
+  outgoing panel it saves that element's `scrollTop` under the key stamped in
+  its own `dataset` when it was created; once the replacement is built —
+  after `wire()` runs, since that's what actually determines how tall the
+  content is — it restores whatever was saved under *its* key. This is plain
+  JS state, not `STORE`: it only has to survive within the running page, not
+  a reload.
+- Defaults to the marker itself, which is enough for a panel that only ever
+  shows one "document" (Settings, the players list). The player panel passes
+  `marker:xid:tab`, because one marker there covers every player and every
+  tab, and each of those combinations needs its own remembered spot rather
+  than inheriting whatever some other view last left behind.
+- `openPlayerPanel` also stopped force-resetting to the Stats tab on every
+  open — now only when the player actually changes. Reopening the *same*
+  player you just closed on lands back on whichever tab you were reading;
+  opening a different player still starts fresh at Stats, which is the right
+  default for a player you weren't just looking at.
+
+4 new assertions in `test/panel.test.js`, against `renderPanel` directly —
+the harness's minimal DOM stub doesn't parse HTML into a real tree, so the
+full player-panel wiring (`renderPlayerPanelBody`'s nested `.tph-tab-body`
+lookup) isn't something a test can drive end-to-end without a much bigger
+change to the harness than this fix justifies.
+
 ## 1.24.0
 
 The Trends tab was already keeping 60 sessions of history and only showing a

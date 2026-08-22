@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.24.0
+// @version      1.25.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,30 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.25.0 - Closing the player panel to act (fold/call/raise) and reopening it
+ *          a few seconds later always dumped you back at the top of whatever
+ *          you were reading — Stats, Trends, History — because renderPanel
+ *          tears the panel element down and builds a fresh one on every
+ *          call. Reported directly: the whole point of checking a read
+ *          mid-hand is the few seconds available before it's your turn, and
+ *          re-scrolling on every single interruption ate most of that.
+ *            - renderPanel now takes an optional `scrollKey`. Before removing
+ *              an outgoing panel it saves its scrollTop under the key stamped
+ *              in its own dataset when it was created; after building the new
+ *              one (post-wire(), since that's what actually determines
+ *              scroll height) it restores whatever was saved under ITS key.
+ *              Plain JS state, not STORE — this only needs to survive within
+ *              the running page. Defaults to the marker, which is enough for
+ *              single-document panels (Settings, the players list); the
+ *              player panel passes marker+xid+tab, since one marker there
+ *              covers every player and every tab and each needs its own spot
+ *              remembered separately.
+ *            - openPlayerPanel also stopped resetting to the Stats tab on
+ *              every open — only when the player actually changes. Reopening
+ *              the SAME player you just closed on now lands back on whatever
+ *              tab you were reading, not a fresh Stats view.
+ *            - 4 new assertions in test/panel.test.js.
  *
  * 1.24.0 - The Trends tab (v1.22.0) only showed 12 sessions in the table and
  *          20 on the charts, out of the 60 SESSION_HISTORY_MAX actually keeps
@@ -50,28 +74,6 @@
  *            - 4 new assertions in test/archetype.test.js, including the
  *              regression case directly: loose + passive + AFq 80% now
  *              classifies Station, not Maniac.
- *
- * 1.22.0 - Session-over-session trends: win rate, VPIP, aggression and P/L
- *          charted across your completed sessions. A "session" already
- *          existed (STORE.session, touchSession, SESSION_GAP_MS's 4h gap) —
- *          it just overwrote itself in place on every gap, so the moment a
- *          session ended its numbers were gone for good.
- *            - The just-ended session is now snapshotted into
- *              STORE.sessionHistory (archiveSession, called from touchSession
- *              right before it resets) — hands, net chips/bb, VPIP, PFR and
- *              AFq counts, and the last stake seen — before the live counters
- *              clear for the next one. Bounded at SESSION_HISTORY_MAX (60),
- *              oldest dropped first, same reasoning as recentTables/betSizes.
- *            - New "Trends" tab on hero's own player panel (isSelf-gated,
- *              same pattern as Leaks/Exploit): four sparkline charts plus a
- *              table of the last 12 sessions. sparklineSvg gained optional
- *              min/max/zeroLine so it can plot a signed, unbounded metric
- *              (P/L, win rate) alongside the 0-100 percentages it already
- *              drew — existing 0-100 callers are unchanged.
- *            - resetHeroStats now also clears sessionHistory: unlike hand
- *              history, every field in it describes hero's own play, so it
- *              gets the same clean-slate treatment as STORE.hero.
- *            - 33 new assertions in test/session-trends.test.js.
  *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
@@ -135,7 +137,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.24.0';
+  const HUD_VERSION = '1.25.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -6738,10 +6740,28 @@
   // count toward that marker's "is this panel mounted" checks, which is not
   // what it is.
   //
-  // opts: { marker, open, html, onClose, wire }
+  // Scroll position survives a close/reopen (or a tab switch) even though
+  // renderPanel tears the element down and builds a fresh one every call —
+  // reported as the actual friction of the close-to-act cycle: closing the
+  // panel to hit fold/call and reopening it a few seconds later dumped you
+  // back at the top of a long Stats/Trends/History view, so studying a
+  // player cost a re-scroll on every single interruption, not just a
+  // re-open. Keyed by `scrollKey` (defaults to the marker) rather than the
+  // element itself, since the element is always a new one; a panel that
+  // shows more than one "document" under one marker (the player panel shows
+  // a different player/tab combination each time) passes a finer key so
+  // switching player or tab starts that combination at the top rather than
+  // inheriting some other view's position. Plain JS state, not STORE — this
+  // only needs to survive within the running page, not a reload.
+  let panelScrollMemory = {};
+
+  // opts: { marker, open, html, onClose, wire, scrollKey }
   // Returns the panel element, or null when `open` is false.
   function renderPanel(opts) {
-    document.querySelectorAll('.' + opts.marker).forEach((el) => el.remove());
+    document.querySelectorAll('.' + opts.marker).forEach((el) => {
+      if (el.dataset.scrollKey) panelScrollMemory[el.dataset.scrollKey] = el.scrollTop;
+      el.remove();
+    });
     document.querySelectorAll('.tph-backdrop-' + opts.marker).forEach((el) => el.remove());
     if (!opts.open) return null;
 
@@ -6760,6 +6780,13 @@
     const close = panel.querySelector('.tph-close');
     if (close && opts.onClose) close.addEventListener('click', opts.onClose);
     if (opts.wire) opts.wire(panel);
+
+    // Content built inside wire() (the player panel's tab body) is what
+    // actually determines scroll height, so this has to run after wire(),
+    // not before — restoring against the empty shell would just clamp to 0.
+    const scrollKey = opts.scrollKey || opts.marker;
+    panel.dataset.scrollKey = scrollKey;
+    panel.scrollTop = panelScrollMemory[scrollKey] || 0;
 
     pinTextColor(panel);
     return panel;
@@ -7349,10 +7376,17 @@
 
   let openPlayerXid = null;
   let openPlayerTab = 'stats';
+  // Survives the panel closing (openPlayerXid itself goes null on close, so
+  // it can't answer "is this the same player as before"). Reopening the same
+  // player you just closed on — the close-to-act-then-reopen cycle this is
+  // for — keeps whatever tab you were reading; opening a DIFFERENT player is
+  // still a fresh look and starts back at Stats.
+  let lastOpenPlayerXid = null;
 
   function openPlayerPanel(xid) {
+    if (xid !== lastOpenPlayerXid) openPlayerTab = 'stats';
+    lastOpenPlayerXid = xid;
     openPlayerXid = xid;
-    openPlayerTab = 'stats';
     renderPlayerPanel();
   }
 
@@ -7477,6 +7511,11 @@
     renderPanel({
       marker: 'tph-player-panel',
       open: !!openPlayerXid,
+      // One marker covers every player and every tab, so the scroll key has
+      // to say which of those this render actually is — otherwise reopening
+      // a different player, or switching tabs on the same one, would inherit
+      // whatever scroll position some other view last left behind.
+      scrollKey: 'tph-player-panel:' + openPlayerXid + ':' + openPlayerTab,
       onClose: () => { openPlayerXid = null; renderPlayerPanel(); },
       html: !p ? '' : `
       <span class="tph-close">✕</span>

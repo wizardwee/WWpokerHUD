@@ -100,4 +100,44 @@ t.eq('settings still mounted after player panel closes', mountedWith('tph-settin
   T.renderPanel({ marker: 'tph-gamma', open: false, html: '' });
 }
 
+// --- Scroll position survives close/reopen and tab switches ----------------
+//
+// Reported as the actual friction of the close-to-act cycle: closing the
+// panel to hit fold/call and reopening it a few seconds later dumped the
+// user back at the top of whatever they were reading, so every interruption
+// cost a re-scroll, not just a re-open.
+
+{
+  const p1 = T.renderPanel({ marker: 'tph-delta', open: true, html: 'x', scrollKey: 'tph-delta:1:stats' });
+  p1.scrollTop = 42;
+
+  // The close call itself doesn't need to know the scrollKey — capture reads
+  // it off the outgoing element's own dataset, stamped when IT was created.
+  T.renderPanel({ marker: 'tph-delta', open: false, html: '' });
+
+  const p2 = T.renderPanel({ marker: 'tph-delta', open: true, html: 'x', scrollKey: 'tph-delta:1:stats' });
+  t.eq('reopening the same scrollKey restores the scroll position', p2.scrollTop, 42);
+
+  p2.scrollTop = 7;
+  const p3 = T.renderPanel({ marker: 'tph-delta', open: true, html: 'x', scrollKey: 'tph-delta:1:trends' });
+  t.eq('a different scrollKey (e.g. switching tabs) starts fresh, not inheriting another key\'s position', p3.scrollTop, 0);
+
+  const p4 = T.renderPanel({ marker: 'tph-delta', open: true, html: 'x', scrollKey: 'tph-delta:1:stats' });
+  t.eq('switching back to the earlier key restores its own remembered position', p4.scrollTop, 7);
+
+  T.renderPanel({ marker: 'tph-delta', open: false, html: '' });
+}
+
+{
+  // No scrollKey given falls back to the marker itself — the right default
+  // for a panel that only ever shows one "document" (Settings, the players
+  // list), where the marker alone already identifies what's on screen.
+  const p1 = T.renderPanel({ marker: 'tph-epsilon', open: true, html: 'x' });
+  p1.scrollTop = 15;
+  T.renderPanel({ marker: 'tph-epsilon', open: false, html: '' });
+  const p2 = T.renderPanel({ marker: 'tph-epsilon', open: true, html: 'x' });
+  t.eq('default scrollKey (the marker) also survives close/reopen', p2.scrollTop, 15);
+  T.renderPanel({ marker: 'tph-epsilon', open: false, html: '' });
+}
+
 process.exit(t.report());
