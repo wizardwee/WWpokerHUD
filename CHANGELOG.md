@@ -9,6 +9,24 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.24.0
+
+The Trends tab was already keeping 60 sessions of history and only showing a
+fraction of it.
+
+Follow-up to v1.22.0's session tracker, asked for directly: the "last 10 or
+more" sessions with room stakes was already built — `STORE.sessionHistory`
+holds up to `SESSION_HISTORY_MAX` (60) completed sessions — but the Trends
+tab's display limits were set well below that: 12 rows in the table, 20
+points on the sparkline charts.
+
+`SESSION_TABLE_ROWS` 12 → 25, `SESSION_TREND_POINTS` 20 → 30. Both are pure
+display limits, separate from `SESSION_HISTORY_MAX`, which is unchanged —
+raising them surfaces more of what was already being stored, it doesn't
+store anything new. `sparklineSvg` plots through an SVG `viewBox`, not a
+fixed pixel-per-point layout, so widening the point count doesn't need any
+other change to render correctly at the same on-screen width.
+
 ## 1.23.0
 
 Maniac was silently absorbing most of LAG and Station's population.

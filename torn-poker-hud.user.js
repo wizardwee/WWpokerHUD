@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.23.0
+// @version      1.24.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,14 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.24.0 - The Trends tab (v1.22.0) only showed 12 sessions in the table and
+ *          20 on the charts, out of the 60 SESSION_HISTORY_MAX actually keeps
+ *          — plenty of history was being tracked and never surfaced.
+ *            - SESSION_TABLE_ROWS 12 -> 25, SESSION_TREND_POINTS 20 -> 30.
+ *              Pure display limits, unrelated to SESSION_HISTORY_MAX (still
+ *              60) — sparklineSvg plots via viewBox, not a fixed point count,
+ *              so widening it costs nothing else.
  *
  * 1.23.0 - Maniac was silently absorbing most of LAG and Station's population.
  *          Reported directly: most tracked players read as Maniac or
@@ -64,35 +72,6 @@
  *              history, every field in it describes hero's own play, so it
  *              gets the same clean-slate treatment as STORE.hero.
  *            - 33 new assertions in test/session-trends.test.js.
- *
- * 1.21.0 - Bet size is a median now, not a sum/count average.
- *          Reported directly: the "Bet size" sizing tell was a running
- *          `sum / count` average, and one enormous all-in shove could drag it
- *          a long way on its own — a player who bets ~50% of pot all day
- *          read as "oversized" (>85%) off a single 500%-pot shove, exactly
- *          backwards, since a shove forced by stack depth says nothing about
- *          voluntary sizing habits.
- *            - `betSizePctSum`/`betSizeCount` (a running total, divided on
- *              read) is replaced by `betSizes`, a bounded rolling window of
- *              the most recent bet-as-%-of-pot values. `BET_SIZE_HISTORY_MAX`
- *              (40) caps it — same reasoning as `recentTables`: this is
- *              stored for every player forever, so it must not grow with
- *              hand count (open finding #2). The sizing tell is now
- *              `median(p.betSizes)`, not a mean: one outlier sitting among 40
- *              ordinary bets moves a median by very little, however far
- *              outside the pot it was.
- *            - `betSizeCount` is kept as the LIFETIME count, unaffected by
- *              the window, so the sample-size gate (`BET_SIZE_MIN`) and the
- *              "N bets" display still describe everything ever observed, not
- *              just the window the median is drawn from.
- *            - Every surfaced line changed wording along with the number:
- *              "Averages X% of pot" is now "Typically bets X% of pot (median
- *              of N bets)" in the exploit plan, the leak plan, the player
- *              report, and the Stats tab legend — so the UI does not claim
- *              to be reporting a mean it no longer computes. The v1.18.0
- *              draw-vs-made `texture` sizing split (`betDrawPct`/
- *              `betMadePct`) is untouched — same latent skew risk, but out
- *              of scope for this pass.
  *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
@@ -156,7 +135,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.23.0';
+  const HUD_VERSION = '1.24.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -3864,9 +3843,9 @@
   // has no room for SESSION_HISTORY_MAX (60) points — this is a display limit,
   // separate from the storage cap, so it can be tuned without touching how
   // much history is kept.
-  const SESSION_TREND_POINTS = 20;
+  const SESSION_TREND_POINTS = 30;
   // Rows shown in the session-by-session table beneath the charts.
-  const SESSION_TABLE_ROWS = 12;
+  const SESSION_TABLE_ROWS = 25;
 
   // Session-over-session trends: win rate, VPIP, aggression and P/L across
   // STORE.sessionHistory. Hero-only — see the isSelf gate in
