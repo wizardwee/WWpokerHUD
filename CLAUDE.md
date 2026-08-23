@@ -754,6 +754,60 @@ Three choices worth preserving:
 - Inherits open finding #3 — an all-in counts as a raise, so an all-in *call*
   can inflate the tag one level.
 
+## Bluff tracking (v1.29.0)
+
+**This one was a genuine gap, not a "check first" win.** `noteBetTexture`
+already categorised a showdown bet as `made` (two pair+) or `draw` (a live
+flush/straight draw, flop/turn only) — but a bet with `cat < 2` and no draw
+either was silently dropped, counted nowhere. That gap is the exact definition
+of a bluff, so the third bucket (`bluffBets`/`bluffSizes`) was new work, not
+recovered data. `p.texture.checkMade` (the slowplay/trap signal) is unaffected.
+
+**A lone pair with no draw (`cat === 1`) still lands in none of the three
+buckets, on purpose.** It is not made by this file's own two-pair bar, and
+holding a pair is not zero equity, so it is not a bluff either. Forcing it into
+either would be a domain error a poker player would catch immediately (a
+top-pair value bet is not a "bluff"). Left unscored — the same honest-gap
+principle as the unshrunk WTSD anchor.
+
+**Fixed the flagged v1.21.0 gap on the way in, rather than sitting beside it.**
+`betDrawPct`/`betMadePct` were still a raw sum/count average — the v1.21.0
+changelog names this outright as "out of scope for THAT pass." Adding a third
+bucket in that same fragile shape while the fix for the other two sat right
+there would have been actively inconsistent. All three (`drawSizes`,
+`madeSizes`, `bluffSizes`) are now bounded windows read via `median()`, same
+shape as `betSizes`, via a shared `pushTextureSize` helper.
+
+**Migrated properly this time — v1.26.0's exact lesson, applied going in
+rather than fixed after a live bug.** `betSizePctSum` → `betSizes` in v1.21.0
+shipped with no migration, and the resulting count/sample mismatch was the
+headline finding of the v1.26.0 review. `ensurePlayerShape` now has an explicit
+nested backfill for `p.texture` (same pattern the `streetActions` backfill
+already used): a record with the old `drawPctSum`/`drawPctN` shape gets the new
+array fields added fresh (empty, not synthesised from the old average — a
+median seeded from a potentially-skewed mean would carry that skew into the
+very stat built to resist it), while the old fields are left alone, unused —
+same harmless-dead-weight precedent as `betSizePctSum` itself.
+
+**`bluffRate`'s caveat is stronger than the standard "floor on a range," and it
+is asymmetric.** `noteBetTexture` only ever runs on `hand.shownCards[xid]` —
+cards revealed at a REAL showdown. A bluff good enough to take the pot
+uncontested never reaches that sample and is structurally invisible. This
+makes a HIGH reading safe to act on (the true rate is at least this, likely
+higher — "call down lighter" holds regardless). It makes a LOW reading
+genuinely ambiguous: it could mean they rarely bluff, or it could mean they
+bluff plenty and it usually works, and this stat cannot tell those apart. The
+low-rate exploit-plan entry deliberately does NOT mirror the high-rate one —
+no "bluff more" framing, because that claim needs the overall bluff frequency,
+which is exactly what's unknowable here. `test/bluff-tracking.test.js` pins
+this by checking the actual copy text, not just that an entry fires — and it
+had to be extended to check `buildLeakPlan` as well as `buildExploitPlan`
+after an overclaim was caught in review sitting in the LEAK (hero's own voice)
+text specifically, with the villain-voice text already correct throughout. The
+two are built from separate `exploitText`/`leakText` arguments to the same
+`add()` call, so a fix landing in one and not the other is an easy, silent
+mistake — checking only one voice would have shipped it.
+
 ## Board texture (v1.28.0) — and the name collision to avoid
 
 **`texture` already meant something else.** `p.texture` is HAND strength (made

@@ -9,6 +9,79 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.29.0
+
+Track how often, and how much, villains bluff.
+
+Asked for directly, and unlike board texture (v1.28.0), this one genuinely
+wasn't sitting there already collected.
+
+### A real gap, not recovered data
+
+`noteBetTexture` already categorised a showdown bet as `made` (two pair or
+better) or `draw` (worse than that, but a live flush or straight draw, flop or
+turn only). A bet with neither — worse than a pair, and no draw — was silently
+dropped, counted nowhere. That gap *is* the definition of a bluff, so the new
+`bluffBets`/`bluffSizes` bucket is genuinely new collection, not something
+this file had been sitting on.
+
+One deliberate exclusion: a lone pair with no draw lands in **none** of the
+three buckets. It isn't made by this file's own two-pair bar, and holding a
+pair isn't zero equity, so calling it a bluff would be a domain error — the
+kind of thing a poker player would catch immediately (nobody calls a
+top-pair value bet a "bluff"). Left unscored, on the same honest-gap
+principle the unshrunk WTSD anchor already follows.
+
+### Fixed the flagged v1.21.0 issue on the way in
+
+`betDrawPct`/`betMadePct` were still a raw sum/count average — the v1.21.0
+entry above names this outright as "out of scope for THAT pass," the exact
+skew risk a single outsized shove creates. Adding a third bucket in that same
+fragile shape, while the fix for the other two sat one bucket away, would
+have been actively inconsistent. All three (`drawSizes`, `madeSizes`,
+`bluffSizes`) now read through `median()` off a bounded window, the same
+shape `betSizes` already uses, via a shared `pushTextureSize` helper.
+
+### Migrated properly this time
+
+v1.21.0's `betSizePctSum` → `betSizes` shipped with no migration, and the
+resulting count/sample mismatch was the headline finding of the v1.26.0
+review — a player's sizing "median" could be computed from a single bet while
+the sample label quoted a lifetime count in the hundreds. Not repeating that:
+`ensurePlayerShape` now has an explicit nested backfill for `p.texture` (the
+same pattern the `streetActions` backfill already used). A record in the old
+`drawPctSum`/`drawPctN` shape gets the new array fields added **empty** —
+deliberately not synthesised from the old average, which would carry that
+average's own skew into the very stat built to resist skew — while the old
+fields are left alone, unused, the same harmless-dead-weight precedent
+`betSizePctSum` itself already set.
+
+### The caveat is stronger than the usual floor, and it doesn't run both ways
+
+`noteBetTexture` only ever runs on a hand that reached a **real** showdown. A
+bluff good enough to take the pot uncontested never reaches that sample and is
+structurally invisible to it — not thin, *systematically excluded*. That makes
+a **high** `bluffRate` safe to act on: the true rate is at least this high, so
+"call down lighter" holds regardless. It makes a **low** reading genuinely
+ambiguous — it could mean they rarely bluff, or it could mean they bluff
+plenty and it usually works, and this stat cannot distinguish the two. The
+low-rate advice deliberately does not mirror the high-rate one; there is no
+"bluff more" framing, because that claim needs to know their overall
+frequency, which is exactly what's unknowable here.
+
+An earlier draft got this wrong in exactly the way the caveat warns about —
+an overclaim ("leaving fold equity on the table... bluff more") sitting in the
+**leak** voice (hero's own read on themself), while the villain-voice text was
+already correct throughout. Both come from the same `add()` call via separate
+`exploitText`/`leakText` arguments, which is precisely how a fix lands in one
+and not the other without anyone noticing. `test/bluff-tracking.test.js`
+checks both `buildExploitPlan` and `buildLeakPlan` output for this reason —
+checking only one voice would have shipped it.
+
+New Stats tab rows (`Size: bluff/made`, `Bluff freq`) and two exploit-plan
+entries — a sizing tell (bet smaller or bigger bluffing than with the goods)
+and a frequency tell. 48 new assertions in `test/bluff-tracking.test.js`.
+
 ## 1.28.1
 
 The By-board-texture rows printed over the stat labels to their left.

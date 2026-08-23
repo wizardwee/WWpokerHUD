@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.28.1
+// @version      1.29.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,62 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.29.0 - Track how often, and how much, villains bluff. Asked for directly.
+ *            - A GENUINE gap this time, not pre-collected data. noteBetTexture
+ *              already categorised a showdown bet as made (cat >= 2, two pair+)
+ *              or draw (worse than that but a live flush/straight draw, flop/
+ *              turn only) — but cat < 2 with no draw either was silently
+ *              dropped, counted nowhere. That gap IS the definition of a
+ *              bluff. New bluffBets/bluffSizes bucket fills it.
+ *            - cat === 1 (a lone pair, no draw) deliberately lands in NONE of
+ *              the three buckets — not made by this file's own two-pair bar,
+ *              and holding a pair is not zero equity, so not a bluff either.
+ *              Forcing it into either would be a domain error; left unscored,
+ *              same honest-gap principle as the unshrunk WTSD anchor.
+ *            - FIXED THE FLAGGED v1.21.0 GAP ON THE WAY IN rather than sitting
+ *              beside it: betDrawPct/betMadePct were still a raw sum/count
+ *              average (that changelog entry names it "out of scope for THAT
+ *              pass" outright). Adding a third bucket in that same shape while
+ *              the fix for the other two sat right there would have been
+ *              actively inconsistent. All three now read via median() off a
+ *              bounded window (drawSizes/madeSizes/bluffSizes), same shape as
+ *              betSizes, through a shared pushTextureSize helper.
+ *            - MIGRATED PROPERLY THIS TIME — v1.26.0's exact lesson, applied
+ *              going IN rather than fixed after a live bug. betSizePctSum ->
+ *              betSizes shipped with no migration in v1.21.0 and the resulting
+ *              count/sample mismatch was that review's headline finding.
+ *              ensurePlayerShape now has an explicit nested backfill for
+ *              p.texture: an old drawPctSum/drawPctN-shaped record gets the
+ *              new array fields added EMPTY (not synthesised from the old
+ *              average — that would carry its skew into the very stat built to
+ *              resist skew), old fields left alone as harmless dead weight,
+ *              same precedent as betSizePctSum's own leftover.
+ *            - bluffRate's caveat is STRONGER than the usual floor, and
+ *              ASYMMETRIC. noteBetTexture only ever runs on a REAL showdown —
+ *              a bluff good enough to win the pot uncontested never reaches
+ *              this sample and is structurally invisible. A HIGH reading is
+ *              safe (true rate is at least this, call down lighter still
+ *              holds); a LOW reading is genuinely ambiguous — rarely bluffs,
+ *              or bluffs plenty and it usually works — and this stat cannot
+ *              tell those apart. The low-rate entry deliberately does NOT
+ *              mirror the high-rate one; no "bluff more" framing, because that
+ *              claim needs the overall frequency, which is exactly what's
+ *              unknowable here.
+ *            - Caught in review: an overclaim ("leaving fold equity on the
+ *              table... bluff more") sitting in the LEAK (hero's own) voice
+ *              text specifically, while the villain-voice text was already
+ *              correct — same add() call, separate exploitText/leakText
+ *              arguments, an easy silent place for a fix to land in one and
+ *              not the other. test/bluff-tracking.test.js checks BOTH
+ *              buildExploitPlan and buildLeakPlan text for exactly this
+ *              reason; checking only one voice would have shipped it.
+ *            - New Stats tab rows (Size: bluff/made, Bluff freq) and two
+ *              exploit-plan entries (sizing tell, frequency tell), both never
+ *              firing for hero for the same reason the draw/made block above
+ *              them doesn't — hero's own cards are never harvested as a
+ *              showdown.
+ *            - 48 new assertions in test/bluff-tracking.test.js.
  *
  * 1.28.1 - The By-board-texture rows printed over the stat labels to their
  *          left. Reported from a Galaxy Fold cover screen — a genuinely narrow
@@ -89,45 +145,6 @@
  *              reason (open finding #2).
  *            - 63 new assertions in test/board-texture.test.js.
  *
- * 1.27.0 - Your own stats and the Trends tab are reachable when you are NOT
- *          sitting down. Asked for directly: "look at my stats and trends
- *          even when i'm not sitting at the table".
- *            - Most of the HUD already worked away from a seat — init() has no
- *              "am I seated" gate, so the gear, Settings, the players list and
- *              every OPPONENT's tabs all read fine from localStorage. What did
- *              not work was your OWN record, and that was the whole request.
- *            - Root cause: identity came only from the live `self___` seat
- *              marker, which exists only while you are actually sitting. Away
- *              from a seat findHeroXid fell through to the "name:<username>"
- *              pseudo-id, heroUnresolved() went true, and everything gated on
- *              isHeroRecord vanished — the Trends tab was not rendered AT ALL,
- *              your record showed Exploit instead of Leaks, and Settings' "Your
- *              own stats" button sat disabled reading "(sit at a table first)".
- *            - STORE.hero.xid now remembers what a seat once told us. Torn XIDs
- *              are permanent, so that answer stays good. findHeroXid prefers a
- *              live seat, falls back to the memory, and only then to the
- *              pseudo-id. Cleared where the username changes (the one thing
- *              that really means "different person"), PRESERVED through
- *              resetHeroStats — that resets your stats, not who you are — and
- *              ensureHeroShape refuses to load a stored pseudo-id back as
- *              identity.
- *            - This also hardens the SEATED case. `self___` is read out of
- *              someone else's script and has never been confirmed on the PDA
- *              layout; when it fails to match, the pseudo-id path silently
- *              freezes P/L at zero for the whole session (see v0.20.0). A
- *              remembered XID gives that case a correct answer too, and
- *              resolves identity immediately at load rather than after the
- *              seats render.
- *            - Audited every `!heroUnresolved()` site, since "resolved" no
- *              longer implies "seated": isHeroTurn and isHeroNextToAct both
- *              still return false with hero absent from the ring (the turn cue
- *              stays quiet), effectiveStackVs returns null, and P/L is
- *              unaffected because attribution needs hero in dealtInXids.
- *              Settings' status line now says which of the two it is rather
- *              than claiming "matched to your seat" when there is no seat.
- *            - 24 new assertions in test/hero-identity-memory.test.js, checked
- *              against the pre-fix code first to confirm they actually fail.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -190,7 +207,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.28.1';
+  const HUD_VERSION = '1.29.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -539,19 +556,36 @@
       // one outlier sitting among the rest of the window.
       betSizeCount: 0,
       betSizes: [],
-      // Bet-sizing and slowplay split by hand strength AT THE MOMENT of the
-      // action — derived only from showdowns, same evidence source and same
-      // "floor on a range, never the whole of it" caveat as shownHands.
-      // drawBets/madeBets are bet-or-raise counts on flop/turn only for draws
-      // (the river has no draw left to hold, so a river bet is scored toward
-      // madeBets or not counted at all, never drawBets); checkMade is how often
-      // they checked when they ALREADY held two pair or better instead of
-      // betting it — the slowplay/trap signal. The *PctSum/*PctN pairs average
-      // the sizing (as % of pot, read off the action's own `.p` field — see
-      // logAction) separately for the two categories.
+      // Bet-sizing, bluffing and slowplay split by hand strength AT THE MOMENT
+      // of the action — derived only from showdowns, same evidence source and
+      // same "floor on a range, never the whole of it" caveat as shownHands.
+      // BLUFFS carry a caveat stronger than the usual floor, and it belongs
+      // wherever bluffRate/betBluffPct is shown: a bluff that WORKS ends in a
+      // fold and never reaches showdown, so this cannot merely be thin, it is
+      // structurally biased low by exactly the bluffs good enough to take the
+      // pot uncontested.
+      //
+      // drawBets/madeBets/bluffBets are bet-or-raise counts, categorised by
+      // evaluate7 at showdown: madeBets = two pair or better (cat >= 2);
+      // drawBets = worse than that but a flush/straight draw was live, flop or
+      // turn only (the river has no draw left to hold); bluffBets = worse than
+      // that with NO draw either — genuinely nothing. A lone pair with no draw
+      // (cat === 1) lands in none of the three — not made by this file's own
+      // bar, not zero-equity either, an honest gap left unscored rather than
+      // forced into either bucket. checkMade is how often they checked when
+      // they ALREADY held two pair or better instead of betting it — the
+      // slowplay/trap signal.
+      //
+      // *Sizes (not *PctSum/*PctN) is a bounded rolling window per bucket, same
+      // reasoning and same shape as betSizes: a single outsized bet must not be
+      // able to drag a sum/count average around on its own, which is exactly
+      // what the median of a window resists. This replaces the flagged v1.21.0
+      // gap ("out of scope for THAT pass") rather than sitting inconsistently
+      // beside it while adding a third bucket in the fixed shape.
       texture: {
-        drawBets: 0, drawPctSum: 0, drawPctN: 0,
-        madeBets: 0, madePctSum: 0, madePctN: 0,
+        drawBets: 0, drawSizes: [],
+        madeBets: 0, madeSizes: [],
+        bluffBets: 0, bluffSizes: [],
         checkMade: 0,
       },
       notes: '',
@@ -797,6 +831,24 @@
         });
       }
     });
+    // Same reasoning for texture: a record written before v1.29.0 has drawBets/
+    // madeBets/checkMade but the OLD drawPctSum/drawPctN/madePctSum/madePctN
+    // shape, not drawSizes/madeSizes/bluffBets/bluffSizes. Backfilling only
+    // top-level-missing keys would leave those old fields sitting there unused
+    // (harmless — same as betSizePctSum's own leftover after v1.21.0) while
+    // computeRates reads the NEW array fields as undefined. This adds what is
+    // missing without touching what a hand-edited or partially-merged import
+    // already has right.
+    if (!p.texture || typeof p.texture !== 'object') {
+      p.texture = { ...t.texture, drawSizes: [], madeSizes: [], bluffSizes: [] };
+    } else {
+      ['drawBets', 'madeBets', 'bluffBets', 'checkMade'].forEach((k) => {
+        if (typeof p.texture[k] !== 'number') p.texture[k] = 0;
+      });
+      ['drawSizes', 'madeSizes', 'bluffSizes'].forEach((k) => {
+        if (!Array.isArray(p.texture[k])) p.texture[k] = [];
+      });
+    }
     return p;
   }
 
@@ -2432,6 +2484,21 @@
   // occurrence" — see the "floor on a range" caveat on showdown data generally.
   const TEXTURE_MIN = 5;
 
+  // Cap on drawSizes/madeSizes/bluffSizes, same reasoning as BET_SIZE_HISTORY_MAX
+  // (rides on every player record forever). Lower than that 40, because a
+  // showdown-categorised bet is already the rarer of the two samples — this is
+  // a subset of the bets betSizes already sees, split three ways.
+  const TEXTURE_BET_HISTORY_MAX = 25;
+
+  // Pushes a bet-size-% sample into a bounded window, shared by all three
+  // texture buckets so a size drifting out isn't three copies of the same cap
+  // logic to keep in sync.
+  function pushTextureSize(arr, pct) {
+    if (typeof pct !== 'number') return;
+    arr.push(pct);
+    if (arr.length > TEXTURE_BET_HISTORY_MAX) arr.shift();
+  }
+
   function noteBetSizing(xid, amt, potBefore) {
     const sizePct = betSizePctOf(amt, potBefore);
     if (sizePct == null) return;
@@ -3852,6 +3919,11 @@
     // object at all.
     const tex = p.texture || {};
     const madeSpots = (tex.checkMade || 0) + (tex.madeBets || 0);
+    // The total showdown-categorised bet/raise sample across all three
+    // buckets — what bluffRate is a share OF, and what its own sample gate is
+    // checked against (v1.26.0's lesson: gate on the number the figure is
+    // actually computed from, never a larger neighbouring count).
+    const texBetSample = (tex.madeBets || 0) + (tex.drawBets || 0) + (tex.bluffBets || 0);
     return {
       vpip: pct(p.vpip, p.hands),
       pfr: pct(p.pfr, p.hands),
@@ -3876,12 +3948,24 @@
       rrSample: rrFaced,
       wtsd: pct(p.wtsd, p.hands),
       medianBetPct: median(p.betSizes),
-      // Average bet/raise size as % of pot, split by whether they were caught
-      // (at showdown) already holding two pair+ or still only drawing to one.
-      betDrawPct: tex.drawPctN ? (tex.drawPctSum / tex.drawPctN) : null,
-      betMadePct: tex.madePctN ? (tex.madePctSum / tex.madePctN) : null,
+      // Median bet/raise size as % of pot, split by what they were caught
+      // holding at showdown: two pair+, a live draw, or nothing at all. A
+      // median of a bounded window, same reasoning as medianBetPct above —
+      // see the texture field comment on emptyPlayer.
+      betDrawPct: median(tex.drawSizes),
+      betMadePct: median(tex.madeSizes),
       betDrawCount: tex.drawBets || 0,
       betMadeCount: tex.madeBets || 0,
+      // BLUFF = showed down with worse than a pair and no draw either, after
+      // betting or raising. bluffRate is a share of texBetSample, so it reads
+      // "of the times we saw what they had after a bet, how often was it
+      // nothing" — and it is a FLOOR biased low, not just thin: a bluff good
+      // enough to win the pot uncontested never reaches showdown and is
+      // structurally invisible to this. Say so wherever this is shown.
+      betBluffPct: median(tex.bluffSizes),
+      betBluffCount: tex.bluffBets || 0,
+      bluffRate: texBetSample ? pct(tex.bluffBets || 0, texBetSample) : null,
+      bluffSample: texBetSample,
       // Slowplay/trap rate: of the times they were already sitting on two
       // pair+ (checked or bet), how often did they check it instead. Null with
       // no such spots yet — "never slowplays" needs at least one to claim.
@@ -3985,7 +4069,7 @@
     const p = getPlayer(xid);
     if (!p.texture || typeof p.texture !== 'object') {
       p.texture = {
-        drawBets: 0, drawPctSum: 0, drawPctN: 0, madeBets: 0, madePctSum: 0, madePctN: 0, checkMade: 0,
+        drawBets: 0, drawSizes: [], madeBets: 0, madeSizes: [], bluffBets: 0, bluffSizes: [], checkMade: 0,
       };
     }
     (hand.actions || []).forEach((a) => {
@@ -3996,10 +4080,26 @@
       if (a.a === 'bet' || a.a === 'raise' || a.a === 'all-in') {
         if (cat >= 2) {
           p.texture.madeBets += 1;
-          if (typeof a.p === 'number') { p.texture.madePctSum += a.p; p.texture.madePctN += 1; }
+          pushTextureSize(p.texture.madeSizes, a.p);
         } else if (TEXTURE_DRAW_STREETS.indexOf(a.s) >= 0 && hasDrawAt(holeCards, bc)) {
+          // A draw has real equity — a semi-bluff, not the thing this stat
+          // calls a bluff. Checked before the bluff branch below for exactly
+          // that reason: a flush draw with nothing else must land here, not
+          // get counted as air.
           p.texture.drawBets += 1;
-          if (typeof a.p === 'number') { p.texture.drawPctSum += a.p; p.texture.drawPctN += 1; }
+          pushTextureSize(p.texture.drawSizes, a.p);
+        } else if (cat === 0) {
+          // Genuinely nothing: worse than two pair, and no draw either (or
+          // the river, where there is no draw left to have). This is the
+          // actual definition of a bluff — a bet with no current equity and
+          // no equity coming. cat === 1 (a lone pair, no draw) deliberately
+          // lands in NEITHER this nor madeBets — not made by this file's own
+          // two-pair bar, and holding a pair is not zero equity, so it is not
+          // a bluff either. Left unscored, same as the WTSD anchor: an honest
+          // gap is better than forcing a middling hand into a bucket it
+          // doesn't belong in.
+          p.texture.bluffBets += 1;
+          pushTextureSize(p.texture.bluffSizes, a.p);
         }
       } else if (a.a === 'check' && cat >= 2) {
         p.texture.checkMade += 1;
@@ -6226,6 +6326,67 @@
           'their big bet = draw', 'randomize your sizing', ['facing']);
       }
     }
+
+    // --- Bluff sizing and frequency, from showdowns only --------------------
+    // Same evidence source and the same never-fires-for-hero gap as the block
+    // above. bluffRate carries a caveat stronger than a thin sample: a working
+    // bluff ends in a fold and never reaches showdown, so this is a FLOOR
+    // biased low by exactly the bluffs that succeeded — never phrase it as
+    // their true bluffing rate.
+    if ((r.betBluffCount + r.betMadeCount) >= TEXTURE_MIN
+        && r.betBluffPct != null && r.betMadePct != null
+        && Math.abs(r.betMadePct - r.betBluffPct) >= 20) {
+      if (r.betMadePct > r.betBluffPct) {
+        add(55, 'Bluff',
+          `Bets smaller when caught bluffing (${r.betBluffPct.toFixed(0)}% pot, ${r.betBluffCount} spots) `
+            + `than with a made hand (${r.betMadePct.toFixed(0)}%, ${r.betMadeCount} spots) — a small bet `
+            + 'from them leans toward air. Call their small bets down lighter and give the big ones more respect.',
+          `You bet smaller bluffing (${r.betBluffPct.toFixed(0)}% pot, ${r.betBluffCount} spots) than with a `
+            + `made hand (${r.betMadePct.toFixed(0)}%, ${r.betMadeCount} spots) — a sharp opponent can read `
+            + 'your size and fold only the bluffs. Match your bluff sizing to your value sizing.',
+          'their small bet = air', 'match bluff/value sizing', ['facing']);
+      } else {
+        add(55, 'Bluff',
+          `Bets BIGGER when caught bluffing (${r.betBluffPct.toFixed(0)}% pot, ${r.betBluffCount} spots) `
+            + `than with a made hand (${r.betMadePct.toFixed(0)}%, ${r.betMadeCount} spots) — backwards from `
+            + 'the pool norm. Their overbet is more likely to be air than the nuts; their smaller bets are where the value is.',
+          `You bet BIGGER bluffing (${r.betBluffPct.toFixed(0)}% pot, ${r.betBluffCount} spots) than with a `
+            + `made hand (${r.betMadePct.toFixed(0)}%, ${r.betMadeCount} spots) — backwards, and exploitable `
+            + 'the same way. Even out your sizing across both.',
+          'their overbet = air', 'match bluff/value sizing', ['facing']);
+      }
+    }
+    if (r.bluffSample >= TEXTURE_MIN) {
+      if (r.bluffRate >= 35) {
+        add(52, 'Bluff',
+          `Shows down with nothing ${fmtPct(r.bluffRate)} of the time after betting (${r.bluffSample} spots, `
+            + 'floor only — a working bluff never reaches showdown, so the true rate is higher). '
+            + 'Call down lighter against their bets; they are not always there.',
+          `You show down with nothing ${fmtPct(r.bluffRate)} of the time after betting (${r.bluffSample} `
+            + 'spots, and that floor undercounts every bluff that actually worked). Opponents paying attention '
+            + 'will start calling you down lighter — make sure your bluffs are picked, not habitual.',
+          'calls too light vs their air', 'pick bluff spots, don\'t habit-bluff', ['facing']);
+      } else if (r.bluffRate <= 5) {
+        // Deliberately NOT the mirror of the high-rate case above. A LOW
+        // showdown bluff rate is genuinely ambiguous — it could mean they
+        // rarely bluff, or it could mean they bluff plenty and those bluffs
+        // mostly WORK, which also keeps them out of this sample (see
+        // noteBetTexture's caller: it only ever sees a hand that reached a
+        // real showdown). This stat cannot tell those two apart, so it must
+        // not claim to know their overall bluff frequency in either
+        // direction — only what showing down with a bet actually means.
+        add(52, 'Bluff',
+          `Almost never shows down with nothing (${fmtPct(r.bluffRate)} of ${r.bluffSample} spots) — when `
+            + 'their bet DOES reach showdown, it is essentially always real. Fold marginal hands to their '
+            + 'bets rather than paying them off. This says nothing about how often they bluff overall — a '
+            + 'bluff that works never shows up here either.',
+          `You almost never show down with nothing (${fmtPct(r.bluffRate)} of ${r.bluffSample} spots) — `
+            + "when your bet reaches showdown it's read as real, which is fine as long as your bluffs are "
+            + 'winning the pot before it gets there rather than you simply not bluffing.',
+          'their showdown bet = real', 'no change needed here', ['facing']);
+      }
+    }
+
     if (r.trapSample >= TEXTURE_MIN) {
       if (r.trapRate > 40) {
         add(78, 'Trap',
@@ -6653,6 +6814,17 @@
           ? (r.betMadePct > r.betDrawPct
             ? 'Bets bigger with the goods than on a draw — a size jump is a real hand.'
             : 'Bets bigger ON draws than with a made hand — a big bet from them is more likely a draw.')
+          : null);
+    }
+    if (r.bluffSample >= TEXTURE_MIN) {
+      add(show, `Shows down with nothing (worse than a pair, no draw) after betting `
+        + `${fmtPct(r.bluffRate)} of the time (${r.bluffSample} spots) — a floor, not their true rate: a `
+        + 'bluff good enough to win the pot never reaches showdown at all.',
+        (r.betBluffCount + r.betMadeCount) >= TEXTURE_MIN && r.betBluffPct != null && r.betMadePct != null
+          && Math.abs(r.betMadePct - r.betBluffPct) >= 20
+          ? (r.betMadePct > r.betBluffPct
+            ? 'Bets smaller bluffing than with the goods — a small bet from them leans toward air.'
+            : 'Bets BIGGER bluffing than with a made hand — their overbet leans toward air, not the nuts.')
           : null);
     }
     if (r.trapSample >= TEXTURE_MIN) {
@@ -8059,10 +8231,20 @@
             <td class="tph-stat-v"><b>${r.medianBetPct != null ? r.medianBetPct.toFixed(0) + '%' : '—'}</b></td>
             <td class="tph-stat-n tph-stat-wrap"><span class="tph-stat-norm">of pot${szN ? ` · ${szN} bet${szN === 1 ? '' : 's'}` : ''}${szN && szN < BET_SIZE_MIN ? ', low' : ''}${szLifetime > szN ? ` · ${szLifetime} lifetime` : ''}</span></td>
           </tr>
-          <tr title="Average bet/raise as % of pot, split by what they actually had at showdown: DRAW = no made hand yet but a four-flush or an open/gutshot straight draw on the board; MADE = two pair or better already. Flop and turn only for draw — no draw left to hold on the river. From showdowns only, a floor on their range, same caveat as the Range tab.">
+          <tr title="Median bet/raise as % of pot, split by what they actually had at showdown: DRAW = no made hand yet but a four-flush or an open/gutshot straight draw on the board; MADE = two pair or better already. Flop and turn only for draw — no draw left to hold on the river. From showdowns only, a floor on their range, same caveat as the Range tab.">
             <td class="tph-stat-l">Size: draw/made</td>
             <td class="tph-stat-v"><b>${fmtPct(r.betDrawPct)}</b> / <b>${fmtPct(r.betMadePct)}</b></td>
             <td class="tph-stat-n"><span class="tph-stat-norm">${r.betDrawCount}d · ${r.betMadeCount}m${(r.betDrawCount + r.betMadeCount) < TEXTURE_MIN ? ', low' : ''}</span></td>
+          </tr>
+          <tr title="Median bet/raise as % of pot when they had NOTHING at showdown (worse than a pair, no draw either) vs when they had two pair+. A lone pair with no draw counts as neither and is excluded from both. From showdowns only, and the BLUFF side specifically is a floor biased low — a bluff good enough to win the pot never reaches a showdown to be counted here.">
+            <td class="tph-stat-l">Size: bluff/made</td>
+            <td class="tph-stat-v"><b>${fmtPct(r.betBluffPct)}</b> / <b>${fmtPct(r.betMadePct)}</b></td>
+            <td class="tph-stat-n"><span class="tph-stat-norm">${r.betBluffCount}b · ${r.betMadeCount}m${(r.betBluffCount + r.betMadeCount) < TEXTURE_MIN ? ', low' : ''}</span></td>
+          </tr>
+          <tr title="Of the times we saw their actual cards after a bet or raise, how often it was worse than a pair with no draw either — genuinely nothing. This is a FLOOR, not their true bluffing rate: a bluff good enough to take the pot uncontested never reaches showdown, so the real rate is at least this, and probably higher.">
+            <td class="tph-stat-l">Bluff freq</td>
+            <td class="tph-stat-v"><b>${fmtPct(r.bluffRate)}</b></td>
+            <td class="tph-stat-n"><span class="tph-stat-norm">${r.bluffSample} spot${r.bluffSample === 1 ? '' : 's'}${r.bluffSample < TEXTURE_MIN ? ', low' : ''}</span></td>
           </tr>
           <tr title="How often they check a hand that's already two pair or better instead of betting it — the slowplay/trap rate. From showdowns only, so a small sample is normal; the count is shown beside the percentage for that reason.">
             <td class="tph-stat-l">Slowplay</td>
@@ -8072,7 +8254,10 @@
           <tr><td colspan="3" class="tph-stat-legend">Bet size = median bet/raise as a share of the pot before it, over their last ${BET_SIZE_HISTORY_MAX} sized bets; 100% is pot-sized. A median rather than an average, so a single oversized all-in shove cannot skew it the way it used to.
             Tick = pool average (reference figures, not measured here).
             The blue <span class="tph-stat-rec">· figure</span> is recent form over the last ${STORE.settings.sessionWindow || 15} hands —
-            only VPIP and PFR can be windowed, so the rest show lifetime only.</td></tr>
+            only VPIP and PFR can be windowed, so the rest show lifetime only.
+            <b>Bluff freq is a floor, not a rate</b> — it can only see a bluff that got called all the way to
+            showdown, so a bluff that WORKED (took the pot uncontested) is invisible to it and the true
+            frequency is at least this high.</td></tr>
           <tr class="tph-stat-head"><td colspan="3"><b>By street</b> — aggr / fold</td></tr>
           ${POSTFLOP_STREETS.map((st) => `<tr><td class="tph-stat-l">${st[0].toUpperCase() + st.slice(1)}</td>`
             + `<td class="tph-stat-v">${fmtPct(r.byStreet[st].afq)} / ${fmtPct(r.byStreet[st].foldPct)}</td>`
@@ -9578,6 +9763,8 @@
       noteBetTexture,
       categoryAt,
       hasDrawAt,
+      pushTextureSize,
+      TEXTURE_BET_HISTORY_MAX,
       betSizePctOf,
       TEXTURE_MIN,
       harvestShownCards,
