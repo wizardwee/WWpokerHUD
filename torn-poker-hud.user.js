@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.27.0
+// @version      1.28.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,52 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.28.0 - Board texture: how a villain plays a four-flush, three-flush,
+ *          paired, four-straight or dry board. Asked for directly — "villain's
+ *          betting pattern based on board texture, e.g. a 4 card flush".
+ *            - The FOURTH time "check whether it's already collected" paid off.
+ *              hand.board was already parsed from the log (with NO hero gate,
+ *              so hands you folded preflop still contribute), every action
+ *              already carried its street, the replayer already reconstructed
+ *              the board as it stood on each street, and STORE.hands held 200
+ *              past hands to seed from. Only the classifier and the per-flag
+ *              counters were actually new.
+ *            - NAME COLLISION, worth knowing: `p.texture` already meant HAND
+ *              strength (made vs draw, v1.18.0). Board texture is boardTex /
+ *              boardFlags / BOARD_* throughout so the two can't be confused.
+ *            - FLAGS, not one class per board. A board can be paired AND four
+ *              to a flush and both matter; a first-match-wins list (the
+ *              LOG_PATTERNS pattern) would make "paired" quietly mean "paired
+ *              AND not flushy" and would SHRINK each flag's sample by carving
+ *              boards into whichever flag outranked them. Consequence the UI
+ *              states outright: the rows overlap and do not sum.
+ *            - Two rates, two denominators, deliberately not blended: `lead`
+ *              is b/(b+k) (nobody has bet yet) and `foldToBet` is f/(f+c+r)
+ *              (facing a bet) — the same "facing a bet is the only state where
+ *              raise/call/fold are possible" insight streetRates.rr uses. Both
+ *              withhold rather than report 0% on an empty denominator.
+ *            - A four-flush board is RARE, so a per-villain read takes hundreds
+ *              of shared hands. Three layers instead: the live board read (no
+ *              storage, works on hand one), a measured pool baseline shown
+ *              beside the villain figure, and the per-villain figure gated at
+ *              BOARD_TEX_MIN (8) — checked against the SAME cell the figure is
+ *              computed from, which is v1.26.0's lesson. Thin rows render
+ *              dimmed rather than hidden.
+ *            - Reads surface through the existing context tokens:
+ *              handContextTokens emits board:<flag>, entries tag
+ *              when: ['board:fl4'], so a texture read can only ever appear on
+ *              the texture it describes. Tags are generated from BOARD_FLAGS,
+ *              so a typo'd token is structurally impossible here.
+ *            - Backfilled from stored hand history at init(), NOT migrateStore
+ *              — that runs inside loadStore() where later consts are still in
+ *              the temporal dead zone. It ADDS to counters, so a store flag is
+ *              what makes it safe, not idempotence.
+ *            - Storage measured, not guessed: 2 bytes on a fresh record
+ *              (sparse — unseen flags absent), 198 worst case with all five
+ *              seen, ~387 KB at PRUNE_PLAYER_CAP. One-letter keys for the same
+ *              reason (open finding #2).
+ *            - 63 new assertions in test/board-texture.test.js.
  *
  * 1.27.0 - Your own stats and the Trends tab are reachable when you are NOT
  *          sitting down. Asked for directly: "look at my stats and trends
@@ -98,30 +144,6 @@
  *            - 36 new assertions in test/review-fixes.test.js, each checked
  *              against the pre-fix code first to confirm it actually fails.
  *
- * 1.25.0 - Closing the player panel to act (fold/call/raise) and reopening it
- *          a few seconds later always dumped you back at the top of whatever
- *          you were reading — Stats, Trends, History — because renderPanel
- *          tears the panel element down and builds a fresh one on every
- *          call. Reported directly: the whole point of checking a read
- *          mid-hand is the few seconds available before it's your turn, and
- *          re-scrolling on every single interruption ate most of that.
- *            - renderPanel now takes an optional `scrollKey`. Before removing
- *              an outgoing panel it saves its scrollTop under the key stamped
- *              in its own dataset when it was created; after building the new
- *              one (post-wire(), since that's what actually determines
- *              scroll height) it restores whatever was saved under ITS key.
- *              Plain JS state, not STORE — this only needs to survive within
- *              the running page. Defaults to the marker, which is enough for
- *              single-document panels (Settings, the players list); the
- *              player panel passes marker+xid+tab, since one marker there
- *              covers every player and every tab and each needs its own spot
- *              remembered separately.
- *            - openPlayerPanel also stopped resetting to the Stats tab on
- *              every open — only when the player actually changes. Reopening
- *              the SAME player you just closed on now lands back on whatever
- *              tab you were reading, not a fresh Stats view.
- *            - 4 new assertions in test/panel.test.js.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -184,7 +206,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.27.0';
+  const HUD_VERSION = '1.28.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -463,6 +485,11 @@
         turn: { bet: 0, raise: 0, call: 0, check: 0, fold: 0 },
         river: { bet: 0, raise: 0, call: 0, check: 0, fold: 0 },
       },
+      // Postflop actions split by BOARD texture — see BOARD_FLAGS. Sparse on
+      // purpose: a flag this player has never been observed on is absent
+      // rather than a row of zeroes, because this rides on every record
+      // forever (open finding #2).
+      boardTex: {},
       wtsd: 0,
       // Preflop call with no raise yet. Counted per hand, and reported both
       // per-hand and as a share of VPIP — against a pool that limps ~45% of its
@@ -2445,11 +2472,119 @@
     hand.pot += amt;
   }
 
+  // How many community cards are showing on each street. Shared, because both
+  // the replayer and the board-texture collector below need to reconstruct the
+  // board AS IT STOOD on a given street — hand.board is the FINAL board, so a
+  // flop action has to be read against its first three cards, not all five.
+  const BOARD_COUNT_FOR = { preflop: 0, flop: 3, turn: 4, river: 5 };
+
+  // ===========================================================================
+  // BOARD TEXTURE
+  // ===========================================================================
+  //
+  // "Texture" already means something else in this file — `p.texture` is HAND
+  // strength (made vs draw at showdown, v1.18.0). Everything here is board*/
+  // boardTex* so the two can never be confused for each other.
+  //
+  // These are FLAGS, not one class per board. A board can be paired AND four to
+  // a flush and both facts matter, so a first-match-wins list (the LOG_PATTERNS
+  // / ARCHETYPE_RULES pattern used elsewhere) is wrong here: under a priority
+  // order "paired" would silently come to mean "paired AND not flushy", a
+  // conditional nobody reading the stat would assume, and each flag's sample
+  // would be SMALLER because boards get carved away into whichever flag
+  // outranks them. As flags, every paired board counts toward `pair`, full
+  // stop.
+  //
+  // Deliberately few. Every flag is another column of an already-thin sample
+  // (a four-flush board is rare), so each one has to earn its place.
+  const BOARD_FLAGS = [
+    { key: 'fl4', label: '4+ flush', hint: 'four or more of one suit on board' },
+    { key: 'fl3', label: '3-flush', hint: 'exactly three of one suit on board' },
+    { key: 'pair', label: 'paired', hint: 'the board itself is paired or better' },
+    { key: 'str4', label: '4-straight', hint: 'four to a straight on board' },
+    { key: 'dry', label: 'dry', hint: 'none of the above — no obvious draw or pair' },
+  ];
+
+  // Four board cards inside a five-card span, so one more card completes a
+  // straight. Ace plays low as well as high, or A-2-3-4 would not register.
+  // Needs four cards, so this can only ever fire on the turn or river.
+  function fourToAStraight(cards) {
+    const vals = cards.map((c) => rankIdx(c.rank) + 2).filter((v) => v >= 2);
+    if (vals.includes(14)) vals.push(1);
+    const uniq = Array.from(new Set(vals)).sort((a, b) => a - b);
+    for (let i = 0; i + 3 < uniq.length; i += 1) {
+      if (uniq[i + 3] - uniq[i] <= 4) return true;
+    }
+    return false;
+  }
+
+  // Which flags a board carries. Always returns at least one ('dry'), so every
+  // observed action lands somewhere and the denominators stay comparable.
+  // Returns [] for a board too short to have a texture at all.
+  function boardFlags(cards) {
+    const list = (Array.isArray(cards) ? cards : []).filter((c) => c && c.rank && c.suit);
+    if (list.length < 3) return [];
+    const flags = [];
+
+    const bySuit = {};
+    list.forEach((c) => { bySuit[c.suit] = (bySuit[c.suit] || 0) + 1; });
+    const maxSuit = Math.max.apply(null, Object.keys(bySuit).map((k) => bySuit[k]));
+    if (maxSuit >= 4) flags.push('fl4');
+    else if (maxSuit === 3) flags.push('fl3');
+
+    const byRank = {};
+    list.forEach((c) => { byRank[c.rank] = (byRank[c.rank] || 0) + 1; });
+    if (Object.keys(byRank).some((k) => byRank[k] >= 2)) flags.push('pair');
+
+    if (fourToAStraight(list)) flags.push('str4');
+
+    if (!flags.length) flags.push('dry');
+    return flags;
+  }
+
+  // Per-flag action counters, stored SPARSELY (a flag never seen costs nothing)
+  // and with one-letter keys, because this rides on every player record forever
+  // and open finding #2 is about exactly that growth.
+  //
+  // The five counters mirror streetActions' vocabulary rather than collapsing
+  // into a single aggression figure, and that split is what makes the stat
+  // readable: postflop, `check` and `bet` are only possible when NOBODY has bet
+  // yet, while `call`, `fold` and `raise` are only possible when facing a bet.
+  // So the same five numbers answer two different questions cleanly — "do they
+  // lead here" (b vs k) and "do they fold here" (f vs c+r) — the same insight
+  // streetRates.rr already relies on.
+  const BOARD_TEX_KEY = { bet: 'b', raise: 'r', call: 'c', check: 'k', fold: 'f' };
+
+  function emptyBoardTexCell() {
+    return { b: 0, r: 0, c: 0, k: 0, f: 0 };
+  }
+
+  function noteBoardTexture(p, action, street, board) {
+    const need = BOARD_COUNT_FOR[street];
+    if (!need) return;                       // preflop has no board
+    const key = BOARD_TEX_KEY[action];
+    if (!key) return;
+    const showing = (board || []).slice(0, need);
+    // A partially-parsed board would misclassify — a turn read against two
+    // known cards could call a three-flush board dry. Skip rather than guess.
+    if (showing.length < need) return;
+    if (!p.boardTex || typeof p.boardTex !== 'object') p.boardTex = {};
+    boardFlags(showing).forEach((f) => {
+      const cell = p.boardTex[f] || (p.boardTex[f] = emptyBoardTexCell());
+      cell[key] = (cell[key] || 0) + 1;
+    });
+  }
+
   function recordStreetAction(xid, action, hand) {
     if (hand.street === 'preflop') return; // preflop tallied via VPIP/PFR/3-bet counters instead
     const p = getPlayer(xid);
     if (!p.streetActions[hand.street]) return;
     p.streetActions[hand.street][action] = (p.streetActions[hand.street][action] || 0) + 1;
+    // Same choke point, so board texture is collected for every postflop action
+    // with no new call sites — and, like the board itself, with no hero gate:
+    // a hand you folded preflop still runs out in the log and still tells you
+    // how everyone else played that texture.
+    noteBoardTexture(p, action, hand.street, hand.board);
     saveStore();
   }
 
@@ -2991,7 +3126,7 @@
   function replayStepsFor(h) {
     if (!h) return [];
     const boardKnown = Array.isArray(h.board);
-    const boardCountFor = { preflop: 0, flop: 3, turn: 4, river: 5 };
+    const boardCountFor = BOARD_COUNT_FOR; // shared, so the two can't drift
     const byStreet = {};
     (h.actions || []).forEach((a) => { (byStreet[a.s] = byStreet[a.s] || []).push(a); });
 
@@ -3612,6 +3747,91 @@
       faced,
       actions: total,
     };
+  }
+
+  // Sample a board-texture read needs before it is worth showing. A four-flush
+  // board is rare, so this fills slowly for any one villain — which is exactly
+  // why it is gated rather than shown thin. v1.26.0's headline bug was a gate
+  // that let a single observation through, and the gate is checked against the
+  // SAME numbers the figure is computed from, never a larger neighbouring count.
+  const BOARD_TEX_MIN = 8;
+
+  // Two independent reads off one texture cell, and they use DIFFERENT
+  // denominators on purpose (see BOARD_TEX_KEY): postflop, check and bet are
+  // only reachable when nobody has bet yet, while call/fold/raise are only
+  // reachable when facing one. Mixing the two into a single "aggression on
+  // wet boards" number would average two unrelated situations.
+  //
+  // Each withholds (null) rather than reporting 0% on an empty denominator —
+  // "never bets a four-flush board" is a claim, and never having been given
+  // the chance is no evidence for it.
+  function boardTexRates(cell) {
+    if (!cell) return { lead: null, leadN: 0, foldToBet: null, facedN: 0, raiseWhenBet: null };
+    const b = cell.b || 0, r = cell.r || 0, c = cell.c || 0, k = cell.k || 0, f = cell.f || 0;
+    const leadN = b + k;      // nobody had bet: they either led or checked
+    const facedN = c + f + r; // someone bet at them: they called, folded or raised
+    return {
+      lead: leadN ? pct(b, leadN) : null,
+      leadN,
+      foldToBet: facedN ? pct(f, facedN) : null,
+      facedN,
+      raiseWhenBet: facedN ? pct(r, facedN) : null,
+    };
+  }
+
+  // What this HUD has actually observed across the whole tracked pool, per
+  // flag. Same idea and same justification as observedPoolAverages: a per-
+  // villain texture read takes hundreds of shared hands to earn, but the POOL
+  // figure fills quickly and is useful on its own ("nobody here folds a paired
+  // board"). It is also the baseline a villain gets compared against, so the
+  // Stats tab can say which direction they deviate.
+  // Seed boardTex from the hand history already on disk, once.
+  //
+  // STORE.hands keeps up to historyLimit (200) hands, each with its final
+  // `board` and its full `actions` list carrying the street each action was on
+  // — everything noteBoardTexture needs. Without this the stat starts at zero
+  // and a rare flag like fl4 would take weeks to say anything; with it, there
+  // is something to look at immediately.
+  //
+  // Deliberately NOT run from migrateStore. That executes inside loadStore()
+  // near the top of the file, where anything declared with const/let further
+  // down is still in its temporal dead zone — the documented way to break this
+  // script at load. init() runs on DOMContentLoaded with everything bound.
+  //
+  // Idempotent by a store flag rather than by being safe to re-run: it adds to
+  // counters, so running it twice would double-count every backfilled hand.
+  function backfillBoardTexture() {
+    if (STORE.boardTexBackfilled) return 0;
+    let seeded = 0;
+    (STORE.hands || []).forEach((h) => {
+      if (!h || !Array.isArray(h.board) || !h.board.length) return;
+      (h.actions || []).forEach((a) => {
+        if (!a || !a.x || !a.s || a.s === 'preflop') return;
+        if (!BOARD_TEX_KEY[a.a]) return;
+        const p = STORE.players[a.x];
+        if (!p) return; // a player pruned since; nothing to attribute to
+        noteBoardTexture(p, a.a, a.s, h.board);
+        seeded += 1;
+      });
+    });
+    STORE.boardTexBackfilled = true;
+    saveStore();
+    return seeded;
+  }
+
+  function poolBoardTexture() {
+    const totals = {};
+    Object.keys(STORE.players || {}).forEach((xid) => {
+      const bt = STORE.players[xid] && STORE.players[xid].boardTex;
+      if (!bt || typeof bt !== 'object') return;
+      Object.keys(bt).forEach((flag) => {
+        const cell = bt[flag];
+        if (!cell) return;
+        const acc = totals[flag] || (totals[flag] = emptyBoardTexCell());
+        ['b', 'r', 'c', 'k', 'f'].forEach((key) => { acc[key] += cell[key] || 0; });
+      });
+    });
+    return totals;
   }
 
   function computeRates(p) {
@@ -5921,6 +6141,58 @@
       }
     }
 
+    // --- Board texture -------------------------------------------------------
+    //
+    // Each entry is tagged with the board:<flag> token it describes, so it can
+    // only ever surface on that texture — see handContextTokens. Gated on the
+    // SAME cell the figure is computed from (v1.26.0's lesson), and each of the
+    // two reads uses its own denominator, because leading and folding happen in
+    // different situations (see boardTexRates).
+    BOARD_FLAGS.forEach((flag) => {
+      const cell = (p.boardTex || {})[flag.key];
+      if (!cell) return;
+      const br = boardTexRates(cell);
+      const tok = ['board:' + flag.key];
+
+      if (br.foldToBet != null && br.facedN >= BOARD_TEX_MIN) {
+        if (br.foldToBet >= 65) {
+          add(85, 'Board',
+            `Folds ${fmtPct(br.foldToBet)} of the time when bet into on a ${flag.label} board `
+              + `(${br.facedN} spots) — bet it relentlessly, whatever you hold.`,
+            `You fold ${fmtPct(br.foldToBet)} of the time when bet into on a ${flag.label} board `
+              + `(${br.facedN} spots). Anyone paying attention can bet you off this texture `
+              + 'with anything; call or raise more of them.',
+            `folds ${flag.label}`, `fold ${flag.label} too much`, tok);
+        } else if (br.foldToBet <= 25) {
+          add(80, 'Board',
+            `Only folds ${fmtPct(br.foldToBet)} when bet into on a ${flag.label} board `
+              + `(${br.facedN} spots) — a station here. Value bet thin, do not bluff.`,
+            `You only fold ${fmtPct(br.foldToBet)} when bet into on a ${flag.label} board `
+              + `(${br.facedN} spots) — you are calling too wide on this texture.`,
+            `calls ${flag.label}`, `too sticky on ${flag.label}`, tok);
+        }
+      }
+
+      if (br.lead != null && br.leadN >= BOARD_TEX_MIN) {
+        if (br.lead <= 20) {
+          add(70, 'Board',
+            `Leads out only ${fmtPct(br.lead)} of the time on a ${flag.label} board `
+              + `(${br.leadN} spots) — their check here means little, so take it away.`,
+            `You lead only ${fmtPct(br.lead)} on a ${flag.label} board (${br.leadN} spots) — `
+              + 'you are giving up the initiative on a texture you could be betting.',
+            `checks ${flag.label}`, `bet ${flag.label} more`, tok);
+        } else if (br.lead >= 60) {
+          add(70, 'Board',
+            `Leads out ${fmtPct(br.lead)} of the time on a ${flag.label} board `
+              + `(${br.leadN} spots) — betting this texture is automatic for them, `
+              + 'so their bet is far weaker than it looks.',
+            `You lead ${fmtPct(br.lead)} on a ${flag.label} board (${br.leadN} spots) — `
+              + 'so predictable that your bet here carries no information.',
+            `auto-bets ${flag.label}`, `too predictable on ${flag.label}`, tok);
+        }
+      }
+    });
+
     // --- Sizing tells --------------------------------------------------------
     const szN = betSizeSample(p);
     if (r.medianBetPct != null && szN >= BET_SIZE_MIN) {
@@ -6167,6 +6439,12 @@
     const street = hand.street || 'preflop';
     ctx.add(street);
     if (street !== 'preflop') ctx.add('postflop');
+    // Board texture as context, so a texture read can only surface on the
+    // texture it actually describes — "they fold four-flush boards" is noise
+    // on a rainbow flop. Emitted before the hero check below, because the board
+    // is the board whether or not hero has been identified.
+    boardFlags((hand.board || []).slice(0, BOARD_COUNT_FOR[street] || 0))
+      .forEach((f) => ctx.add('board:' + f));
     if (heroUnresolved()) return ctx; // no hero, no "facing" or "lead" to speak of
     // Facing a bet = someone still in has put MORE into this street than hero.
     // Street contributions, not hand totals: calling preflop does not mean hero
@@ -7808,6 +8086,43 @@
           ${POSTFLOP_STREETS.map((st) => `<tr><td class="tph-stat-l">${st[0].toUpperCase() + st.slice(1)}</td>`
             + `<td class="tph-stat-v">${fmtPct(r.byStreet[st].afq)} / ${fmtPct(r.byStreet[st].foldPct)}</td>`
             + `<td class="tph-stat-n"><span class="tph-stat-norm">${r.byStreet[st].actions} acts</span></td></tr>`).join('')}
+          ${(() => {
+            // By BOARD texture — how they act on the board in front of them,
+            // not on boards in general. Flags overlap by design (a board can be
+            // paired AND four-flush), so these rows do NOT sum to the hand
+            // count and must not be read as a breakdown.
+            //
+            // Shows the pool's own observed figure alongside, because a villain
+            // sample this thin is hard to judge cold: a four-flush board is
+            // rare, so "lead 30%" only means something next to what everyone
+            // else does there. The pool column is what this HUD has MEASURED,
+            // not a published reference like POOL_AVG's tick marks.
+            const pool = poolBoardTexture();
+            const rows = BOARD_FLAGS.map((flag) => {
+              const cell = (p.boardTex || {})[flag.key];
+              const br = boardTexRates(cell);
+              if (!br.leadN && !br.facedN) return '';
+              const pr = boardTexRates(pool[flag.key]);
+              const thin = (n) => (n < BOARD_TEX_MIN ? ' style="opacity:.55"' : '');
+              const cmp = (mine, theirs) => (mine == null ? '—'
+                : fmtPct(mine) + (theirs == null ? '' : ` <span class="tph-stat-norm">/ ${fmtPct(theirs)}</span>`));
+              return `<tr title="${escapeHtml(flag.hint)}. Lead = bets when nobody has bet yet. `
+                + `Fold = folds when bet into. The second, greyed figure is this HUD's own pool average `
+                + `for the same texture. Dimmed rows are under ${BOARD_TEX_MIN} observations.">`
+                + `<td class="tph-stat-l"${thin(Math.max(br.leadN, br.facedN))}>${escapeHtml(flag.label)}</td>`
+                + `<td class="tph-stat-v"${thin(Math.max(br.leadN, br.facedN))}>`
+                + `${cmp(br.lead, pr.lead)} · ${cmp(br.foldToBet, pr.foldToBet)}</td>`
+                + `<td class="tph-stat-n"><span class="tph-stat-norm">${br.leadN}L/${br.facedN}F</span></td></tr>`;
+            }).filter(Boolean).join('');
+            if (!rows) return '';
+            return '<tr class="tph-stat-head"><td colspan="3"><b>By board texture</b> — lead / fold-to-bet, vs pool</td></tr>'
+              + rows
+              + `<tr><td colspan="3" class="tph-stat-legend">Lead = how often they bet when nobody has bet into them yet; `
+              + `fold = how often they fold when someone does. Two different situations, so two different denominators `
+              + `(<b>L</b> and <b>F</b> counts). Flags overlap — a paired four-flush board counts toward both — so these `
+              + `rows are not a breakdown and will not sum. Dimmed = under ${BOARD_TEX_MIN} observations, shown but not `
+              + `worth acting on. The greyed second figure is this HUD's own measured pool average, not a published one.</td></tr>`;
+          })()}
           ${stackBarHtml(p)}
           ${(() => {
             const tabs = tablesPlayed(p);
@@ -9282,6 +9597,15 @@
       BET_SIZE_HISTORY_MAX,
       median,
       betSizeSample,
+      BOARD_FLAGS,
+      BOARD_TEX_MIN,
+      BOARD_COUNT_FOR,
+      boardFlags,
+      fourToAStraight,
+      noteBoardTexture,
+      boardTexRates,
+      poolBoardTexture,
+      backfillBoardTexture,
       noteBetSizing,
       touchSession,
       maybeRollSession,
@@ -9415,6 +9739,9 @@
   function init() {
     injectStyles();
     renderGear();
+    // Before the watchers, so the first hand of the session already has the
+    // history-seeded figures behind it rather than starting from zero.
+    backfillBoardTexture();
     bootstrapTableWatchers();
 
     setInterval(renderBadges, 4000);

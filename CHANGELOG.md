@@ -9,6 +9,97 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.28.0
+
+Board texture: how a villain plays a four-flush, three-flush, paired,
+four-straight or dry board.
+
+Asked for directly — "villain's betting pattern based on board texture, e.g. if
+there is a 4 card flush on the board."
+
+### Almost all of it was already being collected
+
+The fourth time that has been true in this repo, and the rule keeps paying.
+`hand.board` was already parsed out of the log — with **no hero gate**, so a
+hand you folded preflop still runs out and still tells you how everyone else
+played that texture. Every action already carried its street. The replayer
+already reconstructed the board as it stood on a given street. And `STORE.hands`
+already held 200 past hands to seed from. The only genuinely new parts were the
+classifier and the per-flag counters.
+
+One name collision worth knowing about: `p.texture` **already meant something
+else** — hand strength, made vs draw at showdown, from v1.18.0. Board texture is
+`p.boardTex` / `boardFlags` / `BOARD_*` throughout so the two can never be
+mistaken for each other.
+
+### Flags, not one class per board
+
+A board can be paired *and* four to a flush, and both facts matter. Filing each
+board under a single first-match-wins class (the `LOG_PATTERNS` /
+`ARCHETYPE_RULES` pattern used elsewhere) would have made `pair` quietly mean
+"paired **and not** flushy" — a conditional nobody reading the stat would assume
+— and would have made each flag's sample *smaller*, by carving boards away into
+whichever flag outranked them. As flags, every paired board counts toward
+`pair`, full stop.
+
+The cost is that the rows overlap and do not sum to anything. The Stats tab says
+so rather than letting it read as a breakdown.
+
+### Two rates, two denominators
+
+`lead` is bets over bet+check; `foldToBet` is folds over call+fold+raise. They
+are deliberately not blended into one "aggression on wet boards" number, because
+postflop, check and bet are only reachable when nobody has bet yet, while
+call/fold/raise are only reachable when facing one — the same insight
+`streetRates.rr` already relies on. Blending them would average two unrelated
+situations. Both withhold rather than report 0% on an empty denominator: never
+having been given the chance to bet a four-flush board is not evidence that they
+never do.
+
+### The sample is thin, and the design is built around that
+
+A four-flush board is rare, so a read on one specific villain takes hundreds of
+shared hands. So this ships in three layers:
+
+- **Live board read** — costs no storage and works on hand one. The board in
+  front of you is classified and fed into the coach.
+- **Pool baseline** — `poolBoardTexture()` aggregates every tracked player and
+  is shown beside the villain's own figure, because "leads 30%" means nothing
+  cold. This is measured here, unlike `POOL_AVG`'s published reference figures.
+- **Per-villain** — gated at `BOARD_TEX_MIN` (8), checked against the *same*
+  cell the figure is computed from. That is v1.26.0's lesson applied on the way
+  in rather than after the fact. Under-sample rows render dimmed rather than
+  hidden.
+
+Reads reach the coach through the existing context-token machinery:
+`handContextTokens` emits `board:<flag>` and entries tag
+`when: ['board:fl4']`, so a texture read can only ever surface on the texture it
+actually describes. The tags are generated from `BOARD_FLAGS`, which makes the
+typo'd-token failure mode (`entryRelevance` silently returning −1 forever)
+structurally impossible here.
+
+### Backfill runs at init(), not in migrateStore
+
+`migrateStore` executes inside `loadStore()` near the top of the file, where
+anything declared later with `const`/`let` is still in its temporal dead zone —
+the documented way to break this script at load. `backfillBoardTexture` runs
+from `init()` instead. It **adds** to counters, so `STORE.boardTexBackfilled`
+is what makes it safe; re-running it without that flag would double-count every
+seeded hand.
+
+### Storage, measured
+
+| | Size |
+|---|---|
+| `boardTex` on a fresh record | 2 bytes (sparse — unseen flags are absent) |
+| Worst case, all five flags seen | 198 bytes |
+| At `PRUNE_PLAYER_CAP` (2000 players) | ~387 KB, under 8% of `STORAGE_QUOTA_EST` |
+
+One-letter counter keys and sparse storage are why. This rides on every player
+record forever, which is open finding #2's exact growth shape.
+
+63 new assertions in `test/board-texture.test.js`.
+
 ## 1.27.0
 
 Your own stats and the Trends tab are reachable when you are not sitting down.

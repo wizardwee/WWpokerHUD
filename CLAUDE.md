@@ -754,6 +754,78 @@ Three choices worth preserving:
 - Inherits open finding #3 — an all-in counts as a raise, so an all-in *call*
   can inflate the tag one level.
 
+## Board texture (v1.28.0) — and the name collision to avoid
+
+**`texture` already meant something else.** `p.texture` is HAND strength (made
+vs draw at showdown, v1.18.0). Board texture is `p.boardTex` / `boardFlags` /
+`BOARD_*` throughout, and the two must not be conflated.
+
+**The fourth time "check whether it's already collected" paid off.** Everything
+needed already existed: `hand.board` is parsed from the log (with **no hero
+gate**, so hands you folded preflop still contribute), every action carries its
+street, `BOARD_COUNT_FOR` reconstructs the board as it stood on that street, and
+`STORE.hands` held 200 past hands to backfill from. Only the classifier and the
+per-flag counters were new. Check before adding collection.
+
+### Flags, not one class per board
+
+A board can be paired AND four-to-a-flush, and both facts matter. A
+first-match-wins list (the `LOG_PATTERNS`/`ARCHETYPE_RULES` pattern) would make
+`pair` silently mean "paired AND not flushy" — a conditional nobody reading the
+stat would assume — and would make each flag's sample *smaller* by carving
+boards away into whichever flag outranked them. As flags, every paired board
+counts toward `pair`, full stop.
+
+Consequence the UI must keep stating: **these rows do not sum** and are not a
+breakdown of hands.
+
+### Two rates, two denominators
+
+`boardTexRates` returns `lead` (b/(b+k)) and `foldToBet` (f/(f+c+r)) and they
+are deliberately not combined. Postflop, check and bet are only reachable when
+nobody has bet yet; call/fold/raise only when facing one — the same insight
+`streetRates.rr` already relies on. One blended "aggression on wet boards"
+figure would average two unrelated situations. Both withhold (null) rather than
+report 0% on an empty denominator.
+
+### The sample is thin, and that is the whole design problem
+
+A four-flush board is rare, so a per-villain read takes hundreds of shared
+hands. Hence three layers: the live board read (works on hand one, no storage),
+the **pool** baseline (`poolBoardTexture`, fills fast, shown beside the villain
+figure), and the per-villain figure gated at `BOARD_TEX_MIN = 8` — checked
+against the *same* cell the figure comes from, which is v1.26.0's lesson.
+Under-sample rows render dimmed rather than hidden.
+
+### Backfill runs at init(), NOT in migrateStore
+
+`migrateStore` executes inside `loadStore()` near the top of the file, where
+anything declared later with `const`/`let` is still in its temporal dead zone —
+the documented way to break this script at load. `backfillBoardTexture` runs
+from `init()` instead. It **adds** to counters, so it is made safe by the
+`STORE.boardTexBackfilled` flag, not by being idempotent; re-running without
+the flag would double-count every hand.
+
+### Storage, measured (not guessed)
+
+| | Size |
+|---|---|
+| `boardTex` on a fresh record | **2 bytes** (sparse — unseen flags are absent) |
+| Worst case, all five flags seen | **198 bytes** |
+| At `PRUNE_PLAYER_CAP` (2000) | ~387 KB, under 8% of `STORAGE_QUOTA_EST` |
+
+One-letter keys (`b`/`r`/`c`/`k`/`f`) and sparse storage are why. This rides on
+every player record forever, which is open finding #2's exact growth shape.
+
+### Surfacing goes through the existing context tokens
+
+`handContextTokens` emits `board:<flag>`, and entries tag `when: ['board:fl4']`,
+so a texture read can only appear on the texture it describes. Tags are
+**generated from `BOARD_FLAGS`**, so the typo'd-token failure mode CLAUDE.md
+warns about (`entryRelevance` returns −1 forever, silently) is structurally
+impossible here — but that also means `test/coach-relevance.test.js`'s literal
+source scan does not cover them; `test/board-texture.test.js` does.
+
 ## Showdown ranges (v0.26.0)
 
 `player.shownHands` maps hand class → `{seen, raised, won}`. It is the only
