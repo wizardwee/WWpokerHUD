@@ -9,6 +9,75 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.27.0
+
+Your own stats and the Trends tab are reachable when you are not sitting down.
+
+Asked for directly: "being able to look at my stats and trends sessions etc,
+even when I'm not sitting down at the table."
+
+Most of the HUD already worked away from a seat, which made the gap easy to
+miss. `init()` has no "am I seated" check, so on the poker page the gear
+renders, Settings opens, the players list works, and every *opponent's*
+Stats/Range/Report/History tab reads fine — all of it comes from localStorage,
+not the live table. What did not work was your own record, which was the whole
+point of the request.
+
+### Root cause
+
+Hero identity came only from the live `self___` seat marker, and that marker
+exists only while you are actually sitting. Away from a seat, `findHeroXid`
+fell through to the `name:<username>` pseudo-id, `heroUnresolved()` went true,
+and everything gated on `isHeroRecord` quietly disappeared:
+
+- the Trends tab was not rendered **at all** (it is `isSelf`-gated)
+- your own record showed "Exploit" instead of "Leaks"
+- Settings' "Your own stats" button sat disabled, reading "(sit at a table
+  first)"
+
+### The fix
+
+`STORE.hero.xid` now remembers what a seat once told us. Torn XIDs are
+permanent, so once a seat has identified you that answer stays good.
+`findHeroXid` prefers a live seat, falls back to the remembered value, and only
+then to the pseudo-id.
+
+Three rules keep that memory honest:
+
+- **Cleared when the username changes.** That is the one thing that genuinely
+  means "a different person"; keeping it would resolve a new name straight back
+  to the old account's record. Handled where the change handler already nulls
+  `heroXid`.
+- **Preserved through `resetHeroStats`.** That resets your stats, not who you
+  are — and it replaced the whole `STORE.hero` object, so the xid needed
+  carrying across explicitly or a reset would un-reach your own stats until the
+  next time you sat down.
+- **A stored pseudo-id is refused on load.** `ensureHeroShape` rejects anything
+  starting with `name:`, since that value is the bug being fixed, not an answer.
+
+### It also hardens the seated case
+
+`self___` is read out of HopesG's script and has never been confirmed on the
+PDA layout. When it fails to match, the pseudo-id path silently freezes P/L at
+zero for an entire session — the v0.20.0 failure, which presents as several
+unrelated bugs. A remembered XID gives that case a correct answer too, and
+resolves identity immediately at load instead of waiting for the seats to
+render.
+
+### What was audited
+
+"Resolved" no longer implies "seated", so every `!heroUnresolved()` site was
+checked. `isHeroTurn` and `isHeroNextToAct` both still return false with hero
+absent from the seat ring, so the turn cue stays quiet rather than firing at
+someone who is not playing; `effectiveStackVs` returns null; P/L is untouched
+because attribution needs hero in `dealtInXids`, which needs an actual dealt
+hand. Settings' status line now distinguishes "matched to your seat" from
+"remembered from a previous sitting", since claiming the former with no seat on
+screen would simply be false.
+
+24 new assertions in `test/hero-identity-memory.test.js`, each checked against
+the pre-fix code first to confirm it genuinely fails there.
+
 ## 1.26.0
 
 Four bugs found reviewing v1.25.0 — three of them in the session and sizing

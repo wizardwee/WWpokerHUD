@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.26.0
+// @version      1.27.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,45 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.27.0 - Your own stats and the Trends tab are reachable when you are NOT
+ *          sitting down. Asked for directly: "look at my stats and trends
+ *          even when i'm not sitting at the table".
+ *            - Most of the HUD already worked away from a seat — init() has no
+ *              "am I seated" gate, so the gear, Settings, the players list and
+ *              every OPPONENT's tabs all read fine from localStorage. What did
+ *              not work was your OWN record, and that was the whole request.
+ *            - Root cause: identity came only from the live `self___` seat
+ *              marker, which exists only while you are actually sitting. Away
+ *              from a seat findHeroXid fell through to the "name:<username>"
+ *              pseudo-id, heroUnresolved() went true, and everything gated on
+ *              isHeroRecord vanished — the Trends tab was not rendered AT ALL,
+ *              your record showed Exploit instead of Leaks, and Settings' "Your
+ *              own stats" button sat disabled reading "(sit at a table first)".
+ *            - STORE.hero.xid now remembers what a seat once told us. Torn XIDs
+ *              are permanent, so that answer stays good. findHeroXid prefers a
+ *              live seat, falls back to the memory, and only then to the
+ *              pseudo-id. Cleared where the username changes (the one thing
+ *              that really means "different person"), PRESERVED through
+ *              resetHeroStats — that resets your stats, not who you are — and
+ *              ensureHeroShape refuses to load a stored pseudo-id back as
+ *              identity.
+ *            - This also hardens the SEATED case. `self___` is read out of
+ *              someone else's script and has never been confirmed on the PDA
+ *              layout; when it fails to match, the pseudo-id path silently
+ *              freezes P/L at zero for the whole session (see v0.20.0). A
+ *              remembered XID gives that case a correct answer too, and
+ *              resolves identity immediately at load rather than after the
+ *              seats render.
+ *            - Audited every `!heroUnresolved()` site, since "resolved" no
+ *              longer implies "seated": isHeroTurn and isHeroNextToAct both
+ *              still return false with hero absent from the ring (the turn cue
+ *              stays quiet), effectiveStackVs returns null, and P/L is
+ *              unaffected because attribution needs hero in dealtInXids.
+ *              Settings' status line now says which of the two it is rather
+ *              than claiming "matched to your seat" when there is no seat.
+ *            - 24 new assertions in test/hero-identity-memory.test.js, checked
+ *              against the pre-fix code first to confirm they actually fail.
  *
  * 1.26.0 - Four bugs found reviewing v1.25.0, three of them in the session and
  *          sizing code that shipped across v1.21.0-v1.22.0.
@@ -83,14 +122,6 @@
  *              tab you were reading, not a fresh Stats view.
  *            - 4 new assertions in test/panel.test.js.
  *
- * 1.24.0 - The Trends tab (v1.22.0) only showed 12 sessions in the table and
- *          20 on the charts, out of the 60 SESSION_HISTORY_MAX actually keeps
- *          — plenty of history was being tracked and never surfaced.
- *            - SESSION_TABLE_ROWS 12 -> 25, SESSION_TREND_POINTS 20 -> 30.
- *              Pure display limits, unrelated to SESSION_HISTORY_MAX (still
- *              60) — sparklineSvg plots via viewBox, not a fixed point count,
- *              so widening it costs nothing else.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -153,7 +184,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.26.0';
+  const HUD_VERSION = '1.27.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -708,6 +739,21 @@
     const h = hero && typeof hero === 'object' ? hero : {};
     const t = { hands: 0, netChips: 0, netBB: 0, bbHands: 0 };
     Object.keys(t).forEach((k) => { if (typeof h[k] !== 'number' || isNaN(h[k])) h[k] = t[k]; });
+    // Hero's own XID, remembered across page loads — NOT a number, so it is
+    // deliberately outside the numeric backfill above.
+    //
+    // Identity is normally read off the live `self___` seat marker, which only
+    // exists while you are actually sitting down. Away from a seat that lookup
+    // falls through to the "name:<username>" pseudo-id, heroUnresolved() goes
+    // true, and everything gated on isHeroRecord quietly disappears — the
+    // Trends tab is not rendered at all, your own record shows Exploit instead
+    // of Leaks, and Settings' "View my stats" returns early on a dead tap. So
+    // your own stats were unreachable exactly when you were not playing.
+    //
+    // Torn XIDs are permanent, so once a seat has told us who you are that
+    // answer stays good. Cleared wherever the configured username changes,
+    // since that is the one thing that means "different person".
+    if (typeof h.xid !== 'string' || !h.xid || h.xid.startsWith('name:')) h.xid = null;
     return h;
   }
 
@@ -902,7 +948,10 @@
     }
     const uname = (STORE.settings.heroName || '').trim();
     if (uname && STORE.players['name:' + uname]) delete STORE.players['name:' + uname];
-    STORE.hero = { hands: 0, netChips: 0, netBB: 0, bbHands: 0 };
+    // Identity is carried over, not reset: this clears your STATS, it does not
+    // make you a different player. Dropping it here would silently un-reach
+    // your own Stats and Trends until the next time you sat down at a table.
+    STORE.hero = { hands: 0, netChips: 0, netBB: 0, bbHands: 0, xid: STORE.hero && STORE.hero.xid };
     STORE.session.hands = 0;
     STORE.session.net = 0;
     STORE.session.vpip = 0;
@@ -1678,12 +1727,35 @@
       if (xid) {
         const name = seatDisplayName(seat);
         if (name) noteResolvedName(xid, name);
+        // A live seat is authoritative and overwrites the memory, not just
+        // seeds it. Note this only runs while identity is still unresolved
+        // (the 3s retry is gated on heroUnresolved), so a remembered value is
+        // corrected on the next page load rather than mid-session.
+        rememberHeroXid(xid);
         return xid;
       }
     }
+    // No seat: fall back to who a seat told us we were last time. This is what
+    // makes your own Stats and the Trends tab reachable while you are not
+    // sitting down (see ensureHeroShape). It is also a genuine hardening of the
+    // SEATED case — `self___` is read out of someone else's script and has
+    // never been confirmed on the PDA layout, and when it fails to match, the
+    // pseudo-id path silently freezes P/L at zero for the whole session.
+    if (STORE.hero && STORE.hero.xid) return STORE.hero.xid;
     const configured = (STORE.settings.heroName || '').trim();
     if (configured) return nameToXidGuess(configured);
     return null;
+  }
+
+  // Persist a seat-confirmed hero XID. Only ever called with a real seat xid —
+  // never a "name:" pseudo-id, which is the thing this exists to stop falling
+  // back to. ensureHeroShape rejects a stored pseudo-id for the same reason.
+  function rememberHeroXid(xid) {
+    if (!xid || String(xid).startsWith('name:')) return;
+    if (!STORE.hero || typeof STORE.hero !== 'object') return;
+    if (STORE.hero.xid === xid) return; // no write, no needless save
+    STORE.hero.xid = xid;
+    saveStore();
   }
 
   // Chip stack showing on a seat, in chips, or null if it can't be read.
@@ -8199,7 +8271,15 @@
       <button class="tph-open-players" style="width:100%;padding:9px;margin-bottom:10px">👥 View tracked players &amp; hand history</button>
       <label><b>Your Torn username:</b> <input type="text" class="tph-hero-name" value="${escapeHtml(STORE.settings.heroName)}" placeholder="required for P/L" style="width:55%"></label><br>
       <div style="opacity:.7;margin:2px 0 6px">Needed to attribute profit/loss and work out your position.</div>
-      ${heroProblem() ? `<div class="tph-warn">⚠ ${escapeHtml(heroProblem())}</div>` : '<div class="tph-ok">✓ Matched to your seat — profit/loss is being attributed.</div>'}
+      ${heroProblem() ? `<div class="tph-warn">⚠ ${escapeHtml(heroProblem())}</div>`
+        : (heroSeatEl()
+          ? '<div class="tph-ok">✓ Matched to your seat — profit/loss is being attributed.</div>'
+          // Identity came from STORE.hero.xid, not a seat on screen (see
+          // findHeroXid). Saying "matched to your seat" here would be a plain
+          // lie — there is no seat — and it matters which one it is: your own
+          // stats and Trends read fine either way, but nothing is being
+          // attributed while you are not actually in a hand.
+          : '<div class="tph-ok">✓ Remembered from a previous sitting — your own stats and Trends are readable here. Profit/loss resumes when you sit down.</div>')}
       <label>Min hands before rating: <input type="number" class="tph-min-hands" value="${STORE.settings.minHands}" style="width:60px"></label><br><br>
       ${bbDisplayModeSuspected ? '<div class="tph-warn">⚠ The blind level read from the log is too small to be a real Torn stake. '
         + 'Torn is probably set to show amounts in big blinds rather than cash — switch it back to cash, or P/L stays unrecorded '
@@ -8349,6 +8429,10 @@
     panel.querySelector('.tph-hero-name').addEventListener('change', (e) => {
       STORE.settings.heroName = e.target.value.trim();
       heroXid = null; // force re-resolution against the new name
+      // And forget the remembered XID — a different username is the one thing
+      // that genuinely means "a different person", so keeping it would resolve
+      // the new name straight back to the old account's record.
+      if (STORE.hero) STORE.hero.xid = null;
       saveStore();
     });
     panel.querySelector('.tph-min-hands').addEventListener('change', (e) => {
@@ -9302,6 +9386,8 @@
       HISTORY_PINNED_CEILING,
       nameToXidGuess,
       heroUnresolved,
+      findHeroXid,
+      rememberHeroXid,
       affiliationFlags,
       refreshSeatedAffiliations,
       // Exposed as accessors because STORE and heroXid are rebound, not
