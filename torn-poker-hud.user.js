@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.25.0
+// @version      1.26.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,47 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.26.0 - Four bugs found reviewing v1.25.0, three of them in the session and
+ *          sizing code that shipped across v1.21.0-v1.22.0.
+ *            - THE SIZING SAMPLE GATE COUNTED THE WRONG THING. v1.21.0 moved
+ *              the sizing median onto `betSizes` (a 40-bet rolling window) but
+ *              did not bump STORE_VERSION or add a migration, so
+ *              ensurePlayerShape backfilled it EMPTY on every existing record
+ *              while `betSizeCount` kept its full history. The gate still read
+ *              betSizeCount, so a player with 247 lifetime bets and an empty
+ *              window cleared BET_SIZE_MIN on their very next bet — one
+ *              320%-pot shove, surfaced as "Typically bets 320% of pot (median
+ *              of 248 bets) — oversized". Exactly what that gate exists to
+ *              stop, misfiring across the whole tracked pool. New
+ *              betSizeSample(p) is now what gates AND what is reported, so the
+ *              stated sample and the computed figure cannot describe different
+ *              things; betSizeCount stays as a separate lifetime tally.
+ *            - THE TRENDS TAB WAS ALWAYS ONE SESSION BEHIND. archiveSession
+ *              ran only from touchSession, which runs only on a settled hand,
+ *              so a session you simply stopped playing sat unarchived in
+ *              STORE.session — invisible to the chart until you sat back down
+ *              and played another hand. Split out maybeRollSession, now also
+ *              called when the tab renders, so the session you just finished
+ *              is there when you go looking for it.
+ *            - A REMEMBERED TAB COULD RENDER A BLANK PANEL. v1.25.0 made
+ *              openPlayerTab persist across reopens; Trends is hero-only, and
+ *              isSelf can flip false under a remembered 'trends' (editing the
+ *              username in Settings sets heroXid = null for the ~3s until the
+ *              watcher re-resolves it). The tab bar then omitted the chip and
+ *              every dispatch branch missed, leaving the body silently empty.
+ *              renderPlayerPanel normalises the tab before the scrollKey is
+ *              built from it.
+ *            - A SESSION WITH NO READABLE BLIND CHARTED AS BREAK-EVEN. In
+ *              Torn's BB-display mode plausibleBB refuses every blind, so
+ *              session.bb stays 0 and archiveSession stored netBB 0 — plotting
+ *              a big winning or losing session as an exact flat point. Stores
+ *              null now; sessionNetBB treats a legacy stored 0 as unknown too
+ *              (no migration needed), the two bb charts skip those sessions
+ *              rather than zeroing them, and the legend says how many and why.
+ *              Same withhold-don't-guess rule fmtBB100 and bbHands follow.
+ *            - 36 new assertions in test/review-fixes.test.js, each checked
+ *              against the pre-fix code first to confirm it actually fails.
  *
  * 1.25.0 - Closing the player panel to act (fold/call/raise) and reopening it
  *          a few seconds later always dumped you back at the top of whatever
@@ -49,31 +90,6 @@
  *              Pure display limits, unrelated to SESSION_HISTORY_MAX (still
  *              60) — sparklineSvg plots via viewBox, not a fixed point count,
  *              so widening it costs nothing else.
- *
- * 1.23.0 - Maniac was silently absorbing most of LAG and Station's population.
- *          Reported directly: most tracked players read as Maniac or
- *          Balanced, almost never Station or LAG, regardless of what the
- *          pool actually looked like.
- *            - The Maniac rule tested ONLY `afq > 60 && vpip > loose`, with no
- *              PFR/VPIP shape at all — so it fired for ANY loose player with
- *              high postflop aggression, including a loose-PASSIVE one (a
- *              Station who bets big the one time they wake up) as well as a
- *              loose-aggressive one (an actual LAG). Checked first in
- *              ARCHETYPE_RULES, it caught both before LAG or Station were
- *              ever evaluated. The thresholds ARE pool-relative (A.tight/
- *              A.loose are multiples of POOL_AVG.vpip, by design), so this
- *              was not a stale-pool-average problem — it reproduces on any
- *              pool, because it's a rule-ordering/shape problem.
- *            - Fixed by giving Maniac the SAME loose+aggressive-preflop shape
- *              LAG already tests (`vpip > loose && pfr/vpip >= aggRatio`),
- *              with `afq > 60` as the one extra condition that promotes a LAG
- *              into a Maniac — the same "shared shape, split by one more
- *              condition, more specific checked first" pattern Nit/TAG
- *              already used. A loose-passive player can no longer reach
- *              Maniac at all, whatever their postflop AFq is.
- *            - 4 new assertions in test/archetype.test.js, including the
- *              regression case directly: loose + passive + AFq 80% now
- *              classifies Station, not Maniac.
  *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
@@ -137,7 +153,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.25.0';
+  const HUD_VERSION = '1.26.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -2309,6 +2325,23 @@
   // into a hand-by-hand log.
   const BET_SIZE_HISTORY_MAX = 40;
 
+  // The sample the sizing median is ACTUALLY drawn from — betSizes, never
+  // betSizeCount. Those two diverge for every record written before v1.21.0:
+  // betSizes was added without a STORE_VERSION bump or a migration, so
+  // ensurePlayerShape backfills it EMPTY while betSizeCount keeps its full
+  // historical value. Gating on the lifetime count there let a single new bet
+  // straight through BET_SIZE_MIN and then reported it as "median of 247
+  // bets" — precisely the "one 300%-pot shove is not a sizing habit" case
+  // that gate exists to stop, misfiring across the whole tracked pool for
+  // each player's first BET_SIZE_MIN bets after the upgrade.
+  //
+  // So: gate on this, and report this, so the stated sample and the computed
+  // figure can never describe different things again. betSizeCount survives
+  // as the lifetime tally, shown separately where the distinction is useful.
+  function betSizeSample(p) {
+    return p && Array.isArray(p.betSizes) ? p.betSizes.length : 0;
+  }
+
   // Same idea for the draw/made sizing split and the trap rate, but lower:
   // both are drawn from showdowns alone, which are inherently rarer than bets
   // in general (BET_SIZE_MIN's sample), so gating at the same figure would
@@ -3853,7 +3886,29 @@
   // STORE.sessionHistory. Hero-only — see the isSelf gate in
   // renderPlayerPanelBody — a "session" is hero's own sitting, not a concept
   // that applies to any other tracked player.
+  // A session's bb result, or null when it doesn't have one. Two cases land
+  // here and both must read as UNKNOWN rather than as break-even: a session
+  // archived after this was fixed stores netBB null, and one archived before
+  // it stores 0, which is indistinguishable from a genuine flat session. The
+  // bb > 0 test catches both without needing a migration — a session whose
+  // blind was never readable is exactly the one with no stake recorded.
+  //
+  // The rest of this file already refuses to quote a bb figure it can't stand
+  // behind (fmtBB100 withholds under 50 hands; hands with no readable blind
+  // are kept out of bbHands so they can't distort the rate). Plotting a big
+  // winning session as 0.0 bb because Torn was in BB-display mode would be
+  // the opposite of that.
+  function sessionNetBB(se) {
+    return se && se.bb > 0 && se.netBB != null && !isNaN(se.netBB) ? se.netBB : null;
+  }
+
   function buildSessionTrendsHtml() {
+    // A session that has already ended is archived on the next SETTLED hand,
+    // which never comes if you simply stopped playing — so close the gap here
+    // too, or the tab silently omits the session you most want to see. See
+    // maybeRollSession.
+    if (maybeRollSession()) saveStore();
+
     const hist = Array.isArray(STORE.sessionHistory) ? STORE.sessionHistory : [];
     if (!hist.length) {
       return `<i>No completed sessions yet. A session ends after a `
@@ -3864,13 +3919,18 @@
     // order, the table wants newest-first, same convention as the hand
     // history tab (newest at the top).
     const plotted = hist.slice(-SESSION_TREND_POINTS);
-    const winRates = plotted.map((se) => (se.hands ? (100 * se.netBB) / se.hands : 0));
     const vpips = plotted.map((se) => (se.hands ? (100 * se.vpip) / se.hands : 0));
     const afqs = plotted.map((se) => {
       const total = se.aggActions + se.passActions;
       return total ? (100 * se.aggActions) / total : 0;
     });
-    const pls = plotted.map((se) => se.netBB);
+    // Only sessions with a real blind can carry a bb figure at all, so the two
+    // signed charts plot that subset. VPIP/AFq are blind-independent and keep
+    // every session — the rows are separate charts, not a shared axis.
+    const bbSessions = plotted.filter((se) => sessionNetBB(se) != null);
+    const winRates = bbSessions.map((se) => (se.hands ? (100 * sessionNetBB(se)) / se.hands : 0));
+    const pls = bbSessions.map((se) => sessionNetBB(se));
+    const bbSkipped = plotted.length - bbSessions.length;
 
     // Signed metrics get their own range, padded 10%, so the line actually
     // uses the chart height instead of sitting flat against a fixed 0-100
@@ -3884,10 +3944,14 @@
 
     const chartRow = (label, values, opts) => {
       const svg = sparklineSvg(values, Object.assign({ width: 150, height: 26 }, opts));
-      const last = values[values.length - 1];
+      // values can be EMPTY, not just short: the two bb charts drop sessions
+      // with no readable blind, and every session in the window can be one.
+      // An unguarded values[values.length - 1].toFixed here is a TypeError
+      // that takes the whole tab down.
+      const last = values.length ? values[values.length - 1] : null;
       return `<div class="tph-trend-row"><span class="tph-trend-l">${escapeHtml(label)}</span>`
         + `<span class="tph-trend-chart">${svg || '<i>not enough sessions yet</i>'}</span>`
-        + `<span class="tph-trend-last">${last.toFixed(1)}</span></div>`;
+        + `<span class="tph-trend-last">${last == null ? '—' : last.toFixed(1)}</span></div>`;
     };
 
     const charts = chartRow('Win rate, bb/100', winRates, Object.assign({ color: '#8ec5f0', zeroLine: true }, signedRange(winRates)))
@@ -3902,7 +3966,7 @@
       const pfrPct = se.hands ? fmtPct((100 * se.pfr) / se.hands) : '—';
       return `<tr><td>${escapeHtml(when)}</td><td>${se.hands}</td><td>${escapeHtml(stakeName)}</td>`
         + `<td style="color:${se.netChips >= 0 ? '#7ed957' : '#ff6b6b'} !important">${fmtSignedMoney(se.netChips)}</td>`
-        + `<td>${fmtBB(se.netBB)}</td><td>${vpipPct}/${pfrPct}</td></tr>`;
+        + `<td>${fmtBB(sessionNetBB(se))}</td><td>${vpipPct}/${pfrPct}</td></tr>`;
     }).join('');
 
     return `<div class="tph-trend-charts">${charts}</div>`
@@ -3912,6 +3976,9 @@
       + `<div class="tph-stat-legend">One row per completed session — a session ends after a `
       + `${(SESSION_GAP_MS / 3600000).toFixed(0)}h gap in play. Charts plot the most recent `
       + `${Math.min(SESSION_TREND_POINTS, hist.length)} of ${hist.length} sessions, oldest to newest, left to right. `
+      + (bbSkipped ? `${bbSkipped} session${bbSkipped === 1 ? '' : 's'} had no readable blind, so `
+        + `${bbSkipped === 1 ? 'it is' : 'they are'} left out of the two bb charts and show "—" in the bb `
+        + `column — the chip figure is still exact. ` : '')
       + `Win rate and aggression are estimates over a single session's sample — read the trend across `
       + `several sessions, not any one point.</div>`;
   }
@@ -5320,7 +5387,12 @@
       netChips: s.net,
       // bb is "last stake seen this session" (see emptyStore's comment on
       // session.bb) — an estimate, same caveat as plBBEst elsewhere.
-      netBB: s.bb > 0 ? s.net / s.bb : 0,
+      //
+      // null, NOT 0, when no blind was ever readable (Torn's BB-display mode
+      // makes plausibleBB refuse every one). 0 would chart a big winning or
+      // losing session as an exact break-even point. Readers go through
+      // sessionNetBB, which also treats a legacy stored 0 as unknown.
+      netBB: s.bb > 0 ? s.net / s.bb : null,
       vpip: s.vpip || 0,
       pfr: s.pfr || 0,
       aggActions: s.aggActions || 0,
@@ -5330,11 +5402,34 @@
     if (STORE.sessionHistory.length > SESSION_HISTORY_MAX) STORE.sessionHistory.shift();
   }
 
+  // Archive and clear the live session if its gap has ALREADY elapsed, and say
+  // whether it did. Split out of touchSession because touchSession only runs
+  // from applyHandResults — i.e. on a settled hand — which is too late for
+  // anything that only reads: stop playing for the night and the session you
+  // just finished sits unarchived in STORE.session, invisible to the Trends
+  // tab, until you sit back down and play one more hand. The chart was
+  // therefore permanently at least one session behind, and the missing one is
+  // the session you are most likely looking for.
+  //
+  // Clearing startedAt (rather than restarting the session here) is what keeps
+  // this safe to call from a render path: it leaves the store in the same
+  // "no session open" state a fresh store has, and the next touchSession
+  // starts one normally.
+  function maybeRollSession() {
+    const s = STORE.session;
+    if (!s.startedAt || !s.lastHandAt) return false;
+    if (Date.now() - s.lastHandAt <= SESSION_GAP_MS) return false;
+    archiveSession(s);
+    s.startedAt = 0; s.lastHandAt = 0; s.hands = 0; s.net = 0;
+    s.vpip = 0; s.pfr = 0; s.aggActions = 0; s.passActions = 0; s.bb = 0;
+    return true;
+  }
+
   function touchSession(deltaChips, countHand) {
     const s = STORE.session;
     const now = Date.now();
-    if (!s.startedAt || (s.lastHandAt && now - s.lastHandAt > SESSION_GAP_MS)) {
-      archiveSession(s);
+    maybeRollSession();
+    if (!s.startedAt) {
       s.startedAt = now; s.hands = 0; s.net = 0;
       s.vpip = 0; s.pfr = 0; s.aggActions = 0; s.passActions = 0; s.bb = 0;
     }
@@ -5755,20 +5850,21 @@
     }
 
     // --- Sizing tells --------------------------------------------------------
-    if (r.medianBetPct != null && p.betSizeCount >= BET_SIZE_MIN) {
+    const szN = betSizeSample(p);
+    if (r.medianBetPct != null && szN >= BET_SIZE_MIN) {
       if (r.medianBetPct > 85) {
         add(45, 'Sizing',
-          `Typically bets ${r.medianBetPct.toFixed(0)}% of pot (median of ${p.betSizeCount} bets) — `
+          `Typically bets ${r.medianBetPct.toFixed(0)}% of pot (median of ${szN} bets) — `
             + 'oversized. At this pool that usually means value, not a bluff.',
-          `You typically bet ${r.medianBetPct.toFixed(0)}% of pot (median of ${p.betSizeCount} bets) — oversized. `
+          `You typically bet ${r.medianBetPct.toFixed(0)}% of pot (median of ${szN} bets) — oversized. `
             + 'Observant opponents will read your big bets as value and fold correctly, costing you thin '
             + 'value and making your bluffs too expensive to profitably fire.',
           'big bet = value', 'size down', ['facing']);
       } else if (r.medianBetPct < 40) {
         add(45, 'Sizing',
-          `Typically bets only ${r.medianBetPct.toFixed(0)}% of pot (median of ${p.betSizeCount} bets) — `
+          `Typically bets only ${r.medianBetPct.toFixed(0)}% of pot (median of ${szN} bets) — `
             + 'small sizing. Raise their weak bets; they are pricing you in.',
-          `You typically bet only ${r.medianBetPct.toFixed(0)}% of pot (median of ${p.betSizeCount} bets) — undersized. `
+          `You typically bet only ${r.medianBetPct.toFixed(0)}% of pot (median of ${szN} bets) — undersized. `
             + "You're pricing opponents in to call with worse hands and leaving value behind when you're "
             + 'ahead. Size up.',
           'raise their small bets', 'size up', ['facing']);
@@ -6207,7 +6303,7 @@
     const show = sec('Sizing & showdown');
     if (r.medianBetPct != null) {
       const sz = r.medianBetPct;
-      add(show, `Typically bets ${sz.toFixed(0)}% of pot (median of ${p.betSizeCount} sized bets).`,
+      add(show, `Typically bets ${sz.toFixed(0)}% of pot (median of ${betSizeSample(p)} sized bets).`,
         sz > 85 ? 'Oversized — usually polarised to strong hands or bluffs.'
           : sz < 45 ? 'Consistently small — float and take it away on a later street.' : null);
     }
@@ -7508,6 +7604,17 @@
     // Hero's own panel gets the self-facing "Leaks" voice instead of "Exploit"
     // — see buildExploitHtml/buildLeakPlan.
     const isSelf = p ? isHeroRecord(openPlayerXid) : false;
+    // Trends is the one tab that isn't always available, and openPlayerTab now
+    // PERSISTS across reopens of the same player (v1.25.0). Those two combine
+    // badly: isSelf can flip to false under a remembered 'trends' — editing
+    // the username in Settings sets heroXid = null to force re-resolution, and
+    // isHeroRecord answers false for the ~3s until the watcher re-resolves it.
+    // The tab bar would then omit the Trends chip AND every branch of
+    // renderPlayerPanelBody's dispatch would miss, leaving the body silently
+    // empty: a panel with a header, no active tab and no content, no error.
+    // Normalising here (before the scrollKey is built from it) is what keeps
+    // the selected tab and the rendered tab from ever disagreeing.
+    if (openPlayerTab === 'trends' && !isSelf) openPlayerTab = 'stats';
     renderPanel({
       marker: 'tph-player-panel',
       open: !!openPlayerXid,
@@ -7549,6 +7656,12 @@
 
     const body = panel.querySelector('.tph-tab-body');
     if (openPlayerTab === 'stats') {
+      // Sample behind the sizing median, and the lifetime tally, kept apart:
+      // they differ for any record predating v1.21.0 (see betSizeSample), and
+      // printing the lifetime figure next to a median drawn from the window
+      // is what made "— of pot · 247 bets" possible.
+      const szN = betSizeSample(p);
+      const szLifetime = p.betSizeCount || 0;
       body.innerHTML = `
         <table class="tph-stats">
           ${(() => {
@@ -7603,7 +7716,7 @@
           <tr title="Median bet or raise as a percentage of the pot as it stood BEFORE that bet, over the most recent bets (see legend). 100% is a pot-sized bet. Every bet and raise on every street counts, so it is a sizing habit, not a street-specific one. A median, not an average, so one huge all-in shove does not drag the whole figure with it.">
             <td class="tph-stat-l">Bet size</td>
             <td class="tph-stat-v"><b>${r.medianBetPct != null ? r.medianBetPct.toFixed(0) + '%' : '—'}</b></td>
-            <td class="tph-stat-n"><span class="tph-stat-norm">of pot${p.betSizeCount ? ` · ${p.betSizeCount} bet${p.betSizeCount === 1 ? '' : 's'}` : ''}${p.betSizeCount && p.betSizeCount < BET_SIZE_MIN ? ', low' : ''}</span></td>
+            <td class="tph-stat-n"><span class="tph-stat-norm">of pot${szN ? ` · ${szN} bet${szN === 1 ? '' : 's'}` : ''}${szN && szN < BET_SIZE_MIN ? ', low' : ''}${szLifetime > szN ? ` · ${szLifetime} lifetime` : ''}</span></td>
           </tr>
           <tr title="Average bet/raise as % of pot, split by what they actually had at showdown: DRAW = no made hand yet but a four-flush or an open/gutshot straight draw on the board; MADE = two pair or better already. Flop and turn only for draw — no draw left to hold on the river. From showdowns only, a floor on their range, same caveat as the Range tab.">
             <td class="tph-stat-l">Size: draw/made</td>
@@ -9084,8 +9197,11 @@
       BET_SIZE_MIN,
       BET_SIZE_HISTORY_MAX,
       median,
+      betSizeSample,
       noteBetSizing,
       touchSession,
+      maybeRollSession,
+      sessionNetBB,
       archiveSession,
       ensureSessionShape,
       SESSION_GAP_MS,

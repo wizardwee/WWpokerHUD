@@ -9,6 +9,76 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.26.0
+
+Four bugs found reviewing v1.25.0 — three of them in the session and sizing
+code that shipped across v1.21.0–v1.22.0, one introduced by v1.25.0 itself.
+
+### The bet-sizing sample gate counted the wrong thing
+
+v1.21.0 moved the sizing tell onto a median of `betSizes`, a 40-bet rolling
+window, but did not bump `STORE_VERSION` or add a migration block. So
+`ensurePlayerShape` backfilled `betSizes: []` on every record that already
+existed, while `betSizeCount` kept its full historical value — and the gate
+was still reading `betSizeCount`.
+
+A tracked opponent with 247 lifetime bets and an empty window therefore
+cleared `BET_SIZE_MIN` on their very next bet. One 320%-of-pot all-in shove
+surfaced as *"Typically bets 320% of pot (median of 248 bets) — oversized. At
+this pool that usually means value, not a bluff."* That is precisely the case
+`BET_SIZE_MIN`'s own comment describes ("One 300%-pot shove is not a sizing
+habit"), and with 173+ tracked opponents it was misfiring across the entire
+pool for each player's first twelve bets after the upgrade.
+
+New `betSizeSample(p)` returns the length of the window the median is actually
+drawn from, and is now both what gates the read and what the read reports — so
+the stated sample and the computed figure can no longer describe different
+things. `betSizeCount` survives as the lifetime tally, shown separately on the
+Stats tab where the distinction is informative rather than misleading.
+
+### The Trends tab was always one session behind
+
+`archiveSession` was reachable only from `touchSession`'s rollover branch, and
+`touchSession` runs only from `applyHandResults` — on a settled hand. A session
+you simply stopped playing was never archived at the gap boundary; it sat live
+in `STORE.session`, invisible to the chart, until you sat back down and played
+one more hand.
+
+So: play tonight, open Trends tomorrow morning, and last night is missing —
+while the legend claims "One row per completed session". The rollover is now
+`maybeRollSession`, called from `touchSession` as before and also when the
+Trends tab renders, so the session you most want to see is there when you look.
+
+### A remembered tab could render a blank panel
+
+v1.25.0 made `openPlayerTab` persist across reopens of the same player. Trends
+is the one tab that isn't always available, and `isSelf` can flip to false
+underneath a remembered `'trends'`: editing the username in Settings sets
+`heroXid = null` to force re-resolution, and `isHeroRecord` answers false for
+the ~3s until the watcher re-resolves it.
+
+The tab bar then omitted the Trends chip *and* every branch of the dispatch
+missed, leaving `.tph-tab-body` never written — a panel with a header, no
+active tab, and no content, with no error. `renderPlayerPanel` now normalises
+the tab before the `scrollKey` is built from it, so the selected tab and the
+rendered tab cannot disagree.
+
+### A session with no readable blind charted as break-even
+
+In Torn's BB-display mode `plausibleBB` refuses every blind, so `session.bb`
+stays 0 for the whole session and `archiveSession` stored `netBB: 0` — which
+the charts plotted as a genuine zero, making a big winning or losing session
+an exact flat point and dragging the trend line toward it.
+
+It stores `null` now. `sessionNetBB` treats a legacy stored 0 with no recorded
+stake as unknown as well, so no migration is needed; the two bb charts plot
+only the sessions that have a real figure, and the legend says how many were
+left out and why. The chip P/L is unaffected and still exact. This is the same
+withhold-rather-than-guess rule `fmtBB100` and `bbHands` already follow.
+
+36 new assertions in `test/review-fixes.test.js`, each one checked against the
+pre-fix code first to confirm it genuinely fails there.
+
 ## 1.25.0
 
 The player panel forgot where you were every time you had to close it.
