@@ -9,6 +9,52 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.28.1
+
+The By-board-texture rows printed over the stat labels to their left.
+
+Reported live from a Galaxy Fold cover screen — a genuinely narrow one, which
+is where this class of bug surfaces first.
+
+### Structural, not cosmetic
+
+`.tph-stats` is `table-layout: fixed`, and `.tph-stat-v` is pinned to **26%**
+with **`white-space: nowrap`**. Both are deliberate, and the comment above them
+says why: fixed widths stop a long label forcing the table past 100%, and the
+value column carries numbers that must not break onto a second line.
+
+v1.28.0 then put *four* figures in that cell — `30% / 45% · 60% / 52%` — where
+every other row puts one. With nowrap it could not wrap and with a fixed 26% it
+could not grow, so it spilled straight out of its column onto the label beside
+it.
+
+It also ignored this file's own convention. `statRow` already puts the greyed
+pool reference in the 44% **note** column, not the value column; the new rows
+should have followed that from the start. They do now: the villain's own
+`30%/60%` in the value cell, `pool 45%/52% · 12L/9F` in the note cell. Slashes
+lost their surrounding spaces for the same reason the seat badge sheds
+punctuation — the separator already delimits.
+
+### A modifier for note cells that carry a phrase
+
+New `.tph-stat-wrap` unsets the inherited nowrap for a note cell holding a short
+phrase rather than a single figure. Declared **after** `.tph-stat-n` so the
+`white-space` override wins on equal specificity; the colour still comes from
+`.tph-stat-n`, per the standing rule that every `tph-` element holding text
+declares its own.
+
+### The other rows were measured, not assumed
+
+Rather than fixing only the row that was reported, all of them were measured
+against the real column width (~108px for the note column on a ~245px panel).
+That turned up a **worse** offender that had not been reported yet: the Bet size
+note gained `· N lifetime` in v1.26.0, taking it to ~31 characters (~167px) in
+that ~108px column. Same fix applied there.
+
+7 new assertions in `test/board-texture.test.js` pin the column split and the
+modifier's declaration order, so a future edit can't quietly put the pool figure
+back into the fixed-width cell.
+
 ## 1.28.0
 
 Board texture: how a villain plays a four-flush, three-flush, paired,

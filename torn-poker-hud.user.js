@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.28.0
+// @version      1.28.1
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,31 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.28.1 - The By-board-texture rows printed over the stat labels to their
+ *          left. Reported from a Galaxy Fold cover screen — a genuinely narrow
+ *          one, which is where this class of bug shows up first.
+ *            - Structural, not cosmetic. .tph-stats is table-layout: fixed and
+ *              .tph-stat-v is pinned to 26% AND white-space: nowrap (both
+ *              deliberate — see the comment there). v1.28.0 put FOUR figures in
+ *              that cell ("30% / 45% · 60% / 52%") where every other row puts
+ *              one, so it could not wrap and spilled straight out of its fixed
+ *              column onto the label beside it.
+ *            - It also ignored this file's own convention: statRow already
+ *              puts the greyed pool reference in the 44% NOTE column, not the
+ *              value column. Now it does the same — villain's own "30%/60%" in
+ *              the value cell, "pool 45%/52% · 12L/9F" in the note cell.
+ *            - New .tph-stat-wrap modifier lets a note cell carrying a PHRASE
+ *              (rather than one figure) wrap instead of overflow. Declared
+ *              after .tph-stat-n so the white-space override wins on equal
+ *              specificity; the colour still comes from .tph-stat-n, per the
+ *              rule that every tph- element holding text declares its own.
+ *            - Measured the other rows rather than fixing only the reported
+ *              one, and found a WORSE offender: the Bet size note gained
+ *              "· N lifetime" in v1.26.0, making it ~31 characters (~167px) in
+ *              a ~108px column. Same fix applied there before it was reported.
+ *            - 7 new assertions in test/board-texture.test.js pinning the
+ *              column split and the modifier's declaration order.
  *
  * 1.28.0 - Board texture: how a villain plays a four-flush, three-flush,
  *          paired, four-straight or dry board. Asked for directly — "villain's
@@ -103,47 +128,6 @@
  *            - 24 new assertions in test/hero-identity-memory.test.js, checked
  *              against the pre-fix code first to confirm they actually fail.
  *
- * 1.26.0 - Four bugs found reviewing v1.25.0, three of them in the session and
- *          sizing code that shipped across v1.21.0-v1.22.0.
- *            - THE SIZING SAMPLE GATE COUNTED THE WRONG THING. v1.21.0 moved
- *              the sizing median onto `betSizes` (a 40-bet rolling window) but
- *              did not bump STORE_VERSION or add a migration, so
- *              ensurePlayerShape backfilled it EMPTY on every existing record
- *              while `betSizeCount` kept its full history. The gate still read
- *              betSizeCount, so a player with 247 lifetime bets and an empty
- *              window cleared BET_SIZE_MIN on their very next bet — one
- *              320%-pot shove, surfaced as "Typically bets 320% of pot (median
- *              of 248 bets) — oversized". Exactly what that gate exists to
- *              stop, misfiring across the whole tracked pool. New
- *              betSizeSample(p) is now what gates AND what is reported, so the
- *              stated sample and the computed figure cannot describe different
- *              things; betSizeCount stays as a separate lifetime tally.
- *            - THE TRENDS TAB WAS ALWAYS ONE SESSION BEHIND. archiveSession
- *              ran only from touchSession, which runs only on a settled hand,
- *              so a session you simply stopped playing sat unarchived in
- *              STORE.session — invisible to the chart until you sat back down
- *              and played another hand. Split out maybeRollSession, now also
- *              called when the tab renders, so the session you just finished
- *              is there when you go looking for it.
- *            - A REMEMBERED TAB COULD RENDER A BLANK PANEL. v1.25.0 made
- *              openPlayerTab persist across reopens; Trends is hero-only, and
- *              isSelf can flip false under a remembered 'trends' (editing the
- *              username in Settings sets heroXid = null for the ~3s until the
- *              watcher re-resolves it). The tab bar then omitted the chip and
- *              every dispatch branch missed, leaving the body silently empty.
- *              renderPlayerPanel normalises the tab before the scrollKey is
- *              built from it.
- *            - A SESSION WITH NO READABLE BLIND CHARTED AS BREAK-EVEN. In
- *              Torn's BB-display mode plausibleBB refuses every blind, so
- *              session.bb stays 0 and archiveSession stored netBB 0 — plotting
- *              a big winning or losing session as an exact flat point. Stores
- *              null now; sessionNetBB treats a legacy stored 0 as unknown too
- *              (no migration needed), the two bb charts skip those sessions
- *              rather than zeroing them, and the legend says how many and why.
- *              Same withhold-don't-guess rule fmtBB100 and bbHands follow.
- *            - 36 new assertions in test/review-fixes.test.js, each checked
- *              against the pre-fix code first to confirm it actually fails.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -206,7 +190,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.28.0';
+  const HUD_VERSION = '1.28.1';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -6846,6 +6830,13 @@
        (No backticks in this block: the whole stylesheet is a template literal.) */
     .tph-stat-v { width: 26%; white-space: nowrap; color: #f2f4f6 !important; }
     .tph-stat-n { width: 44%; white-space: nowrap; font-size: 11px; color: #aeb6bd !important; }
+    /* Modifier for a note cell carrying a short PHRASE rather than one figure.
+       The board-texture rows pair a pool reference with two sample counts, and
+       that will not fit on one line of a narrow phone (reported from a Fold
+       cover screen) — with the inherited nowrap it spilled out of its fixed
+       column and over the label. Declared after .tph-stat-n so the white-space
+       override wins on equal specificity; the colour still comes from there. */
+    .tph-stat-wrap { white-space: normal !important; }
     /* The recent-form figure, shown beside the lifetime one. Declares its own
        colour so it does NOT pick up the .tph-dev-* deviation shading on the
        parent cell — that shading is computed from the lifetime figure, and
@@ -8066,7 +8057,7 @@
           <tr title="Median bet or raise as a percentage of the pot as it stood BEFORE that bet, over the most recent bets (see legend). 100% is a pot-sized bet. Every bet and raise on every street counts, so it is a sizing habit, not a street-specific one. A median, not an average, so one huge all-in shove does not drag the whole figure with it.">
             <td class="tph-stat-l">Bet size</td>
             <td class="tph-stat-v"><b>${r.medianBetPct != null ? r.medianBetPct.toFixed(0) + '%' : '—'}</b></td>
-            <td class="tph-stat-n"><span class="tph-stat-norm">of pot${szN ? ` · ${szN} bet${szN === 1 ? '' : 's'}` : ''}${szN && szN < BET_SIZE_MIN ? ', low' : ''}${szLifetime > szN ? ` · ${szLifetime} lifetime` : ''}</span></td>
+            <td class="tph-stat-n tph-stat-wrap"><span class="tph-stat-norm">of pot${szN ? ` · ${szN} bet${szN === 1 ? '' : 's'}` : ''}${szN && szN < BET_SIZE_MIN ? ', low' : ''}${szLifetime > szN ? ` · ${szLifetime} lifetime` : ''}</span></td>
           </tr>
           <tr title="Average bet/raise as % of pot, split by what they actually had at showdown: DRAW = no made hand yet but a four-flush or an open/gutshot straight draw on the board; MADE = two pair or better already. Flop and turn only for draw — no draw left to hold on the river. From showdowns only, a floor on their range, same caveat as the Range tab.">
             <td class="tph-stat-l">Size: draw/made</td>
@@ -8098,30 +8089,40 @@
             // else does there. The pool column is what this HUD has MEASURED,
             // not a published reference like POOL_AVG's tick marks.
             const pool = poolBoardTexture();
+            // Villain's own two figures in the value column, the pool
+            // reference in the NOTE column — the same split statRow already
+            // uses for every other stat, and the reason this needed fixing:
+            // four figures crammed into the 26%-wide nowrap value cell
+            // overflowed it and printed over the label column on a narrow
+            // screen. Slashes carry no spaces for the same reason the badge
+            // sheds them: the separator already delimits.
             const rows = BOARD_FLAGS.map((flag) => {
               const cell = (p.boardTex || {})[flag.key];
               const br = boardTexRates(cell);
               if (!br.leadN && !br.facedN) return '';
               const pr = boardTexRates(pool[flag.key]);
-              const thin = (n) => (n < BOARD_TEX_MIN ? ' style="opacity:.55"' : '');
-              const cmp = (mine, theirs) => (mine == null ? '—'
-                : fmtPct(mine) + (theirs == null ? '' : ` <span class="tph-stat-norm">/ ${fmtPct(theirs)}</span>`));
-              return `<tr title="${escapeHtml(flag.hint)}. Lead = bets when nobody has bet yet. `
-                + `Fold = folds when bet into. The second, greyed figure is this HUD's own pool average `
-                + `for the same texture. Dimmed rows are under ${BOARD_TEX_MIN} observations.">`
-                + `<td class="tph-stat-l"${thin(Math.max(br.leadN, br.facedN))}>${escapeHtml(flag.label)}</td>`
-                + `<td class="tph-stat-v"${thin(Math.max(br.leadN, br.facedN))}>`
-                + `${cmp(br.lead, pr.lead)} · ${cmp(br.foldToBet, pr.foldToBet)}</td>`
-                + `<td class="tph-stat-n"><span class="tph-stat-norm">${br.leadN}L/${br.facedN}F</span></td></tr>`;
+              const dim = Math.max(br.leadN, br.facedN) < BOARD_TEX_MIN ? ' style="opacity:.55"' : '';
+              const one = (v) => (v == null ? '—' : v.toFixed(0) + '%');
+              const poolTxt = (pr.lead == null && pr.foldToBet == null) ? ''
+                : `pool ${one(pr.lead)}/${one(pr.foldToBet)} · `;
+              return `<tr title="${escapeHtml(flag.hint)}. Lead = how often they bet when nobody has bet `
+                + `yet. Fold = how often they fold when someone bets at them. 'pool' is this HUD's own `
+                + `measured average for the same texture. L and F are the two sample counts. Dimmed rows `
+                + `are under ${BOARD_TEX_MIN} observations.">`
+                + `<td class="tph-stat-l"${dim}>${escapeHtml(flag.label)}</td>`
+                + `<td class="tph-stat-v"${dim}>${one(br.lead)}/${one(br.foldToBet)}</td>`
+                + `<td class="tph-stat-n tph-stat-wrap"><span class="tph-stat-norm">`
+                + `${poolTxt}${br.leadN}L/${br.facedN}F</span></td></tr>`;
             }).filter(Boolean).join('');
             if (!rows) return '';
-            return '<tr class="tph-stat-head"><td colspan="3"><b>By board texture</b> — lead / fold-to-bet, vs pool</td></tr>'
+            return '<tr class="tph-stat-head"><td colspan="3"><b>By board texture</b> — lead/fold</td></tr>'
               + rows
-              + `<tr><td colspan="3" class="tph-stat-legend">Lead = how often they bet when nobody has bet into them yet; `
-              + `fold = how often they fold when someone does. Two different situations, so two different denominators `
-              + `(<b>L</b> and <b>F</b> counts). Flags overlap — a paired four-flush board counts toward both — so these `
-              + `rows are not a breakdown and will not sum. Dimmed = under ${BOARD_TEX_MIN} observations, shown but not `
-              + `worth acting on. The greyed second figure is this HUD's own measured pool average, not a published one.</td></tr>`;
+              + `<tr><td colspan="3" class="tph-stat-legend"><b>Lead</b> = how often they bet when nobody has bet into `
+              + `them yet. <b>Fold</b> = how often they fold when someone does. Two different situations, so two `
+              + `different denominators — the <b>L</b> and <b>F</b> counts beside each row. Flags overlap: a paired `
+              + `four-flush board counts toward both, so these rows are not a breakdown and will not sum. `
+              + `Dimmed = under ${BOARD_TEX_MIN} observations, shown but not worth acting on. `
+              + `<i>pool</i> is this HUD's own measured average for that texture, not a published reference.</td></tr>`;
           })()}
           ${stackBarHtml(p)}
           ${(() => {

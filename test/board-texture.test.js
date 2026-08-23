@@ -264,4 +264,44 @@ const B = (...xs) => xs.map(C);
   t.ok('while the hero-dependent tokens are correctly absent', !ctx.has('facing'));
 }
 
+
+
+// --- Narrow-screen layout ---------------------------------------------------
+//
+// Reported from a Galaxy Fold cover screen: the pool figures overlapped the
+// stat labels to their left. Root cause was structural, not cosmetic — the
+// Stats table is `table-layout: fixed` with .tph-stat-v pinned to 26% AND
+// `white-space: nowrap`, so four figures crammed into that one cell could not
+// wrap and spilled straight out of the column. Every other row puts a single
+// figure there and the pool reference in the 44% note column (see statRow);
+// this row now follows that same split.
+
+{
+  const css = T.CSS;
+  t.ok('the value column is still fixed-width and nowrap (the constraint this must respect)',
+    /\.tph-stat-v\s*\{[^}]*white-space:\s*nowrap/.test(css));
+  t.ok('a wrap modifier exists for note cells carrying a phrase',
+    /\.tph-stat-wrap\s*\{[^}]*white-space:\s*normal/.test(css));
+  // Declared AFTER .tph-stat-n, or the override loses on equal specificity.
+  t.ok('the wrap modifier is declared after .tph-stat-n so it wins',
+    css.indexOf('.tph-stat-wrap') > css.indexOf('.tph-stat-n {'));
+}
+
+{
+  // The real invariant: the value cell holds ONE figure per situation, not the
+  // villain's and the pool's side by side. Anything that puts a pool reference
+  // back into .tph-stat-v reintroduces the overflow.
+  const src = require('fs').readFileSync(
+    require('path').join(__dirname, '..', 'torn-poker-hud.user.js'), 'utf8');
+  const row = src.slice(src.indexOf('const rows = BOARD_FLAGS.map'),
+    src.indexOf('}).filter(Boolean).join(\'\')'));
+  t.ok('the board-texture block was located (guards a vacuous scan)', row.length > 200);
+  const valueCell = row.slice(row.indexOf('tph-stat-v'), row.indexOf('tph-stat-n'));
+  t.ok('the value cell carries only the villain figures, not the pool ones',
+    !/\bpr\./.test(valueCell));
+  t.ok('the pool figure lives in the note cell instead',
+    /tph-stat-n[^]*\bpr\.|poolTxt/.test(row));
+  t.ok('the note cell is marked wrappable', /tph-stat-n tph-stat-wrap/.test(row));
+}
+
 process.exit(t.report());
