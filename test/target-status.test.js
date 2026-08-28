@@ -33,8 +33,37 @@ const past = () => Math.floor(Date.now() / 1000) - 600;  // 10 min ago
     })),
     JSON.stringify({ state: 'Hospital', description: 'In hospital for 10 minutes', until: 12345, level: 42 }));
 
-  t.eq('missing status/level keys still parse (defaults to Okay/0)',
-    JSON.stringify(T.parseTargetStatus({})),
+  // THE HOLE, and this assertion used to enshrine it. It asserted that a
+  // response with no status key "defaults to Okay/0" — which is exactly what
+  // the code did, and exactly what was wrong. Written to match the
+  // implementation rather than the requirement, so it agreed with the bug and
+  // the suite stayed green while five seats reported "Okay / attackable"
+  // without a single profile having been read (see v1.40.0).
+  //
+  // Absence of a state is the LEAST evidence there is, so it has to produce
+  // the least conclusive answer, not the most reassuring one.
+  t.eq('a response with no status at all refuses to parse — never "Okay"',
+    T.parseTargetStatus({}), null);
+  t.eq('a status object with no state refuses too',
+    T.parseTargetStatus({ status: {} }), null);
+  t.eq('a non-string state refuses',
+    T.parseTargetStatus({ status: { state: 7 } }), null);
+  t.eq('an empty-string state refuses',
+    T.parseTargetStatus({ status: { state: '' } }), null);
+
+  // THE ACTUAL SHAPE THAT BROKE IT. Torn PDA's HTTP envelope is
+  // {status, statusText, responseText, responseHeaders} — and the old
+  // normalizePdaResponse handed that whole object downstream as if it were
+  // Torn's reply. `json.status` is then an HTTP status, not Torn's status
+  // object, and reading `.state` off it found nothing.
+  t.eq('the PDA HTTP envelope is refused, not read as a profile',
+    T.parseTargetStatus({ status: 200, statusText: 'OK', responseText: '{}', responseHeaders: {} }),
+    null);
+
+  // A real profile with only the fields we need still parses — the tightened
+  // guard must not reject valid replies.
+  t.eq('a status carrying only a state still parses',
+    JSON.stringify(T.parseTargetStatus({ status: { state: 'Okay' } })),
     JSON.stringify({ state: 'Okay', description: '', until: 0, level: 0 }));
 
   t.eq('null input returns null, not a throw', T.parseTargetStatus(null), null);

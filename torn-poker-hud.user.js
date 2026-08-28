@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.39.0
+// @version      1.40.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,60 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.40.0 - Every seat was reported "attackable" without a single profile ever
+ *          being read, and the diagnostic said everything was fine.
+ *            - THE LINE THAT SOLVED IT. v1.39.0 added the response's top-level
+ *              key names to the scan rather than guessing a field name twice.
+ *              One scan later: "last response top-level keys: status,
+ *              statusText,responseText,responseHeaders". That is not Torn's
+ *              profile response — it is TORN PDA'S HTTP ENVELOPE. The HUD had
+ *              never been reading Torn's reply, only the wrapper round it.
+ *            - BUG ONE, THE TRANSPORT: normalizePdaResponse looked for
+ *              result.body then result.text. PDA returns responseText. Neither
+ *              checked field existed, so it fell through to its last resort,
+ *              JSON.stringify(result), handing the ENTIRE ENVELOPE downstream
+ *              as the body; pdaFetchJson parsed that back, so json.status was
+ *              the HTTP 200 rather than Torn's status object. responseText is
+ *              read first now, and THE JSON.stringify FALLBACK IS GONE:
+ *              returning something response-shaped when the body cannot be
+ *              found is how a transport failure becomes confident wrong data
+ *              three layers up. An unlocatable body comes back empty, the JSON
+ *              parse fails, and the caller reads it as unknown — which is true.
+ *            - BUG TWO, MINE, and the one that did the damage:
+ *              parseTargetStatus DEFAULTED state to 'Okay'. With json.status an
+ *              HTTP number, .state was undefined on every response and that
+ *              default manufactured a green light from nothing. Five seats read
+ *              "Okay / ATTACKABLE", none ever checked.
+ *            - It fails in the DANGEROUS direction, which is the entire point
+ *              of v1.33.0's "unknown is never go" — but that rule was written
+ *              for an UNRECOGNISED state and never covered a MISSING one.
+ *              Absence of a state is the least evidence there is, so it must
+ *              give the least conclusive answer, not the most reassuring. The
+ *              parse now refuses when status.state is not a non-empty string:
+ *              same path as a bad key — not cached, surfaced, read as unknown.
+ *            - HOW BADLY IT PRESENTED, the real lesson: "started: 5 ·
+ *              successful lookups: 5 · diagnostic: OK — working · watcher
+ *              steps failing: none". Every health signal green, full cache, no
+ *              errors, every answer fabricated. A FEATURE THAT REPORTS SUCCESS
+ *              IS NOT A FEATURE THAT IS CORRECT — second time in three releases
+ *              the Torn API looked fine and wasn't (first it hung silently,
+ *              now it answered confidently with nothing behind it).
+ *            - THE TEST AGREED WITH THE BUG: target-status asserted "missing
+ *              status/level keys still parse (defaults to Okay/0)" — written
+ *              from the implementation, not the requirement, so it agreed and
+ *              stayed green. Third instance of the v1.0.1 pattern, after the
+ *              4B/5B off-by-one in v1.35.0. Replaced with refusal assertions
+ *              (no status, no state, non-string state, empty state, the real
+ *              envelope) plus one proving a minimal valid profile still parses.
+ *            - ALSO CONFIRMED: heroGhost is "none" — v1.39.0's cleanup worked.
+ *              And communityCards matched 4 where every earlier scan showed 0
+ *              and the code claimed it "matched ZERO on a live scan". Wrong
+ *              conclusion: those scans were all preflop or between hands, with
+ *              no board to match. "0 matches" was read as "selector broken"
+ *              when it meant "no cards there". Corrected in both places.
+ *            - STILL OPEN, untouched: pot dom=$10.5M vs log=$5M, cause already
+ *              recorded in v1.39.0 (blind lines on screen at load).
  *
  * 1.39.0 - A second scan, and this time it confirms rather than condemns.
  *            - v1.38.0 VERIFIED ON THE DEVICE, all three shipped blind:
@@ -126,37 +180,6 @@
  *            - 12 assertions in test/pda-call.test.js, verified non-vacuous by
  *              restoring the old callback-only pdaCall and watching it fail.
  *
- * 1.37.0 - Calibration mode's live counts were frozen. Open finding #4, closed.
- *          Asked "Should we do a calibration mode too?" — it already exists
- *          (Settings -> Calibration mode: live selector match counts, log
- *          observer state, and the Run deep scan / Copy report buttons that
- *          produce the report every DOM selector here was confirmed with). The
- *          question surfaced that it shipped with a bug anyone turning it on
- *          would hit immediately.
- *            - init() had `if (STORE.settings.calibrationMode)
- *              setInterval(renderCalibrationPanel, 3000)`. The refresh was only
- *              armed if the setting was ALREADY ON AT LOAD, so toggling it on
- *              mid-session — how anyone actually turns it on — rendered the
- *              panel once and never refreshed it.
- *            - Worse than "does not update": the live selector counts are the
- *              whole point, and A FROZEN COUNT LOOKS EXACTLY LIKE A SELECTOR
- *              THAT HAS STOPPED MATCHING — the precise failure the panel exists
- *              to diagnose. It could invent a problem or hide a real one.
- *            - Now always armed; renderCalibrationPanel returns immediately
- *              when the setting is off, so the cost is one property read every
- *              3s — the same trade the __TPH_TEST seam already makes.
- *            - Teardown moved INTO that off-branch, so switching calibration
- *              off by any route removes the panel: the toggle, the panel's own
- *              ✕, or an imported store with calibrationMode:false. Both still
- *              remove it immediately too — waiting 3s for a tap to visibly do
- *              something is its own bug.
- *            - Finding 4 removed from KNOWN GAPS above and from CLAUDE.md, both
- *              closing lines citing 1.37.0. NOT renumbered: 3 and 5 keep their
- *              numbers because the header and code comments cite them by number.
- *            - No new tests, said plainly rather than padded: this is an init()
- *              interval and a DOM teardown branch, and the harness drives
- *              neither (setInterval is a no-op there, the default DOM is inert).
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -218,7 +241,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.39.0';
+  const HUD_VERSION = '1.40.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -427,10 +450,30 @@
     return { status: resp.status, text };
   }
 
+  // CONFIRMED envelope shape, from a live scan: Torn PDA hands back
+  // `{status, statusText, responseText, responseHeaders}`. `responseText` is
+  // the body, and it was the one field this function did not look for.
+  //
+  // The old fallback is what made that catastrophic rather than merely wrong.
+  // With no `body` and no `text` it returned `JSON.stringify(result)` — the
+  // WHOLE ENVELOPE, re-parsed downstream as if it were Torn's reply. So
+  // parseTargetStatus read `json.status` (the HTTP status) as Torn's status
+  // object, found no `.state` on it, and fell back to its own default of
+  // 'Okay'. Every seat reported "Okay / attackable" without a single profile
+  // ever having been read.
+  //
+  // JSON.stringify(result) is therefore GONE as a fallback. Returning
+  // something shaped like a response when the body could not be found is how
+  // a transport failure turns into confident wrong data three layers up; an
+  // empty body makes the JSON parse fail and the caller treat it as unknown,
+  // which is the honest outcome.
   function normalizePdaResponse(result) {
     if (result == null) return { status: 0, text: '' };
     if (typeof result === 'string') return { status: 200, text: result };
-    return { status: result.status || 200, text: result.body || result.text || JSON.stringify(result) };
+    const text = result.responseText != null ? result.responseText
+      : (result.body != null ? result.body
+        : (result.text != null ? result.text : ''));
+    return { status: result.status || 200, text: String(text) };
   }
 
   async function pdaFetchJson(method, url, opts) {
@@ -1409,8 +1452,23 @@
   function parseTargetStatus(json) {
     if (!json || json.error) return null;
     const status = json.status || {};
+    // NO DEFAULT TO 'Okay'. That default was the hole.
+    //
+    // When the transport handed back the wrong object (see
+    // normalizePdaResponse), `status.state` was undefined on every response —
+    // and this manufactured a green light out of it. A live scan showed five
+    // seats all reading "Okay / attackable" without a single profile ever
+    // having been read.
+    //
+    // v1.33.0's asymmetry — unknown is never "go" — was written for an
+    // UNRECOGNISED state and simply did not cover a MISSING one. Absence of a
+    // state is the least evidence there is, so it has to produce the least
+    // conclusive answer rather than the most reassuring one. Refusing the
+    // whole parse sends it down the same path as a bad key: not cached,
+    // surfaced in the diagnostic, and read as unknown by attackReadiness.
+    if (typeof status.state !== 'string' || !status.state) return null;
     return {
-      state: status.state || 'Okay',
+      state: status.state,
       // Torn's own human-readable line ("In hospital for 10 minutes",
       // "Travelling to Mexico"). Shown verbatim in the tooltip rather than
       // parsed — it is the one field guaranteed to describe whatever Torn
@@ -1708,8 +1766,12 @@
     // in case a layout differs; resolveXidFromSeat needs only the element id.
     heroSeat: '[id^="player-"][class*="self_"], [class*="hero_"], [class*="you_"]',
     heroCards: '[class*="hand_"] [class*="front_"] > div[role="img"]:not([aria-label="card face down"])',
-    // Matched ZERO on a live scan with five board cards face-up. Kept as a
-    // first try only; readBoardCards derives the board from anyFaceUpCard.
+    // CONFIRMED WORKING (scan, v1.40.0): matched 4 with four board cards up.
+    // Earlier scans showed zero, but every one of those was taken preflop or
+    // between hands — with no board on the table there is nothing for it to
+    // match, and "0" was read as "the selector is wrong" rather than "there
+    // were no cards". It is a live first try, not a dead one; readBoardCards
+    // still falls back to anyFaceUpCard, which needs no container name.
     communityCards: '[class*="communityCards_"] [class*="front_"] > div[role="img"]:not([aria-label="card face down"])',
     // Any face-up card anywhere on the table. Confirmed structure — this is the
     // same shape heroCards uses, minus the hero container.
@@ -5982,13 +6044,17 @@
 
   // The board, read from the DOM.
   //
-  // `communityCards_` matched ZERO on a live scan while 5 board cards were
-  // face-up — so the board has never once been read from the DOM, and every
-  // postflop equity number came from the log-parsed fallback (or nothing, if a
-  // street line was missed). That is the quietest failure in the file: equity
-  // simply reads as a preflop number and looks plausible.
+  // `communityCards_` was written up as matching ZERO on a live scan, and that
+  // conclusion was wrong: a v1.40.0 scan matched 4 with four board cards up.
+  // The earlier zeroes were all taken preflop or between hands, where there is
+  // no board to match — "0 matches" was read as "the selector is broken" when
+  // it meant "there were no cards". Worth remembering when reading any count
+  // in a scan: a selector that matches nothing may simply have nothing to find.
   //
-  // Rather than guess another hashed container name, derive it from structure
+  // The structural fallback below is kept regardless, because it needs no
+  // hashed container name at all and so cannot break on a Torn redeploy.
+  //
+  // Rather than depend on a hashed container name, derive it from structure
   // that IS confirmed: a face-up card is `[class*="front_"] > div[role="img"]`,
   // and hero's are the ones inside `[class*="hand_"]`. Everything face-up that
   // is NOT in hero's hand is the board. Done in JS because the exclusion is an

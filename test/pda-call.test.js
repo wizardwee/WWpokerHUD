@@ -49,6 +49,50 @@ const t = runner('pda-call');
   });
 }
 
+// --- the REAL PDA envelope -------------------------------------------------
+//
+// Confirmed from a live scan: Torn PDA returns
+// {status, statusText, responseText, responseHeaders}. `responseText` is the
+// body, and it was the one field normalizePdaResponse never looked for. With
+// no `body` and no `text` it fell through to JSON.stringify(result) and
+// handed the WHOLE ENVELOPE downstream as if it were the reply — which is how
+// five seats came to report "Okay / attackable" with no profile ever read.
+
+{
+  const T = load();
+  const envelope = {
+    status: 200,
+    statusText: 'OK',
+    responseText: '{"status":{"state":"Hospital","until":123},"level":42}',
+    responseHeaders: {},
+  };
+  T.pdaCall(() => Promise.resolve(envelope), ['http://x', {}]).then((r) => {
+    t.eq('responseText is taken as the body', r.text, envelope.responseText);
+    t.eq('and the HTTP status is carried', r.status, 200);
+    // The parse that was silently broken end to end.
+    const parsed = T.parseTargetStatus(JSON.parse(r.text));
+    t.ok('so the profile finally parses', !!parsed);
+    t.eq('with the real state', parsed.state, 'Hospital');
+    t.eq('and the level that used to read 0', parsed.level, 42);
+  });
+}
+
+// --- a body that cannot be found is EMPTY, never the envelope --------------
+//
+// The old fallback returned JSON.stringify(result). Returning something
+// response-shaped when the body could not be located is how a transport
+// failure becomes confident wrong data three layers up. An empty body makes
+// the JSON parse fail and the caller treat it as unknown.
+
+{
+  const T = load();
+  T.pdaCall(() => Promise.resolve({ status: 200, weird: 'no body field here' }), ['http://x', {}])
+    .then((r) => {
+      t.eq('an unlocatable body comes back empty', r.text, '');
+      t.eq('and never as a stringified envelope', r.text.indexOf('weird'), -1);
+    });
+}
+
 // --- a plain string result, which normalizePdaResponse also accepts -------
 
 {

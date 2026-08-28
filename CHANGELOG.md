@@ -9,6 +9,112 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.40.0
+
+Every seat was reported "attackable" without a single profile ever being
+read. The diagnostic said everything was fine.
+
+### The line that solved it
+
+v1.39.0 added the response's top-level key names to the deep scan rather
+than guessing a field name a second time. One scan later:
+
+```
+last response top-level keys: status,statusText,responseText,responseHeaders
+```
+
+That is not Torn's profile response. **That is Torn PDA's HTTP envelope.**
+The HUD had never been reading Torn's reply at all — only the wrapper
+around it.
+
+### Bug one: the transport
+
+`normalizePdaResponse` looked for `result.body`, then `result.text`. PDA
+returns **`responseText`**. Neither field it checked existed, so it fell
+through to its last resort — `JSON.stringify(result)` — and handed the
+*entire envelope* downstream as though it were the body. `pdaFetchJson`
+dutifully parsed that back, so `json.status` was the HTTP status `200`
+rather than Torn's status object.
+
+`responseText` is now read first. And **the `JSON.stringify` fallback is
+gone**: returning something response-shaped when the body cannot be located
+is exactly how a transport failure becomes confident wrong data three layers
+up. An unlocatable body now comes back empty, the JSON parse fails, and the
+caller treats it as unknown — which is true.
+
+### Bug two: mine, and the one that actually did the damage
+
+`parseTargetStatus` **defaulted `state` to `'Okay'`**.
+
+With `json.status` being an HTTP number, `.state` was undefined on every
+single response — and that default manufactured a green light out of
+nothing. Five seats, all reading `state="Okay"` and `ATTACKABLE`, none of
+them ever checked.
+
+It fails in the dangerous direction, which is the whole point of the
+asymmetry v1.33.0 introduced: *unknown is never "go"*. But that rule was
+written for an **unrecognised** state and never covered a **missing** one.
+Absence of a state is the least evidence there is, so it has to produce the
+least conclusive answer, not the most reassuring one.
+
+The parse now refuses outright when `status.state` isn't a non-empty string
+— the same path a bad key takes: not cached, surfaced in the diagnostic,
+read as unknown.
+
+### How badly this presented
+
+Worth stating plainly, because it is the real lesson:
+
+```
+apiKey set: true   started: 5   successful lookups: 5   last fetch: 17s ago
+diagnostic: OK — working
+watcher steps failing: none
+```
+
+Every health signal green. Full cache. No errors anywhere. And every answer
+fabricated. **A feature that reports success is not the same as a feature
+that is correct** — and this is the second time in three releases that the
+Torn API looked fine and wasn't. The first time it was hanging silently; this
+time it was answering confidently with nothing behind it.
+
+### The test agreed with the bug
+
+`test/target-status.test.js` asserted *"missing status/level keys still parse
+(defaults to Okay/0)"*. Written to match the implementation instead of the
+requirement, so it agreed with the bug and kept the suite green. Had it been
+written from the requirement, it would have caught this before it ever
+shipped.
+
+Same trap as the 4B/5B off-by-one in v1.35.0, and the third instance of the
+pattern CLAUDE.md already records from v1.0.1. Replaced with assertions that
+the parse **refuses**: no status, a status with no state, a non-string state,
+an empty state, and the real PDA envelope shape — plus one that a minimal
+valid profile still parses, so the tightened guard can't reject real replies.
+
+### Also confirmed, and one claim corrected
+
+`heroGhost: none` — v1.39.0's cleanup worked.
+
+And `communityCards` matched **4**, where every previous scan showed 0 and
+the code said so in a comment: *"matched ZERO on a live scan"*. That
+conclusion was wrong. The earlier scans were all taken preflop or between
+hands, where there is no board to match — "0 matches" was read as "the
+selector is broken" when it meant "there were no cards". Corrected in both
+places it was written down. Worth remembering when reading any count in a
+scan: a selector matching nothing may simply have nothing to find. The
+structural fallback stays regardless, since it depends on no hashed name and
+so can't break on a Torn redeploy.
+
+### Still open
+
+The pot mismatch, now `dom=$10.5M log=$5M`. Unchanged, and the cause is
+already recorded in v1.39.0 — the blind lines were on screen at load and so
+were never counted. Not touched here.
+
+Verified non-vacuous by restoring **both** original bugs and confirming eight
+assertions fail; the failure output reproduces the live symptom exactly —
+`state: Okay`, `level: 0`, from an envelope that was never opened.
+
 ## 1.39.0
 
 A second scan, and this time it confirms rather than condemns.
