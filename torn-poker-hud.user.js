@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.38.0
+// @version      1.39.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,57 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.39.0 - A second scan, and this time it confirms rather than condemns.
+ *            - v1.38.0 VERIFIED ON THE DEVICE, all three shipped blind:
+ *              "apiKey set: true · started: 8 · successful lookups: 4 · last
+ *              fetch: 13s ago · diagnostic: OK — working" (the Torn API is
+ *              alive for the first time since v1.8.0, where the previous scan
+ *              read 0 lookups and "last fetch: never"); "watcher steps failing:
+ *              none"; and "table: Old Folks Home · $500k BB · Mid" where the
+ *              last scan said "blind level not read yet".
+ *            - HERO GHOST DROPPED. The scan proves the leak is CLOSED, not
+ *              merely narrowed: the ghost is frozen at 7 hands, identical to
+ *              last scan, while hero's real record moved 8911 -> 8924. Thirteen
+ *              new hands, zero new ghost hands. What remains is orphaned
+ *              residue that still skews observedPoolAverages and holds a prune
+ *              slot, so dropStaleHeroGhost() removes it.
+ *            - DROPPED, NEVER MERGED: hands and dealtInXids were always counted
+ *              through the seat path, so folding the ghost in would double-
+ *              count them — the same reason mergePseudoPlayer bails when the
+ *              real record exists.
+ *            - Two guards, both proven by deleting them and watching the tests
+ *              fail: it refuses when there is NO real record (never delete
+ *              hero's only copy), and it treats a PSEUDO-ID heroXid as
+ *              unresolved (the v0.20.0 lesson — `name:...` is truthy but is not
+ *              bound to a seat, and deleting then removes the very record hero
+ *              is being tracked under). Only ever hero's own ghost; another
+ *              player's `name:` record is a real tracked opponent and survives.
+ *            - `level` IS NOT WHERE THE PARSER LOOKS, and the scan proves it:
+ *              all four cached entries read level=0 while status.state parsed
+ *              correctly as "Okay", so the response IS the profile shape and
+ *              json.level is the wrong path. Guessing a second field name blind
+ *              is what produced the first wrong guess, so the scan now records
+ *              the response's TOP-LEVEL KEY NAMES instead — names only, never
+ *              values, since scans get pasted into chats. Meanwhile the UI
+ *              stops asserting a level it lacks: omitted in the panel,
+ *              "level=ABSENT" in the scan. 0 is not a level.
+ *            - POT MISMATCH ROOT-CAUSED, NOT FIXED. Both scans: dom-vs-log gap
+ *              is ~$0.7M each time, and this table's blinds are $250k+$500k =
+ *              $750k. The blind lines were old___ in both — on screen at prime
+ *              time, never parsed as events, so their contributions never
+ *              reached the log-summed pot. Same missed-old-lines cause as the
+ *              lost flop (1.36.0) and the unread blind level (1.38.0), a third
+ *              time. seedBlindFromVisibleLog seeds the LEVEL only. Not fixed
+ *              here: synthesising contributions for lines we deliberately do
+ *              not replay would inflate every pot if done wrong. Residue of
+ *              closed finding #1.
+ *            - srOnly re-confirmed and still unexploited: SPAN.srOnly___
+ *              carries "JonnySince folded", actor AND verb in one element,
+ *              where the visual log splits them. Needs dedup by (actor, action,
+ *              street) against the visual log — the snapshot scanner does not
+ *              solve that, it dedups a source against its own history.
+ *            - 17 assertions in test/hero-ghost-cleanup.test.js.
  *
  * 1.38.0 - THE TORN API HAD NEVER WORKED. Not once, since v1.8.0. Found by
  *          reading a live deep scan pasted back from the phone — the exact
@@ -106,58 +157,6 @@
  *              interval and a DOM teardown branch, and the harness drives
  *              neither (setInterval is a no-op there, the default DOM is inert).
  *
- * 1.36.0 - Two hands that couldn't have happened, both with the same cause.
- *          Reported with a screenshot: "Default view should be notable hands.
- *          Also how can board reached river but not show all 5 community
- *          cards, and not show player reveal cards."
- *            - THE BOARD THAT LOST ITS FLOP. A stored hand read "reached river
- *              · board: 5♦ 9♠". The log's board line for a street can be
- *              missed, and the FLOP is the one that gets missed: lines already
- *              on screen when the log snapshot primes are deliberately NOT
- *              parsed (scanLogRows treats them as a partial hand already over,
- *              which is what stops old lines replaying as new events). A hand
- *              in progress at that moment loses its flop; turn and river then
- *              append to an empty board — 0+1+1 = 2 — while the street still
- *              reads river, being set by the lines that DID parse. Nothing
- *              errors. (The screenshot's other hand, "reached turn" with four
- *              cards, was correct all along and is not flagged.)
- *            - FIX ONE, repair it live: repairBoardFromDom() reads the board
- *              off the table. readBoardCards already existed and was already
- *              trusted for the coach's live equity, so no new DOM guesswork.
- *              It only ever ADDS, and is capped to what the street allows so
- *              board and street can never disagree. Runs on the 1s poll as
- *              well as at settlement — live is the part that matters, because
- *              board-texture stats are filed per action DURING the hand, so a
- *              missing flop was filing every one against the wrong board.
- *            - FIX TWO, say so when it is too late: a hand already recorded
- *              short cannot be fixed retroactively, so boardIsPartial() marks
- *              it and the tab, clipboard and export read "partial — 2 of 5
- *              seen" rather than printing two cards as the whole board.
- *            - UNKNOWN IS NOT INCOMPLETE: pre-v1.17.0 hands have no board at
- *              all and are deliberately not flagged, or hundreds of old
- *              records would warn about a field that did not exist yet.
- *            - dedupeCards() is load-bearing, not tidiness: a DOM repair fills
- *              a street and the log line for that street can still arrive and
- *              append, listing a card twice.
- *            - THE REVEALS NEVER CAPTURED, same shape one function over.
- *              harvestShownCards bails on !currentHand and runs on a 1s poll,
- *              but reveals land immediately BEFORE the "wins" line that
- *              settles the hand. Reveal-then-settle inside one poll gap was
- *              never captured: by the next tick currentHand was null and the
- *              poll bailed, though the cards sit there for seconds.
- *              applyHandResultsAndReset now looks once more before banking —
- *              the only moment cards are up AND the hand is still live.
- *            - History opens on NOTABLE now, not Played. Asked for directly;
- *              safe because the empty state names the way out.
- *            - The target-status line still said "only read while they sit
- *              out", untrue since v1.34.0 widened the fetch. Rewritten, and it
- *              now separates "no key" from "not checked yet". Opening a panel
- *              also fetches, via new requestTargetStatus — the background
- *              sweep only covers CURRENTLY SEATED players, so a panel on
- *              someone who had left read "not checked" forever. The staleness
- *              gate moved inside it so both callers share one definition.
- *            - 23 assertions in test/board-repair.test.js.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -219,7 +218,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.38.0';
+  const HUD_VERSION = '1.39.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -1498,6 +1497,13 @@
   // being able to tell those apart is what made the pdaCall hang take a live
   // deep scan to find.
   let targetFetchStarted = 0;
+  // TOP-LEVEL KEY NAMES from the last successful response — names only, never
+  // values, because the deep scan gets pasted into chats. Recorded because the
+  // v1.38.0 scan showed every cached entry with level=0 while status.state
+  // parsed correctly, so the response IS the profile shape and `level` simply
+  // is not where parseTargetStatus looks. Guessing a second field name blind
+  // is what produced the first wrong guess; this makes the next scan answer it.
+  let targetLastKeys = '';
 
   async function fetchTargetStatus(xid) {
     const key = (STORE.settings.tornApiKey || '').trim();
@@ -1518,6 +1524,7 @@
       if (!parsed) { targetLastError = 'unrecognised API response shape'; return; }
       targetLastError = '';
       targetOkCount++;
+      try { targetLastKeys = Object.keys(json).join(','); } catch (e) { targetLastKeys = '(unreadable)'; }
       targetCache.set(String(xid), Object.assign({}, parsed, { fetchedAt: Date.now() }));
     } catch (e) {
       targetLastError = 'could not reach api.torn.com';
@@ -1544,6 +1551,36 @@
     }
     if (!targetLastFetchAt) return 'No lookup has run yet — sit at a table with other players.';
     return '';
+  }
+
+  // A `name:<username>` record for HERO, left over from before hero was bound
+  // to a seat.
+  //
+  // Two live scans a session apart showed it frozen at 7 hands while hero's
+  // real record moved 8911 -> 8924. That is the proof v1.38.0 stopped the
+  // leak: it no longer grows. What it still does is sit in STORE.players,
+  // skewing observedPoolAverages and occupying a prune slot.
+  //
+  // DROPPED, never merged. mergePseudoPlayer deliberately bails when the real
+  // record already exists, and for good reason — hands and dealtInXids were
+  // always counted through the seat path, so folding the ghost in would
+  // double-count them. Its handful of log-derived stats are already orphaned
+  // from the hands they describe; discarding them loses nothing that was not
+  // already wrong.
+  //
+  // Guarded on the REAL record existing, so this can never delete the only
+  // copy of hero's data.
+  function dropStaleHeroGhost() {
+    if (heroUnresolved()) return false;
+    const uname = (STORE.settings.heroName || '').trim();
+    if (!uname || !STORE.players[heroXid]) return false;
+    const target = ('name:' + uname).toLowerCase();
+    let dropped = false;
+    Object.keys(STORE.players).forEach((k) => {
+      if (k.toLowerCase() === target) { delete STORE.players[k]; dropped = true; }
+    });
+    if (dropped) saveStore();
+    return dropped;
   }
 
   function targetStatusFor(xid) {
@@ -1599,7 +1636,9 @@
     }
 
     const meta = [];
-    if (status && status.level) meta.push(`level ${status.level}`);
+    // Only when we actually have one. "level 0" is not a level, it is the
+    // absence of one, and printing it asserts a fact the API never returned.
+    if (status && status.level > 0) meta.push(`level ${status.level}`);
     if (status) meta.push(`checked ${ageS < 60 ? `${ageS}s` : `${Math.round(ageS / 60)}m`} ago`);
 
     return `<div class="tph-target ${cls}" title="${escapeHtml(status && status.description ? status.description : '')}">
@@ -4263,6 +4302,9 @@
       // instead of a day, and for every seated opponent — see the function for
       // why it is no longer scoped to sitting-out seats only.
       tickStep('target status', refreshSeatedTargetStatus);
+      // Early-returns the moment there is nothing to drop, which is every tick
+      // after the first one that finds a ghost.
+      tickStep('hero ghost', dropStaleHeroGhost);
     }, 3000);
     harvestSeatNames();
 
@@ -10306,6 +10348,9 @@
       + '   successful lookups: ' + targetOkCount
       + '   last fetch: ' + (targetLastFetchAt ? Math.round((Date.now() - targetLastFetchAt) / 1000) + 's ago' : 'never'));
     L.push('diagnostic: ' + (targetDiagnostic() || 'OK — working'));
+    // Key NAMES only — no values. This is what identifies where `level` (and
+    // anything else still reading as absent) actually lives in the response.
+    L.push('last response top-level keys: ' + (targetLastKeys || '(none captured)'));
     const tickBad = Object.keys(tickErrors);
     L.push('watcher steps failing: ' + (tickBad.length
       ? tickBad.map((k) => k + ' -> ' + tickErrors[k]).join(' | ')
@@ -10316,7 +10361,7 @@
       const st = targetCache.get(k);
       const r = attackReadiness(st);
       L.push('  ' + k + ' -> state=' + JSON.stringify(st.state)
-        + ' level=' + st.level
+        + ' level=' + (st.level > 0 ? st.level : 'ABSENT')
         + ' ' + (r.blocked ? 'BLOCKED(' + r.label + (r.until ? ', ' + fmtStatusRemaining(r.until) : '') + ')'
           : r.unknown ? 'UNKNOWN(' + r.label + ')' : 'ATTACKABLE')
         + (st.description ? '  desc=' + JSON.stringify(squish(st.description, 40)) : ''));
@@ -10782,6 +10827,7 @@
       targetStatusFor,
       refreshSeatedTargetStatus,
       requestTargetStatus,
+      dropStaleHeroGhost,
       pdaCall,
       PDA_CALL_TIMEOUT_MS,
       seedBlindFromVisibleLog,

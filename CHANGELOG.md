@@ -9,6 +9,102 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.39.0
+
+A second scan, and this time it confirms rather than condemns.
+
+### What v1.38.0 fixed, verified
+
+Three things shipped blind last release are now observed working on the
+device:
+
+```
+apiKey set: true   started: 8   successful lookups: 4   last fetch: 13s ago
+diagnostic: OK — working
+watcher steps failing: none
+table: Old Folks Home · $500k BB · Mid
+```
+
+**The Torn API is alive for the first time since v1.8.0** — four opponents
+fetched and cached, where the previous scan read "successful lookups: 0 ·
+last fetch: never". The `pdaCall` dual-shape fix landed. The watcher steps
+are isolated and none are failing. And the blind level reads as a named
+table where the last scan said "blind level not read yet".
+
+### The hero ghost, dropped
+
+The scan proves v1.38.0 closed the leak rather than merely narrowing it: the
+ghost is **frozen at 7 hands**, identical to the previous scan, while hero's
+real record moved 8911 → 8924. It is not growing. Thirteen new hands, zero
+new ghost hands.
+
+What remains is orphaned residue that still skews `observedPoolAverages` and
+occupies a prune slot, so `dropStaleHeroGhost()` removes it.
+
+**Dropped, never merged.** Hands and `dealtInXids` were always counted
+through the seat path, so folding the ghost into the real record would
+double-count them — the same reason `mergePseudoPlayer` bails when the real
+record already exists. Its log-derived stats are already orphaned from the
+hands they describe.
+
+Two guards, both proven by deleting them and watching the tests fail:
+
+- It refuses when there is **no real record**, so it can never delete hero's
+  only copy of their own data.
+- It treats a **pseudo-id `heroXid` as unresolved** — the v0.20.0 lesson.
+  `name:Wonkawee` is truthy but is not "bound to a seat", and deleting then
+  would remove the very record hero is currently being tracked under.
+
+Only ever hero's own ghost. Another player's `name:` record is a genuine
+tracked opponent this HUD has simply never matched to a seat, and survives.
+
+### `level` is not where the parser looks
+
+All four cached entries read `level=0` while `status.state` parsed correctly
+as `"Okay"`. So the response *is* the profile shape, and `json.level` is
+simply the wrong path.
+
+Guessing a second field name blind is exactly what produced the first wrong
+guess. Instead the deep scan now records the **top-level key names** of the
+last successful response — names only, never values, since scans get pasted
+into chats. The next scan will say where `level` actually lives.
+
+Meanwhile the UI stops asserting a level it doesn't have: the panel omits it
+when absent, and the scan prints `level=ABSENT` rather than `level=0`. Zero
+is not a level, it is the absence of one.
+
+### The pot mismatch, root-caused but NOT fixed
+
+Both scans flagged it: `dom=$3M log=$2.3M`, then `dom=$4.5M log=$3.8M`. The
+gap is ~$0.7M **both times**, and this table's blinds are $250k + $500k =
+$750k.
+
+The blind lines were marked `old___` in both scans — already on screen when
+the snapshot primed, therefore deliberately never parsed as events, therefore
+their contributions never reached the log-summed pot. That is the *same*
+missed-old-lines root cause as the lost flop (v1.36.0) and the unread blind
+level (v1.38.0), surfacing a third time in a third place.
+
+v1.38.0's `seedBlindFromVisibleLog` seeds the *level* only, not the
+contributions. **This is not fixed here** — synthesising contributions for
+lines the HUD deliberately does not replay needs more care than a same-day
+patch, and getting it wrong would inflate every pot rather than one. Recorded
+properly so the next attempt starts from the answer instead of the symptom.
+Residue of closed finding #1.
+
+### Also confirmed, still unexploited
+
+The scan re-confirms the `srOnly` find: `SPAN.srOnly___DZLhV` carrying
+`"JonnySince folded"` — the **actor's name and the verb in one element**,
+where the visual log splits them across two spans. Confirmed twice on this
+layout now. Still not acted on, for the reason already recorded: it needs
+dedup by (actor, action, street) against the visual log, and the snapshot
+scanner does not solve that — it dedups a source against its own history,
+not two sources against each other.
+
+17 assertions in `test/hero-ghost-cleanup.test.js`, verified non-vacuous by
+removing both guards and confirming four fail.
+
 ## 1.38.0
 
 **The Torn API had never worked. Not once, since v1.8.0.**
