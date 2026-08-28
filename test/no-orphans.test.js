@@ -106,7 +106,11 @@ function keysOf(name) {
   const css = src.slice(cssStart, cssEnd);
   const outside = src.slice(0, cssStart) + src.slice(cssEnd);
 
-  const DYNAMIC_PREFIXES = ['tph-glow-', 'tph-dev-', 'tph-row-', 'tph-store-'];
+  // tph-hh-tag-* is built as `tph-hh-tag-${key}` from HAND_TAG_KEYS. Exempt
+  // here because a literal scan cannot see it, but NOT left unchecked:
+  // test/hand-notability.test.js asserts every key in that constant has a CSS
+  // rule, which is the failure this exemption would otherwise let through.
+  const DYNAMIC_PREFIXES = ['tph-glow-', 'tph-dev-', 'tph-row-', 'tph-store-', 'tph-hh-tag-'];
   const classes = [...new Set([...css.matchAll(/\.(tph-[\w-]+)/g)].map((m) => m[1]))];
   const orphans = classes.filter((c) => !DYNAMIC_PREFIXES.some((p) => c.startsWith(p))
     && !new RegExp(`\\b${c}\\b`).test(outside));

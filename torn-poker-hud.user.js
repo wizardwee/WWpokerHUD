@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.34.0
+// @version      1.35.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,65 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.35.0 - The History tab stops burying the interesting hands under the folds.
+ *          Asked for directly: "I don't want it to show all hands because that
+ *          includes hands they fold too without any calling or raising ... I
+ *          want it to highlight hands that are interesting or out of blue,
+ *          like big pots, or highlight interesting 3bets or reraise."
+ *            - TWO DIFFERENT QUESTIONS. isNotableHand already existed but asks
+ *              about the TABLE — was this pot big, for the storage cap. The
+ *              History tab needs the other one: did THIS PLAYER do anything
+ *              here, and was any of it interesting? A 60bb pot two others
+ *              fought over is notable for the table and worthless as a read on
+ *              the seat you are looking at. New handNotability(h, xid, ctx),
+ *              kept a separate name the same way p.texture and p.boardTex are.
+ *            - NOTHING NEW IS COLLECTED — fifth time checking first has paid
+ *              off. It all comes off h.actions ({x,a,amt,s}, already persisted
+ *              in full), so it works RETROACTIVELY on every stored hand.
+ *            - The action vocabulary answered it exactly: post/fold/check/
+ *              call/bet/raise. Voluntary is call/bet/raise only — a post is a
+ *              blind you had no choice about, a check declines to invest, a
+ *              fold leaves. Precisely the case the report named.
+ *            - Tags: 3B/4B+ preflop tier, XR check-raise (checked THEN raised
+ *              the same street), RR postflop raise (exclusive with XR), BIG
+ *              pot, SD showdown, WON. Colour-grouped and matched to the badge
+ *              role chips so 3B is one colour everywhere. Each carries a title
+ *              — an unexplained two-letter chip is noise.
+ *            - Notable at 50+. WON alone (10) deliberately does NOT clear it:
+ *              winning uncontested is most hands, not a read. SD does — cards
+ *              face-up is the only direct range evidence this HUD ever gets.
+ *            - recordHandHistory now stores `bb`. It was already computed at
+ *              record time for isNotableHand and thrown away, leaving the tab
+ *              unable to price a pot. Pre-v1.35.0 records have bb:0 and fall
+ *              back to 2.5x the MEDIAN pot of that player's hands — relative,
+ *              because more than one stake gets played here. Unknown is never
+ *              read as small OR big; an implausible blind (the BB-display
+ *              hazard) falls to the median path rather than being believed.
+ *              The median spans ALL their hands, not the filtered set, or
+ *              filtering to Notable would recompute from already-big pots and
+ *              stop calling any of them big.
+ *            - Three filter chips (Played default / Notable / All), each with
+ *              a title saying what it hides. The count reads "N of M ... K
+ *              hidden by filter": it already had one way to mislead (the
+ *              40-row cap) and the filter is a second. historyFilter is
+ *              SESSION state — a persisted "Notable" would show an empty tab
+ *              next time you opened a player who happened to have none.
+ *            - A BUG I WROTE, AND THE TEST THAT AGREED WITH IT: the Nth raise
+ *              is an (N+1)-bet, since the blind is the first bet — open is the
+ *              1st raise, 3-bet the 2nd, 4-bet the 3rd, 5-bet the 4th. The
+ *              first draft labelled the 4th raise "4B" and the assertion
+ *              written beside it asserted exactly that. Both agreed, both
+ *              wrong, suite green. Same shape as the v1.0.1 lesson. Label now
+ *              counts tier+1; the CSS CLASS stays 4B above a 4-bet so the rule
+ *              set stays finite. Verified by reintroducing the bug.
+ *            - tph-hh-tag-* goes in no-orphans' DYNAMIC_PREFIXES (built by
+ *              concatenation, invisible to a literal scan) but is NOT left
+ *              unchecked: new HAND_TAG_KEYS, and the new test asserts every
+ *              key has a CSS rule and nothing emits an undeclared one. A key
+ *              with no rule renders grey and throws nothing. Same split
+ *              BOARD_FLAGS uses.
+ *            - 74 assertions in test/hand-notability.test.js.
  *
  * 1.34.0 - The target status now actually appears, and can explain itself when
  *          it doesn't. Reported live: "How does the profile clicker work? I
@@ -117,48 +176,6 @@
  *              ATTACK_BLOCKERS, so adding a state cannot leave a branch
  *              untested.
  *
- * 1.32.0 - Equity is cheaper to compute, and the call/fold verdict now admits
- *          when it cannot tell. Asked for directly after v1.31.0: "I don't
- *          mind non exact equity counts too, we can approximate."
- *            - equityIters 1200 -> 600. Measured, per call: 2 opponents
- *              30.7 -> 14.2ms, 4 opp 46.1 -> 21.8ms, 6 opp 62.6 -> 28.6ms,
- *              8 opp 68.3 -> 34.5ms. Worst-case sampling error ~+/-2 points,
- *              nearer +/-1.5 at the low equities multiway pots produce.
- *            - Sound for a specific reason: sampling error is the SMALLER of
- *              the two errors here. Opponents come from a flat range PROXY,
- *              far coarser than more samples could fix, so halving the samples
- *              moves total error very little. v1.31.0 stopped this blocking;
- *              this makes the answer arrive twice as fast.
- *            - WHAT THAT DOES NOT EXCUSE, and the reason this is one release
- *              and not two: the pot-odds line was `eq >= need ? '✓ +EV call'
- *              : '✗ fold'` — a hard verdict on an ACTION, from a sampled
- *              estimate, with nothing in between. Needing 33% while the sim
- *              says 34%, that tick is decided by noise, not the hand: rerun
- *              and it flips. Widening the noise makes that routine rather than
- *              rare, so the guard ships WITH the cheaper default, not after
- *              someone acts on a coin-flip tick.
- *            - potOddsVerdict returns "≈ marginal" inside two standard errors
- *              (~95%). At 600 samples needing 33%: 31/33/35% all read marginal
- *              (were fold/call/call); 28% still folds, 40% still calls — it
- *              withholds only where the sim genuinely cannot resolve the spot.
- *              "Marginal" is itself a real read: it moves the decision onto
- *              position, reads and implied odds, where a close spot belongs.
- *            - equityStdErr is the Bernoulli SE on the win proportion. Ties
- *              score 0.5 and a 0/0.5/1 draw has strictly lower variance than
- *              0/1 with the same mean, so the band is slightly OVER-stated —
- *              the conservative direction for a keep-quiet guard.
- *            - The band tracks the sample count, so Settings -> Equity samples
- *              now buys RESOLUTION as well as precision: 2pp of margin is
- *              unresolvable at 100 samples and decidable at 5000.
- *            - clampEquityIters falls back to DEFAULT_SETTINGS.equityIters,
- *              not a hardcoded 1200 — the default lives in one place now. A
- *              v1.31.0 test that hardcoded 1200 broke when the default moved
- *              and now reads the live constant, per the POOL_AVG lesson.
- *            - 18 new assertions in test/equity-slicing.test.js (60 in file),
- *              including equityStdErr's degenerate inputs: a NaN band makes
- *              every comparison false and would silently restore the old
- *              confident verdict exactly where the guard is needed.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -221,7 +238,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.34.0';
+  const HUD_VERSION = '1.35.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -3261,6 +3278,13 @@
       // this has board: undefined; replayStepsFor treats that as "unknown"
       // rather than an empty (and misleadingly complete-looking) board.
       board: hand.board || [],
+      // Blind level at the time, so a stored pot can be priced in big blinds
+      // afterwards. isNotableHand already needed hand.bbAmount at record time
+      // and then threw it away, which left the History tab unable to say
+      // whether a pot was big without guessing from the other hands on screen.
+      // Absent (0) on anything recorded before v1.35.0 — handNotability falls
+      // back to a median comparison rather than treating unknown as small.
+      bb: hand.bbAmount || 0,
       pinned: isNotableHand(hand),
     });
     const limit = STORE.settings.historyLimit || 200;
@@ -3425,6 +3449,144 @@
   function handsInvolving(xid) {
     return (STORE.hands || []).filter((h) => (h.players || []).includes(xid)
       || (h.actions || []).some((a) => a.x === xid));
+  }
+
+  // --- Per-player hand notability (v1.35.0) --------------------------------
+  //
+  // NOT the same question as isNotableHand, and the two must not be conflated.
+  // isNotableHand asks "was this hand big" about the TABLE, to decide what
+  // survives the storage cap. This asks what the History tab actually needs:
+  // did THIS player do anything here, and was any of it interesting? A 60bb
+  // pot that two other players fought over is notable for the table and
+  // completely uninteresting for the seat you are reading about.
+  //
+  // Reported: "I don't want it to show all hands because that includes hands
+  // they fold too without any calling or raising ... I want it to highlight
+  // hands that are interesting or out of blue, like big pots, or highlight
+  // interesting 3bets or reraise."
+  //
+  // Everything below comes off h.actions, which already stores {x, a, amt, s}
+  // for every action and is persisted in full. No new collection, and it works
+  // RETROACTIVELY on every hand already in the store — the fifth time
+  // "check whether it's already collected" has paid off in this file.
+
+  // 'post' is a blind you had no choice about, 'check' is declining to invest,
+  // 'fold' is leaving. None is money the player CHOSE to put in — which is
+  // exactly the distinction the History tab was missing.
+  const VOLUNTARY_ACTIONS = { call: 1, bet: 1, raise: 1 };
+
+  // A pot this many times the median of the hands on screen counts as big.
+  // Relative rather than absolute because the stored record carries no blind
+  // level before v1.35.0, and because the user plays more than one stake — a
+  // fixed chip figure would call every hand at the higher stake "big".
+  const BIG_POT_MEDIAN_MULT = 2.5;
+  // Used instead whenever the hand DOES carry a blind level, so the threshold
+  // means the same thing regardless of what else is on screen.
+  const BIG_POT_BB = 40;
+
+  // Score thresholds. WON alone (10) deliberately does NOT clear the bar:
+  // winning a pot everyone folded to is not an interesting hand, it is most
+  // hands. Showdown does clear it — cards face-up is the only direct evidence
+  // of a range this HUD ever gets.
+  const NOTABLE_SCORE_MIN = 50;
+
+  // Every tag key handNotability can emit. Declared once so a test can assert
+  // each has a CSS rule: the class is built as `tph-hh-tag-${key}`, so a key
+  // with no matching rule renders an unstyled grey chip and nothing errors —
+  // the same silent-typo hazard CLAUDE.md records for coach relevance tokens.
+  // no-orphans' literal scan cannot see a concatenated class (the prefix is in
+  // its DYNAMIC_PREFIXES), so test/hand-notability.test.js covers them
+  // instead — exactly the split BOARD_FLAGS already uses.
+  const HAND_TAG_KEYS = ['4B', '3B', 'XR', 'RR', 'BIG', 'SD', 'WON'];
+
+  function handNotability(h, xid, ctx) {
+    const mine = (h.actions || []).filter((a) => String(a.x) === String(xid));
+    const voluntary = mine.some((a) => VOLUNTARY_ACTIONS[a.a]);
+    const tags = [];
+    let score = 0;
+    const add = (key, label, title, points) => { tags.push({ key, label, title }); score += points; };
+
+    // Preflop raise TIER, counted by walking the street in order: the first
+    // raise is an open, the second a 3-bet, the third a 4-bet. Same counting
+    // maybeCountThreeBet uses, so a tier shown here can't disagree with the
+    // 3-bet stat. Inherits open finding #3 — an all-in counts as a raise, so
+    // a short-stack all-in CALL can read one tier high.
+    let raisesSoFar = 0;
+    let tier = 0;
+    (h.actions || []).forEach((a) => {
+      if (a.s !== 'preflop' || a.a !== 'raise') return;
+      raisesSoFar++;
+      if (String(a.x) === String(xid)) tier = Math.max(tier, raisesSoFar);
+    });
+    // OFF BY ONE IS THE TRAP HERE, and it is worth stating: the Nth raise of a
+    // street is an (N+1)-bet, because the blind is the first bet. The opening
+    // raise is the 1st raise, a 3-bet is the 2nd, a 4-bet the 3rd, a 5-bet the
+    // 4th. An earlier draft labelled the 4th raise "4B" and the test written
+    // alongside it asserted exactly that, so both agreed and both were wrong.
+    //
+    // The CLASS stays '4B' for anything at or above a 4-bet so the CSS rule
+    // set stays finite; only the LABEL counts on.
+    if (tier >= 2) {
+      const betLevel = tier + 1;
+      add(tier === 2 ? '3B' : '4B', `${betLevel}B`,
+        `Made preflop raise number ${tier} — a ${betLevel}-bet.`,
+        tier === 2 ? 80 : 100);
+    }
+
+    // Check-raise, and postflop re-raise. Checked FIRST on the same street
+    // then raised is the stronger, rarer line, so the two are exclusive rather
+    // than both firing on the same action.
+    let checkRaised = false;
+    let postflopRaise = false;
+    ['flop', 'turn', 'river'].forEach((street) => {
+      const onStreet = mine.filter((a) => a.s === street);
+      const raiseAt = onStreet.findIndex((a) => a.a === 'raise');
+      if (raiseAt === -1) return;
+      postflopRaise = true;
+      if (onStreet.slice(0, raiseAt).some((a) => a.a === 'check')) checkRaised = true;
+    });
+    if (checkRaised) add('XR', 'XR', 'Check-raised: checked, then raised the same street.', 70);
+    else if (postflopRaise) add('RR', 'RR', 'Raised postflop.', 60);
+
+    // Big pot. Prefers the hand's own blind level when it has one (v1.35.0
+    // onward); otherwise relative to the other hands on screen, which needs
+    // nothing stored and adapts to whatever stake is being played.
+    const bigByBB = plausibleBB(h.bb) && (h.pot / h.bb) >= BIG_POT_BB;
+    const bigByMedian = !plausibleBB(h.bb) && ctx && ctx.medianPot > 0
+      && h.pot >= ctx.medianPot * BIG_POT_MEDIAN_MULT;
+    if (bigByBB || bigByMedian) {
+      add('BIG', 'BIG', bigByBB
+        ? `Pot reached ${Math.round(h.pot / h.bb)} big blinds.`
+        : `Pot was ${(h.pot / ctx.medianPot).toFixed(1)}x the median of the hands shown.`, 55);
+    }
+
+    if (h.shown && h.shown[xid]) {
+      add('SD', 'SD', `Showed ${h.shown[xid]} at showdown — direct evidence of their range.`, 50);
+    }
+    if ((h.winners || []).some((w) => String(w.xid) === String(xid))) {
+      const amt = (h.winners || []).filter((w) => String(w.xid) === String(xid))
+        .reduce((s, w) => s + (w.amount || 0), 0);
+      add('WON', 'WON', `Won ${fmtMoney(amt)}.`, 10);
+    }
+
+    return { voluntary, acted: mine.length > 0, score, tags, notable: score >= NOTABLE_SCORE_MIN };
+  }
+
+  // The three History filters. 'played' is the default because a list where
+  // most rows are "folded preflop, did nothing" buries the hands that carry a
+  // read — which is what was reported.
+  const HISTORY_FILTERS = {
+    played: { label: 'Played', title: 'Hands where they called, bet or raised at least once. Blinds and checks alone do not count.' },
+    notable: { label: 'Notable', title: 'Only hands carrying a marker — 3-bet, check-raise, postflop raise, big pot or showdown.' },
+    all: { label: 'All', title: 'Every hand they were dealt into, including ones they folded without acting.' },
+  };
+
+  function filterHandsFor(hands, xid, mode, ctx) {
+    return hands.filter((h) => {
+      if (mode === 'all') return true;
+      const n = handNotability(h, xid, ctx);
+      return mode === 'notable' ? n.notable : n.voluntary;
+    });
   }
 
   // --- Hand replayer (v1.17.0) -------------------------------------------
@@ -7449,6 +7611,30 @@
       font-size: 11px; margin: -2px 0 9px; padding: 4px 6px; border-radius: 4px;
       background: rgba(255,255,255,.04); color: #cfd6dd !important; }
     .tph-target-txt { color: inherit !important; }
+    /* History filter chips. Own colours throughout — pinTextColor skips tph-
+       elements, so anything here declaring none renders dark-on-dark. */
+    .tph-hf-bar { display: flex; gap: 5px; margin: 0 0 8px; flex-wrap: wrap; }
+    .tph-hf { font-size: 11px; padding: 3px 9px; border-radius: 10px; cursor: pointer;
+      border: 1px solid #3d3d48; background: rgba(255,255,255,.04);
+      color: #a8b2bd !important; white-space: nowrap; }
+    .tph-hf-on { background: #6b8cae !important; border-color: #6b8cae;
+      color: #0d1117 !important; font-weight: 700; }
+    /* Per-hand markers. Colour groups them by kind rather than decorating:
+       gold = preflop aggression, blue = postflop aggression, red = a big pot,
+       violet = cards seen, green = won. Matches the badge role-chip palette so
+       3B means the same colour in both places. */
+    .tph-hh-tags { display: flex; gap: 4px; margin-bottom: 4px; flex-wrap: wrap; }
+    .tph-hh-tag { font-size: 9.5px; font-weight: 700; letter-spacing: .5px;
+      padding: 1px 5px; border-radius: 3px; color: #0d1117 !important; background: #8d959c; }
+    .tph-hh-tag-3B, .tph-hh-tag-4B { background: #ffc94d; }
+    .tph-hh-tag-XR, .tph-hh-tag-RR { background: #7fd4ff; }
+    .tph-hh-tag-BIG { background: #ff9d8a; }
+    .tph-hh-tag-SD { background: #d4b3f0; }
+    .tph-hh-tag-WON { background: #8ce89a; }
+    /* The notable hands are what the whole filter exists to surface, so they
+       get a visible edge rather than only a chip. */
+    .tph-hh-notable { border-left: 3px solid #ffc94d; padding-left: 6px;
+      margin-left: -9px; }
     /* Settings diagnostic. Its own colours for the same pinTextColor reason. */
     .tph-target-diag { font-size: 11px; margin: 2px 0 6px; padding: 4px 6px;
       border-radius: 4px; background: rgba(255,255,255,.04); color: #cfd6dd !important; }
@@ -8545,6 +8731,11 @@
 
   let openPlayerXid = null;
   let openPlayerTab = 'stats';
+  // History tab filter. Session state, not a setting: it is a way of looking
+  // at one player right now, not a preference worth persisting — and a stored
+  // 'notable' would silently hide everything the next time a player with no
+  // notable hands was opened.
+  let historyFilter = 'played';
   // Survives the panel closing (openPlayerXid itself goes null on close, so
   // it can't answer "is this the same player as before"). Reopening the same
   // player you just closed on — the close-to-act-then-reopen cycle this is
@@ -8945,27 +9136,63 @@
       if (!hands.length) {
         body.innerHTML = '<i>No hands recorded with this player yet.</i>';
       } else {
-        const shown = hands.slice(0, 40);
+        // Median over EVERY hand with this player, not just the filtered set —
+        // otherwise filtering to Notable would recompute the median from
+        // already-big pots and immediately stop calling any of them big.
+        const pots = hands.map((h) => h.pot || 0).filter((p) => p > 0);
+        const ctx = { medianPot: pots.length ? median(pots) : 0 };
+        const filtered = filterHandsFor(hands, openPlayerXid, historyFilter, ctx);
+        const shown = filtered.slice(0, 40);
+        const hiddenByFilter = hands.length - filtered.length;
         // Clipboard stays plain text; only the on-screen rendering is markup.
         const text = shown.map((h) => formatHand(h, openPlayerXid)).join('\n\n');
+        const chips = Object.keys(HISTORY_FILTERS).map((k) => `<span class="tph-hf${
+          historyFilter === k ? ' tph-hf-on' : ''}" data-hf="${k}" title="${
+          escapeHtml(HISTORY_FILTERS[k].title)}">${HISTORY_FILTERS[k].label}</span>`).join('');
         // Copy takes what is on screen; Export takes everything. The two buttons
         // say which is which, because "Copy history" quietly giving you 40 of
-        // 300 hands is the kind of thing you only notice much later.
-        body.innerHTML = `<div style="color:#c9d1d9 !important;margin-bottom:8px">${hands.length} hand(s) recorded`
-          + `${hands.length > shown.length ? `, showing ${shown.length}` : ''} — `
+        // 300 hands is the kind of thing you only notice much later. The count
+        // now has a second way to mislead — the filter — so it is stated too.
+        body.innerHTML = `<div class="tph-hf-bar">${chips}</div>`
+          + `<div style="color:#c9d1d9 !important;margin-bottom:8px">${filtered.length} of ${hands.length} hand(s)`
+          + `${filtered.length > shown.length ? `, showing ${shown.length}` : ''}`
+          + `${hiddenByFilter > 0 ? ` · ${hiddenByFilter} hidden by filter` : ''} — `
           + `<span style="${HH.me}">their actions highlighted</span></div>`
-          + shown.map((h, i) => `<div class="tph-hh-wrap" data-idx="${i}">${formatHandHtml(h, openPlayerXid)}`
-            + `<button class="tph-hh-replay">▶ Replay this hand</button></div>`).join('')
-          + `<button class="tph-copy-hist">Copy shown (${shown.length})</button>`
+          + (shown.length ? '' : `<i>No hands match this filter. ${
+            historyFilter === 'notable'
+              ? 'Nothing they did here cleared the notable bar yet — try Played or All.'
+              : 'They folded every recorded hand without calling or raising — try All.'}</i>`)
+          + shown.map((h, i) => {
+            const n = handNotability(h, openPlayerXid, ctx);
+            const tagHtml = n.tags.map((t) => `<span class="tph-hh-tag tph-hh-tag-${t.key}" title="${
+              escapeHtml(t.title)}">${escapeHtml(t.label)}</span>`).join('');
+            return `<div class="tph-hh-wrap${n.notable ? ' tph-hh-notable' : ''}" data-idx="${i}">`
+              + (tagHtml ? `<div class="tph-hh-tags">${tagHtml}</div>` : '')
+              + formatHandHtml(h, openPlayerXid)
+              + '<button class="tph-hh-replay">▶ Replay this hand</button></div>';
+          }).join('')
+          + (shown.length ? `<button class="tph-copy-hist">Copy shown (${shown.length})</button>` : '')
           + `<button class="tph-export-hist">${isPDA() ? 'Save / share all' : 'Download all'}`
           + ` (${hands.length})</button>`;
+        body.querySelectorAll('.tph-hf').forEach((chip) => {
+          chip.addEventListener('click', () => {
+            historyFilter = chip.dataset.hf;
+            renderPlayerPanel();
+          });
+        });
         body.querySelectorAll('.tph-hh-replay').forEach((btn, i) => {
           btn.addEventListener('click', () => openReplayHand(shown[i]));
         });
-        body.querySelector('.tph-copy-hist').addEventListener('click', async (e) => {
-          const ok = await copyText(text);
-          e.target.textContent = ok ? 'Copied ✓' : 'Copy failed — try Save / share instead';
-        });
+        // Guarded: the filter can empty the list, and the Copy button is not
+        // rendered when there is nothing to copy. An unguarded querySelector
+        // here would throw and take the whole tab body down with it.
+        const copyBtn = body.querySelector('.tph-copy-hist');
+        if (copyBtn) {
+          copyBtn.addEventListener('click', async (e) => {
+            const ok = await copyText(text);
+            e.target.textContent = ok ? 'Copied ✓' : 'Copy failed — try Save / share instead';
+          });
+        }
         body.querySelector('.tph-export-hist').addEventListener('click', async (e) => {
           const stamp = new Date().toISOString().slice(0, 10);
           const file = `torn-poker-hud-history-${fileSafeName(playerDisplayName(openPlayerXid))}-${stamp}.txt`;
@@ -10328,6 +10555,13 @@
       opponentRangeProxy,
       equityBasisLabel,
       parseAffiliationProfile,
+      handNotability,
+      filterHandsFor,
+      HISTORY_FILTERS,
+      HAND_TAG_KEYS,
+      NOTABLE_SCORE_MIN,
+      BIG_POT_BB,
+      BIG_POT_MEDIAN_MULT,
       parseTargetStatus,
       attackReadiness,
       ATTACK_BLOCKERS,

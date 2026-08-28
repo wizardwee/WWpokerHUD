@@ -9,6 +9,123 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.35.0
+
+The History tab stops burying the interesting hands under the folds.
+
+Asked for directly: *"I don't want it to show all hands because that
+includes hands they fold too without any calling or raising ... I want it
+to highlight hands that are interesting or out of blue, like big pots, or
+highlight interesting 3bets or reraise."*
+
+### Two different questions about the same hand
+
+`isNotableHand` already existed — but it asks about the **table**: was this
+pot big, for deciding what survives the storage cap. The History tab needs
+the other question entirely: did **this player** do anything here, and was
+any of it interesting?
+
+A 60bb pot that two other players fought over is notable for the table and
+completely worthless as a read on the seat you are looking at. Conflating
+the two would put every big hand in every player's list. So
+`handNotability(hand, xid, ctx)` is a separate function with a separate
+name, kept distinct the same way `p.texture` (hand strength) and
+`p.boardTex` (board texture) are.
+
+### Nothing new is collected
+
+Everything derives from `h.actions`, which already stores `{x, a, amt, s}`
+for every action and is persisted in full. So this works **retroactively**
+on all 200 stored hands — open a player you have history with and the
+markers are already there. That is the fifth time checking before adding
+collection has paid off in this file.
+
+The action vocabulary turned out to answer the question exactly:
+`post` / `fold` / `check` / `call` / `bet` / `raise`. Voluntary is
+`call`/`bet`/`raise` only — a `post` is a blind you had no choice about, a
+`check` is declining to invest, a `fold` is leaving. That is precisely the
+"folded without any calling or raising" the report named.
+
+### The markers
+
+| tag | meaning |
+|---|---|
+| **3B / 4B+** | preflop raise tier |
+| **XR** | check-raise — checked, then raised the *same* street |
+| **RR** | raised postflop (exclusive with XR, never both) |
+| **BIG** | big pot |
+| **SD** | showed cards at showdown |
+| **WON** | won the pot |
+
+Colour-grouped by kind and matched to the badge's role chips, so `3B` is
+the same colour wherever you see it. Each carries a title explaining
+itself — an unexplained two-letter chip is noise.
+
+Notable is a score of 50+. **WON alone deliberately does not clear it**:
+winning an uncontested pot is most hands, not a read. **SD does** — cards
+face-up is the only direct evidence of a range this HUD ever gets.
+
+### Big pots, two ways
+
+`recordHandHistory` now stores `bb`. The blind level was already being
+computed at record time for `isNotableHand` and then thrown away, which
+left the History tab unable to price a pot at all. With it, "big" means
+40bb+ and means the same thing regardless of what else is on screen.
+
+Hands recorded before this have `bb: 0` and fall back to 2.5× the median
+pot of that player's hands — *relative*, because more than one stake gets
+played here and a fixed chip figure would call every hand at the higher
+stake big. An unknown blind is never read as small *or* big, and an
+implausible one (the BB-display-mode hazard) falls through to the median
+path rather than being believed.
+
+The median is computed over **all** the player's hands, not the filtered
+set. Otherwise filtering to Notable would recompute the median from
+already-big pots and immediately stop calling any of them big.
+
+### The filter
+
+Three chips — **Played** (default), **Notable**, **All** — each with a
+title stating what it hides. The count now reads "N of M … K hidden by
+filter": it already had one way to mislead (the 40-row display cap) and the
+filter is a second. The empty state differs per filter and names the way
+out.
+
+`historyFilter` is session state, not a setting. A persisted "Notable"
+would silently show an empty tab the next time you opened a player who
+happened to have none.
+
+### A bug I wrote, and the test that agreed with it
+
+The Nth raise of a street is an **(N+1)-bet**, because the blind is the
+first bet: an open is the 1st raise, a 3-bet the 2nd, a 4-bet the 3rd, a
+5-bet the 4th.
+
+The first draft labelled the 4th raise "4B" — and the assertion written
+alongside it asserted exactly that. Both agreed, both were wrong, and the
+suite was green. It only surfaced from checking the arithmetic against
+poker rather than against the code. The label now counts `tier + 1`; the
+CSS *class* stays `4B` for anything at or above a 4-bet so the rule set
+stays finite. Verified by reintroducing the bug and confirming five
+assertions fail.
+
+This is the same shape as the v1.0.1 lesson already in CLAUDE.md — a test
+that mirrors the implementation cannot catch the implementation being
+wrong.
+
+### Keeping the lint honest
+
+`tph-hh-tag-*` is built as `` `tph-hh-tag-${key}` ``, so `no-orphans`'
+literal scan cannot see it and it goes in `DYNAMIC_PREFIXES`. But that
+exemption is not left as a hole: a new `HAND_TAG_KEYS` constant declares
+every key, and `test/hand-notability.test.js` asserts each one has a CSS
+rule *and* that nothing emits an undeclared key. A key with no rule renders
+an unstyled grey chip and throws nothing — the same silent-typo failure
+CLAUDE.md records for coach relevance tokens. Same split `BOARD_FLAGS`
+already uses.
+
+74 assertions in `test/hand-notability.test.js`.
+
 ## 1.34.0
 
 The target status now actually appears, and can explain itself when it
