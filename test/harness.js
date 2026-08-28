@@ -84,6 +84,9 @@ function classDom() {
     addEventListener() {}, removeEventListener() {},
     createElement: (tag) => node(tag),
     createTextNode: () => node('text'),
+    // See the inert stub's note: renderBadges attaches its badges through a
+    // fragment so the reads and writes stay in separate passes.
+    createDocumentFragment: () => node('fragment'),
     querySelector: (sel) => matchAll(sel)[0] || null,
     querySelectorAll: matchAll,
     execCommand: () => false,
@@ -151,6 +154,10 @@ function load(opts = {}) {
     querySelectorAll: () => [],
     createElement: () => stubElement(),
     createTextNode: () => stubElement(),
+    // renderBadges builds into a fragment and attaches it in one write, to
+    // keep layout reads and DOM writes from interleaving. A fragment is just
+    // a node you can append to here — the stub needs nothing more.
+    createDocumentFragment: () => stubElement(),
     head: stubElement(),
     body: stubElement(),
     documentElement: stubElement(),
@@ -192,6 +199,15 @@ function load(opts = {}) {
     // Nothing runs until a test calls sandbox.runTimers().
     setTimeout: (fn) => { pendingTimers.push(fn); return pendingTimers.length; },
     clearTimeout() {},
+    // Bare globals, as they are in a real browser — the script calls these
+    // unqualified. They were only on `window` before, so any code path
+    // reaching one threw ReferenceError under the harness instead of running.
+    // Synchronous, like win's: a test driving the sliced equity scheduler gets
+    // the job run to completion rather than left pending forever. Frame-by-
+    // frame PACING is therefore not observable here, which is why
+    // test/equity-slicing.test.js drives equityJobStep directly to test that.
+    requestAnimationFrame: (fn) => { fn(); return 0; },
+    cancelAnimationFrame() {},
     setInterval: () => 0,
     clearInterval() {},
     // Drain the queue. Callbacks may schedule more; that is drained too, with a

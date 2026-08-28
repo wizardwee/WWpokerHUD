@@ -9,6 +9,128 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.31.0
+
+The table no longer freezes mid-hand. Reported as lag on the phone, with the
+reasonable guess that the single 524 KB file had simply grown too big to run
+well.
+
+It hadn't. The file is fetched once and parsed once; it costs nothing per
+frame, and splitting it would need a bundler, which is the one thing the
+"install by URL, fetch one file whole" model can't have. The lag was
+something else entirely, and measuring found it immediately.
+
+### What it actually was
+
+`estimateEquity` is, by a wide margin, the most expensive thing this script
+does. Measured on a desktop-class CPU at the production default of 1200
+iterations:
+
+| | |
+|---|---|
+| 5 opponents | ~45–50 ms |
+| 8 opponents vs `FOUR_BET_RANGE` | **~212 ms** |
+| every other pure-logic path in the file, combined | **under 2 ms** |
+
+The coach asks for two quotes per render, and a phone is several times
+slower again. All of it ran inline on the main thread, so each recompute
+froze the whole table — the badges, the log, the game's own controls.
+
+And it recomputed constantly. The live opponent count is part of the cache
+key, so **every fold misses the cache**, as does every street and every
+raise: on the order of eight to ten freezes per hand.
+
+That is also why "the script is too big" was such a reasonable guess. The
+symptom is indistinguishable from a heavy page — it just stutters — and
+nothing about it points at one function.
+
+### Sliced, not shrunk
+
+The Monte Carlo is now split into `equityJobInit` / `equityJobStep` /
+`equityJobValue`, and runs about 6 ms at a time across animation frames.
+Measured on the worst case above: the longest uninterrupted block goes from
+**212 ms to 6.6 ms, a 32× cut**, spread over 26 frames, with all 1200
+iterations still run. The arithmetic is untouched — the figure simply lands
+a beat later instead of freezing the table to arrive on time.
+
+There is deliberately **one** implementation of the loop. `estimateEquity`
+is now built on the same three functions, so the blocking path every
+existing test drives (and the hand replayer, where blocking briefly is
+correct) cannot drift from the sliced one. A second copy driven by the UI
+but not the tests is precisely the trap v1.0.1 already paid for: a test of
+a copy cannot fail when the original is wrong.
+
+`st.i` is the single progress marker, both read and advanced by the loop.
+An off-by-one there would change the sample count the result is divided by
+— which surfaces as a slightly wrong percentage, not an error. That is what
+`test/equity-slicing.test.js` exists to pin.
+
+### The starvation bug, caught before it shipped
+
+The first version of the scheduler had one job slot and cancelled it
+whenever a new key was requested. The coach asks for two quotes per render,
+so quote A started, quote B cancelled it, the next render restarted A, B
+cancelled it again — and **neither ever finished**. It would have presented
+as the equity line simply never appearing.
+
+Requests are queued instead, capped at three with the oldest dropped first
+(the most likely stale after a fold or a new street). The regression is
+pinned by name in the test file.
+
+### Two smaller things the measuring turned up
+
+**`renderBadges` was thrashing layout.** It called
+`seat.getBoundingClientRect()` and `document.body.appendChild()` inside the
+same loop — a layout read immediately after the write that dirties layout,
+which forces a synchronous reflow every iteration. Nine seats meant nine
+forced reflows per render, and since badges re-render on scroll through
+`requestAnimationFrame`, nine per *frame* while the table moved. It is now
+two passes: every read first, then the badges built into a
+`DocumentFragment` and attached in one write.
+
+**The equity engine was reaching up into the UI.** The pump called
+`renderCoachPanel` directly to show the finished figure. It now notifies
+through an `onEquityReady` hook that `init()` binds, which keeps the
+dependency one-way and is what makes the whole scheduler testable without a
+DOM.
+
+### An escape hatch, since the device can't be measured from here
+
+Settings → Coach now exposes **Equity samples** (100–5000, default 1200).
+Slicing means it no longer blocks whatever the value, but on a slow phone a
+lower number makes the figure *land* sooner. Precision scales as 1/√n —
+1200 is roughly ±1.4 points, 600 ±2, 300 ±2.9, all comfortably inside the
+error the range proxy already carries, which is what makes turning it down
+a real trade rather than a corner cut. Changing it clears the cache, so two
+precisions can't sit on screen at once with nothing saying which is which.
+
+`clampEquityIters` is applied inside `equityJobInit`, not just at the input,
+so a hand-edited or imported store can't hand the coach a value that leaves
+it grinding.
+
+The coach now says `Eq … working…` while a figure is pending, rather than
+letting the line vanish and reappear a beat later — a line that flickers
+reads as a bug, and an empty space says nothing about why it's empty.
+
+### Also fixed: a test that flagged the CPU, not the code
+
+`test/equity-ranges.test.js` asserted a wall-clock budget (`ms < 150`) on
+the very call this release restructures. It was measured on one machine and
+failed intermittently on anything slower — confirmed against unchanged code
+before touching it, so this was pre-existing and not caused by the work
+above.
+
+It now asserts a **ratio**: range-weighted sampling against unweighted on
+the same call, capped at 6×. That still catches the ~16× regression the
+test exists for, is hardware-independent, and — unlike an absolute budget —
+doesn't quietly stop testing anything at all when the machine gets faster.
+
+42 new assertions in `test/equity-slicing.test.js`. `test/harness.js` gained
+`createDocumentFragment` in both DOM modes, and `requestAnimationFrame` /
+`cancelAnimationFrame` as bare globals: they existed only on `window`
+before, so any code path reaching one threw `ReferenceError` under the
+harness instead of running.
+
 ## 1.30.0
 
 Player names now link to their Torn profile, and a new 🏥 hospital-status

@@ -137,9 +137,17 @@ t.eq('', T.equityBasisLabel(4), 'vs 4-bet range');
 // FOUR_BET_RANGE, vs ~20ms for the unweighted path: a ~16x regression that
 // would visibly stall the coach panel, which requests two of these on every
 // render. The fix precomputes the combo list once per call instead of once
-// per iteration. This asserts a budget loose enough to not be flaky on a slow
-// CI box, but tight enough that the old O(pool²)-per-iteration approach would
-// fail it outright (it measured ~300ms+ here, this asserts under 150ms).
+// per iteration.
+//
+// Asserted as a RATIO against the unweighted path on the same call, not as a
+// wall-clock budget. The budget this replaced (`ms < 150`) was measured on one
+// machine and failed intermittently on any box slower than that one — it
+// flagged the CPU it happened to be running on, not a regression in this code,
+// which is the one thing a perf test must never do. The regression it exists
+// to catch was ~16x; range-weighting legitimately costs somewhat more than
+// uniform sampling, so anything up to 6x passes and the old approach still
+// fails outright. A ratio also survives the machine getting faster, where an
+// absolute budget silently stops testing anything at all.
 
 {
   const hand = [card('K', 'd'), card('Q', 'd')];
@@ -149,11 +157,20 @@ t.eq('', T.equityBasisLabel(4), 'vs 4-bet range');
   // pays on a live table.
   const savedIters = T.STORE.settings.equityIters;
   T.STORE.settings.equityIters = 1200;
-  const start = Date.now();
-  T.estimateEquity(hand, [], 8, 3);
-  const ms = Date.now() - start;
+
+  const timeOne = (raiseLevel) => {
+    T.estimateEquity(hand, [], 8, raiseLevel); // warm, so JIT state is comparable
+    const start = Date.now();
+    T.estimateEquity(hand, [], 8, raiseLevel);
+    return Math.max(1, Date.now() - start); // floor at 1ms so the ratio can't divide by zero
+  };
+  const uniform = timeOne(0);   // no range: the unweighted baseline
+  const weighted = timeOne(3);  // FOUR_BET_RANGE: the narrowest, worst case
   T.STORE.settings.equityIters = savedIters;
-  t.ok(`a single 8-opponent narrow-range call completes well under budget at the real default iters (${ms}ms)`, ms < 150);
+
+  const ratio = weighted / uniform;
+  t.ok(`range-weighted sampling costs no more than 6x unweighted at 8 opponents `
+    + `(${weighted}ms vs ${uniform}ms, ${ratio.toFixed(1)}x)`, ratio <= 6);
 }
 
 // --- estimateEquityCached: raiseLevel is part of the cache key --------------

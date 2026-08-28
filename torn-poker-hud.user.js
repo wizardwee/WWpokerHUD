@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.30.0
+// @version      1.31.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,71 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.31.0 - The table no longer freezes mid-hand. Reported as phone lag, with
+ *          the reasonable guess that the 524 KB single file had grown too big
+ *          to run well. It hadn't — that file is fetched and parsed ONCE and
+ *          costs nothing per frame, and splitting it needs a bundler, the one
+ *          thing "install by URL, fetch one file whole" cannot have.
+ *            - MEASURED, which found it immediately. estimateEquity at the
+ *              1200-iteration default: ~45-50ms at five opponents, ~212ms at
+ *              eight vs FOUR_BET_RANGE, on a desktop-class CPU. Every OTHER
+ *              pure-logic path in the file COMBINED is under 2ms. The coach
+ *              asks two quotes per render and a phone is several times slower
+ *              again, and it all ran inline on the main thread.
+ *            - It missed cache constantly: the live opponent count is part of
+ *              the key, so EVERY FOLD recomputes, as does every street and
+ *              every raise — eight to ten freezes a hand. That is also why
+ *              "the file is too big" was such a fair guess: the symptom is
+ *              indistinguishable from a heavy page.
+ *            - SLICED, NOT SHRUNK. The Monte Carlo is now equityJobInit /
+ *              equityJobStep / equityJobValue, run ~6ms at a time across
+ *              animation frames. Longest uninterrupted block on that worst
+ *              case: 212ms -> 6.6ms, a 32x cut over 26 frames, with all 1200
+ *              iterations still run. The arithmetic is untouched.
+ *            - ONE implementation of the loop: estimateEquity is now built on
+ *              the same three functions, so the blocking path (every existing
+ *              test, and the replayer, where blocking briefly is right) cannot
+ *              drift from the sliced one. A second UI-only copy is exactly the
+ *              v1.0.1 trap — a test of a copy cannot fail when the original is
+ *              wrong.
+ *            - STARVATION BUG, caught before shipping. The first scheduler had
+ *              one slot and cancelled on key mismatch; the coach's two quotes
+ *              cancelled each other every render and NEITHER ever finished.
+ *              Requests are queued instead, capped at 3, oldest dropped first.
+ *              Pinned by name in test/equity-slicing.test.js.
+ *            - renderBadges was THRASHING LAYOUT: getBoundingClientRect (read)
+ *              interleaved with body.appendChild (the write that dirties
+ *              layout) in one loop = a forced synchronous reflow per seat.
+ *              Nine per render, and nine per FRAME while scrolling, since
+ *              badges re-render on scroll via rAF. Now two passes — all reads,
+ *              then a DocumentFragment attached in one write.
+ *            - The engine no longer reaches into the UI: the pump notifies
+ *              through an onEquityReady hook that init() binds, instead of
+ *              calling renderCoachPanel itself. One-way dependency, and it is
+ *              what makes the scheduler testable with no DOM at all.
+ *            - Settings -> Coach exposes "Equity samples" (100-5000, default
+ *              1200). Slicing means it never blocks now whatever the value,
+ *              but a lower one makes the figure LAND sooner on a slow phone.
+ *              Precision goes as 1/sqrt(n): 1200 ~ +/-1.4 points, 600 ~ +/-2,
+ *              300 ~ +/-2.9 — all inside the error the range proxy already
+ *              carries. Changing it clears the cache so two precisions can't
+ *              share the screen. clampEquityIters is applied inside
+ *              equityJobInit too, so an imported store can't hang the coach.
+ *            - The coach says "Eq ... working..." while a figure is pending,
+ *              rather than letting the line vanish and reappear.
+ *            - ALSO FIXED, pre-existing: test/equity-ranges.test.js asserted a
+ *              wall-clock budget (ms < 150) and failed intermittently on any
+ *              box slower than the one it was written on — confirmed against
+ *              UNCHANGED code before touching it. It flagged the CPU, not a
+ *              regression. Now a hardware-independent ratio (weighted vs
+ *              unweighted, <= 6x) that still catches the ~16x regression it
+ *              exists for, and doesn't stop testing anything when the machine
+ *              gets faster.
+ *            - 42 new assertions in test/equity-slicing.test.js. harness.js
+ *              gained createDocumentFragment and bare-global
+ *              requestAnimationFrame/cancelAnimationFrame — they were only on
+ *              `window`, so any path reaching one threw ReferenceError.
  *
  * 1.30.0 - Player names are now clickable through to their Torn profile, and a
  *          new 🏥 hospital-status read. Asked for directly — "ready to mug
@@ -108,31 +173,6 @@
  *              showdown.
  *            - 48 new assertions in test/bluff-tracking.test.js.
  *
- * 1.28.1 - The By-board-texture rows printed over the stat labels to their
- *          left. Reported from a Galaxy Fold cover screen — a genuinely narrow
- *          one, which is where this class of bug shows up first.
- *            - Structural, not cosmetic. .tph-stats is table-layout: fixed and
- *              .tph-stat-v is pinned to 26% AND white-space: nowrap (both
- *              deliberate — see the comment there). v1.28.0 put FOUR figures in
- *              that cell ("30% / 45% · 60% / 52%") where every other row puts
- *              one, so it could not wrap and spilled straight out of its fixed
- *              column onto the label beside it.
- *            - It also ignored this file's own convention: statRow already
- *              puts the greyed pool reference in the 44% NOTE column, not the
- *              value column. Now it does the same — villain's own "30%/60%" in
- *              the value cell, "pool 45%/52% · 12L/9F" in the note cell.
- *            - New .tph-stat-wrap modifier lets a note cell carrying a PHRASE
- *              (rather than one figure) wrap instead of overflow. Declared
- *              after .tph-stat-n so the white-space override wins on equal
- *              specificity; the colour still comes from .tph-stat-n, per the
- *              rule that every tph- element holding text declares its own.
- *            - Measured the other rows rather than fixing only the reported
- *              one, and found a WORSE offender: the Bet size note gained
- *              "· N lifetime" in v1.26.0, making it ~31 characters (~167px) in
- *              a ~108px column. Same fix applied there before it was reported.
- *            - 7 new assertions in test/board-texture.test.js pinning the
- *              column split and the modifier's declaration order.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -195,7 +235,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.30.0';
+  const HUD_VERSION = '1.31.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -421,7 +461,16 @@
     turnSound: false,   // opt-in: a synthesised two-note chime
     foldGuard: true,    // tap Fold twice to confirm — see foldGuardHandler
     heroName: '',      // YOUR Torn username. Without it P/L and position can't be attributed.
-    equityIters: 1200, // Monte Carlo samples per equity estimate
+    // Monte Carlo samples per equity estimate. Exposed in Settings because
+    // this is by far the most expensive thing the script does, and the phones
+    // it runs on differ by an order of magnitude in how fast they get through
+    // it. The work is sliced across frames so it no longer blocks the table
+    // (see estimateEquitySliced), but on a slow device a lower figure still
+    // makes the number LAND sooner. Precision scales as 1/sqrt(n): 1200 is
+    // roughly +/-1.4 percentage points, 600 about +/-2, 300 about +/-2.9 —
+    // all well inside the error the range PROXY already carries, which is why
+    // turning it down is a reasonable trade rather than a corner cut.
+    equityIters: 1200,
     tableMax: 9,       // seats at a full table — the baseline equity is always
                        // quoted against a full ring (tableMax - 1 opponents)
     // Optional. A public-only Torn API key is enough — used solely to look up
@@ -5535,7 +5584,18 @@
   // optimistically against loose ones — the exact caveat "Eq vs random" was
   // already printed on this figure to admit. The UI wording is updated
   // alongside this to say what it now means for a raised pot.
-  function estimateEquity(heroCards, boardCards, nOpp, raiseLevel) {
+  // The Monte Carlo is split into init / step / value so the SAME loop can be
+  // run either straight through (estimateEquity, just below) or a slice at a
+  // time across animation frames (runEquityJob, for the live coach panel).
+  //
+  // ONE implementation, deliberately. A second copy of the loop for the sliced
+  // path — driven by the UI but not by the tests — is precisely the trap this
+  // repo has already paid for once: "a test of a copy cannot fail when the
+  // original is wrong" (v1.0.1, see CLAUDE.md). Everything below drives this.
+  //
+  // Returns null when the situation cannot be simulated at all: bad cards, an
+  // over-long board, or more opponents than the remaining deck can deal.
+  function equityJobInit(heroCards, boardCards, nOpp, raiseLevel) {
     if (!heroCards || heroCards.length !== 2) return null;
     const hero = heroCards.map(cardToNum);
     const board = (boardCards || []).map(cardToNum).filter((c) => c.s >= 0 && c.r >= 2);
@@ -5574,10 +5634,22 @@
       }
     }
 
-    const iters = STORE.settings.equityIters || 1200;
-    let win = 0;
-    let tie = 0;
-    for (let it = 0; it < iters; it++) {
+    const iters = clampEquityIters(STORE.settings.equityIters);
+    return { hero, board, deck, need, nOpp, rangeSet, rangeCombos, iters, i: 0, win: 0, tie: 0 };
+  }
+
+  // Runs at most `budget` further iterations, resuming exactly where the last
+  // call left off, and returns true once every iteration has been run.
+  //
+  // `st.i` is the ONLY progress marker: the loop below both reads and advances
+  // it, so a slice can never re-run or skip an iteration no matter how the
+  // budget falls. test/equity-slicing.test.js pins that — an off-by-one here
+  // would silently change the sample size the result is divided by, which
+  // would look like a slightly wrong equity figure rather than like a bug.
+  function equityJobStep(st, budget) {
+    const { hero, board, deck, need, nOpp, rangeSet, rangeCombos } = st;
+    const end = Math.min(st.iters, st.i + Math.max(1, budget));
+    for (; st.i < end; st.i++) {
       // Board completion cards only, drawn first so range-weighted opponent
       // hands below always avoid whatever the board turned out to be.
       for (let i = 0; i < need; i++) {
@@ -5636,9 +5708,24 @@
         if (best === null || cmpHand(ov, best) > 0) best = ov;
       }
       const c = cmpHand(hv, best);
-      if (c > 0) win++; else if (c === 0) tie++;
+      if (c > 0) st.win++; else if (c === 0) st.tie++;
     }
-    return (100 * (win + tie * 0.5)) / iters;
+    return st.i >= st.iters;
+  }
+
+  function equityJobValue(st) {
+    return (100 * (st.win + st.tie * 0.5)) / st.iters;
+  }
+
+  // Blocking equity: the whole simulation, straight through. Still the right
+  // shape for the hand replayer, which is user-driven one step at a time and
+  // wants the number in hand before it renders, and it stays the reference
+  // implementation every existing equity test drives.
+  function estimateEquity(heroCards, boardCards, nOpp, raiseLevel) {
+    const st = equityJobInit(heroCards, boardCards, nOpp, raiseLevel);
+    if (!st) return null;
+    equityJobStep(st, st.iters);
+    return equityJobValue(st);
   }
 
   // The coach panel re-renders every 1.5s; recomputing thousands of showdowns
@@ -5654,19 +5741,144 @@
   // figure straight through the raise that should have changed it.
   const EQUITY_CACHE_MAX = 12;
   const equityCache = new Map();
-  function estimateEquityCached(heroCards, boardCards, nOpp, raiseLevel) {
-    const key = heroCards.map((c) => c.rank + c.suit).join('')
+
+  function equityCacheKey(heroCards, boardCards, nOpp, raiseLevel) {
+    return heroCards.map((c) => c.rank + c.suit).join('')
       + '|' + (boardCards || []).map((c) => c.rank + c.suit).join('')
       + '|' + nOpp + '|' + (Number(raiseLevel) || 0);
-    if (equityCache.has(key)) return equityCache.get(key);
-    const v = estimateEquity(heroCards, boardCards, nOpp, raiseLevel);
-    equityCache.set(key, v);
+  }
+
+  function equityCacheSet(key, value) {
+    equityCache.set(key, value);
     // Board changes make old entries unreachable; cap the map so a long session
     // doesn't accumulate one entry per hand forever.
     if (equityCache.size > EQUITY_CACHE_MAX) {
       equityCache.delete(equityCache.keys().next().value);
     }
-    return v;
+    return value;
+  }
+
+  function estimateEquityCached(heroCards, boardCards, nOpp, raiseLevel) {
+    const key = equityCacheKey(heroCards, boardCards, nOpp, raiseLevel);
+    if (equityCache.has(key)) return equityCache.get(key);
+    return equityCacheSet(key, estimateEquity(heroCards, boardCards, nOpp, raiseLevel));
+  }
+
+  // --- Sliced equity, for the live coach panel -----------------------------
+  //
+  // WHY this exists: the simulation is by a wide margin the most expensive
+  // thing this script does. Measured on a desktop-class CPU, one call costs
+  // ~45-50ms at five opponents and ~150ms at eight against a narrow range;
+  // the coach asks for TWO quotes, and a phone runs this several times slower
+  // again. Run straight through on the main thread that is a visible freeze of
+  // the whole table, and it recurs on every fold (the live opponent count is
+  // part of the cache key), every street and every raise — roughly eight to
+  // ten times a hand. Every other pure-logic path in this file put together
+  // measures under 2ms, so this is the only one worth restructuring.
+  //
+  // The fix is not to compute less, it is to stop computing it all in one go:
+  // the same iterations run a few milliseconds at a time across animation
+  // frames, so the table never blocks and the figure lands a beat later
+  // instead. Accuracy is untouched — it is the identical loop over the
+  // identical iteration count.
+  const EQUITY_SLICE_MS = 6;
+  // Iterations between clock checks. Small on purpose: one batch is the
+  // longest this can overshoot its slice budget by, and on a slow phone a
+  // single iteration is far more expensive than the Date.now() that bounds it.
+  const EQUITY_BATCH = 4;
+  // The coach asks for two quotes per render (the live count and the full
+  // ring). Requests are QUEUED rather than the newest cancelling the current
+  // one: with a single slot and cancel-on-mismatch, those two keys starve
+  // each other forever — quote A starts, quote B cancels it, the next render
+  // starts A again, B cancels it again, and NEITHER ever finishes. The cap is
+  // what keeps genuinely stale requests (the board moved, someone folded)
+  // from accumulating; oldest is dropped first, being the most likely stale.
+  const EQUITY_QUEUE_MAX = 3;
+  let equityJob = null;
+  let equityQueue = [];
+
+  // Bounds for the Settings input. The floor is where the error band gets wide
+  // enough (~±5 points at 100 samples) that the figure stops being a usable
+  // read at all; the ceiling is a guard against a typo'd 100000 leaving the
+  // coach grinding for minutes with nothing on screen.
+  const EQUITY_ITERS_MIN = 100;
+  const EQUITY_ITERS_MAX = 5000;
+  function clampEquityIters(v) {
+    const n = parseInt(v, 10);
+    if (isNaN(n)) return 1200;
+    return Math.min(EQUITY_ITERS_MAX, Math.max(EQUITY_ITERS_MIN, n));
+  }
+
+  function cancelEquityJob() {
+    if (equityJob && equityJob.handle) cancelAnimationFrame(equityJob.handle);
+    equityJob = null;
+  }
+
+  // Set by init() to renderCoachPanel. A hook rather than a direct call so the
+  // equity engine does not reach up into the UI layer: the pump's job is to
+  // compute and cache, and telling the panel is somebody else's concern. It
+  // also keeps the dependency one-way, which is what makes the scheduler
+  // drivable from a test — nothing here needs a DOM.
+  let onEquityReady = null;
+
+  function pumpEquityJob() {
+    const job = equityJob;
+    if (!job) return;
+    job.handle = 0;
+    const t0 = Date.now();
+    let done = false;
+    // Clock-bounded rather than a fixed iteration count: the whole point is to
+    // fit inside a frame on a device nobody here can measure, and the same
+    // iteration count costs wildly different amounts across phones.
+    while (!done && Date.now() - t0 < EQUITY_SLICE_MS) {
+      done = equityJobStep(job.st, EQUITY_BATCH);
+    }
+    if (!done) {
+      job.handle = requestAnimationFrame(pumpEquityJob);
+      return;
+    }
+    equityCacheSet(job.key, equityJobValue(job.st));
+    equityJob = null;
+    startNextEquityJob();
+    // The number exists now, and the panel that asked for it last rendered
+    // without it. Notify rather than waiting up to 1.5s for the next tick.
+    // Re-entrant (that render can queue more work), but bounded: every pass
+    // through here caches exactly one more key, and the panel only ever asks
+    // for two.
+    if (onEquityReady) onEquityReady();
+  }
+
+  function startNextEquityJob() {
+    while (!equityJob && equityQueue.length) {
+      const req = equityQueue.shift();
+      if (equityCache.has(req.key)) continue; // filled while it waited
+      const st = equityJobInit(req.heroCards, req.boardCards, req.nOpp, req.raiseLevel);
+      if (!st) { equityCacheSet(req.key, null); continue; } // unsimulatable — cache it
+      equityJob = { key: req.key, st, handle: 0 };
+      pumpEquityJob();
+    }
+  }
+
+  // Returns the equity if it is already known, null if this situation can
+  // never be simulated, and undefined while a job is still queued or running.
+  //
+  // Callers filter on `!= null`, which is loose equality on purpose: it drops
+  // undefined and null alike, so a pending figure simply doesn't render yet
+  // and no call site needs to know the difference.
+  function estimateEquitySliced(heroCards, boardCards, nOpp, raiseLevel) {
+    const key = equityCacheKey(heroCards, boardCards, nOpp, raiseLevel);
+    if (equityCache.has(key)) return equityCache.get(key);
+    const known = (equityJob && equityJob.key === key)
+      || equityQueue.some((r) => r.key === key);
+    if (!known) {
+      equityQueue.push({ key, heroCards, boardCards, nOpp, raiseLevel });
+      if (equityQueue.length > EQUITY_QUEUE_MAX) equityQueue.shift();
+      startNextEquityJob();
+    }
+    // startNextEquityJob may have finished the whole job synchronously on a
+    // fast device; if so the value is cached and there is no reason to hold it
+    // back for a frame.
+    return equityCache.has(key) ? equityCache.get(key) : undefined;
   }
 
   // Reconstruct seating order from the log: SB, BB, then the order players
@@ -6030,9 +6242,20 @@
         if (!wanted.some((w) => w.n === n)) wanted.push({ n, label });
       });
 
-      const quotes = wanted
-        .map((w) => ({ ...w, eq: estimateEquityCached(heroCards, board, w.n, hand.preflopRaiseEvents) }))
-        .filter((w) => w.eq != null);
+      // Sliced, not blocking: this is the single most expensive thing the HUD
+      // does, and running it inline froze the table for a beat on every fold,
+      // street and raise. A quote still being computed comes back undefined
+      // and is dropped by the `!= null` filter below, exactly as an
+      // unsimulatable one (null) always was.
+      const asked = wanted
+        .map((w) => ({ ...w, eq: estimateEquitySliced(heroCards, board, w.n, hand.preflopRaiseEvents) }));
+      const quotes = asked.filter((w) => w.eq != null);
+      // Say the figure is coming rather than letting the line vanish and
+      // reappear a beat later — a line that flickers in and out reads as a
+      // bug, and an empty space says nothing about why it is empty.
+      if (!quotes.length && asked.some((w) => w.eq === undefined)) {
+        out.push(`Eq ${equityBasisLabel(hand.preflopRaiseEvents)} <i>working…</i>`);
+      }
 
       if (quotes.length) {
         // Pot odds folded into the same line rather than its own. The basis
@@ -7803,8 +8026,16 @@
     // every OTHER seated xid, so computing the list once avoids an O(seats²)
     // re-scan of the DOM inside the per-seat loop below.
     const seatedList = Array.from(seatedXids({ includeSittingOut: true }));
-    const seats = document.querySelectorAll(SELECTORS.seatContainer);
-    seats.forEach((seat) => {
+
+    // EVERY layout read happens here, before any write — the two are never
+    // interleaved. getBoundingClientRect forces a synchronous reflow whenever
+    // the layout is dirty, and appending a badge is exactly what dirties it,
+    // so measuring and appending inside one loop made every seat pay for a
+    // full page reflow. At nine seats that was nine forced layouts per render
+    // — and renderBadges is rAF-driven on scroll, so nine per FRAME while the
+    // table moved. That made it the worst scroll-jank offender in the file.
+    const measured = [];
+    document.querySelectorAll(SELECTORS.seatContainer).forEach((seat) => {
       const xid = resolveSeatKey(seat);
       if (!xid) return;
       // Hero's own seat is badged too. It used to be skipped, which made sense
@@ -7814,9 +8045,16 @@
       // and 🤮/🔥 where you are already looking, rather than only in the coach.
       const isSelf = isHeroRecord(xid);
       if (isSelf && !STORE.settings.showSelfBadge) return;
-      const player = STORE.players[xid];
       const rect = seat.getBoundingClientRect();
       if (!rect.width && !rect.height) return; // seat not laid out (empty/hidden)
+      measured.push({ xid, isSelf, rect, sittingOut: isSeatSittingOut(seat) });
+    });
+
+    // Built into a fragment and attached in ONE write, so the badges cost a
+    // single layout between them rather than one apiece.
+    const frag = document.createDocumentFragment();
+    measured.forEach(({ xid, isSelf, rect, sittingOut }) => {
+      const player = STORE.players[xid];
       // This-hand role marker. A player can't be both, since handRoles skips the
       // preflop raiser when it looks at postflop aggression.
       const roleTag = roles.pfr === xid ? roles.tag : (roles.post[xid] || null);
@@ -7870,8 +8108,8 @@
       // refreshed for a seat that's back in the hand, so without this gate an
       // opponent who returned from hospital and kept playing would carry a
       // stale 🏥 forever. Empty for hero (never fetched) and for anyone with
-      // no Torn API key configured.
-      const sittingOut = isSeatSittingOut(seat);
+      // no Torn API key configured. `sittingOut` was measured in the read pass
+      // above, alongside the rect — it is a DOM read like any other.
       const hosp = (!isSelf && sittingOut) ? hospitalStatusFor(xid) : null;
       const hospitalized = isHospitalized(hosp);
       // Always show a TYPE, never just a hand count. Below minHands `classify`
@@ -7942,8 +8180,9 @@
         + (hospitalized ? ` 🏥 In the hospital, ${fmtHospitalRemaining(hosp.until)} left.` : '')
         + ' Tap for full stats.';
       badge.addEventListener('click', () => openPlayerPanel(xid));
-      document.body.appendChild(badge);
+      frag.appendChild(badge);
     });
+    document.body.appendChild(frag);
   }
 
   // How much of the coach panel must stay on screen while dragging. The panel is
@@ -8934,7 +9173,12 @@
         ${FOLD_ARM_MS / 1000}s window costs nothing, since Torn folds you on timeout anyway.</div>
       <h4>Coach</h4>
       <label><input type="checkbox" class="tph-coach-toggle" ${STORE.settings.coachHidden ? '' : 'checked'}> Show coach panel</label><br>
-      <label>Full table size: <input type="number" class="tph-table-max" min="2" max="10" value="${STORE.settings.tableMax}" style="width:60px"></label>
+      <label>Full table size: <input type="number" class="tph-table-max" min="2" max="10" value="${STORE.settings.tableMax}" style="width:60px"></label><br>
+      <label>Equity samples: <input type="number" class="tph-equity-iters" min="${EQUITY_ITERS_MIN}" max="${EQUITY_ITERS_MAX}" step="100" value="${STORE.settings.equityIters}" style="width:80px"></label>
+      <div style="opacity:.7;margin:2px 0 6px">How many hands the equity engine simulates. It is spread across frames so
+        it never freezes the table, but on a slow phone a lower number makes the figure land sooner. Precision scales
+        as 1/&radic;n — 1200 is roughly &plusmn;1.4 points, 600 &plusmn;2, 300 &plusmn;2.9, all inside the error the
+        range estimate already carries.</div>
       <div style="opacity:.7;margin:2px 0 6px">Equity is always quoted against a full ring of this size, plus the live and heads-up counts.</div>
       <button class="tph-coach-reset">Reset coach position &amp; size</button>
       <div style="opacity:.7;margin:2px 0 10px">Drag the ◢ corner to resize the coach panel — it stays where you put
@@ -9122,6 +9366,18 @@
       STORE.settings.tableMax = Math.min(10, Math.max(2, isNaN(n) ? 9 : n));
       e.target.value = STORE.settings.tableMax;
       saveStore();
+    });
+    panel.querySelector('.tph-equity-iters').addEventListener('change', (e) => {
+      STORE.settings.equityIters = clampEquityIters(e.target.value);
+      e.target.value = STORE.settings.equityIters;
+      // Every cached figure was computed at the OLD sample count. Keeping them
+      // would leave the panel mixing two precisions with nothing saying which
+      // is which, so drop them and let the next render ask again.
+      equityCache.clear();
+      equityQueue = [];
+      cancelEquityJob();
+      saveStore();
+      renderCoachPanel();
     });
     // An escape hatch for a panel dragged somewhere unreachable — e.g. parked in
     // a corner that the other screen orientation doesn't have.
@@ -9806,6 +10062,17 @@
       evaluate7,
       estimateEquity,
       estimateEquityCached,
+      equityJobInit,
+      equityJobStep,
+      equityJobValue,
+      estimateEquitySliced,
+      equityCache,
+      equityCacheKey,
+      clampEquityIters,
+      EQUITY_ITERS_MIN,
+      EQUITY_ITERS_MAX,
+      get onEquityReady() { return onEquityReady; },
+      set onEquityReady(v) { onEquityReady = v; },
       opponentRangeProxy,
       equityBasisLabel,
       parseAffiliationProfile,
@@ -10041,6 +10308,10 @@
   function init() {
     injectStyles();
     renderGear();
+    // Wire the equity engine's completion hook to the panel that consumes it.
+    // Done here rather than at the call site so the engine itself stays free
+    // of any dependency on the UI — see onEquityReady.
+    onEquityReady = renderCoachPanel;
     // Before the watchers, so the first hand of the session already has the
     // history-seeded figures behind it rather than starting from zero.
     backfillBoardTexture();
