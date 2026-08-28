@@ -1056,19 +1056,32 @@ resolve unknowns this repo had carried for many versions.
 | Stacks | unread, "~100bb assumed" | read per seat, real SPR |
 | PDA detection | none | `window.flutter_inappwebview` |
 
-**None of the selectors are confirmed on Torn PDA's layout.** They were read out
-of someone else's source, not from a scan of this device, and that script has
-explicit mobile/desktop branches — so the two layouts demonstrably differ. Every
-addition is written to degrade to the previous path rather than replace it, and
-the deep scan has an `IDENTITY / RING MARKERS (unconfirmed on this layout)`
-block that reports on each. **Run one scan and read that block before trusting
-any of it.**
+**Every one of these is now CONFIRMED on Torn PDA's layout (scan, v1.37.0).**
+They were originally read out of someone else's source rather than a scan of
+this device, and carried as unverified for fifteen versions. A live deep scan
+settled the lot:
 
-One concrete disagreement already: HopesG reads `playerPositioner-<N>___` and
-notes the index makes direction detection unnecessary. The live PDA scan shows
-`playerPositioner___` with **no index**. The geometric ring in
-`seatRotationFromDom` therefore stays as the primary, and `getDealerXid` returns
-null on that layout rather than guessing.
+| Finding | Scan evidence |
+|---|---|
+| Hero's seat | `DIV#player-311421.self___TGTzt.active___plG6L` |
+| Action buttons by label | 3 matched by TEXT: "Raise to $3.5M" "Call $1.5M" "Fold" |
+| Dealer button | `DIV.dealer___L2uAh.position-6___ugkEr`, `dealerXid` resolved |
+| Sitting out | `state___K_BXh` carrying "Sitting out" |
+| Stacks | 4 read, all four seats |
+| PDA detection | `isPDA: true`, flutter bridge present |
+
+The class-based `actionButtons` selectors still match zero, exactly as
+predicted — matching by button LABEL is what works, and it does.
+
+**The "no index on playerPositioner" note was wrong, and is corrected here.**
+It claimed the live layout showed `playerPositioner___` with no index, so
+`getDealerXid` returned null and the geometric ring had to be primary. The
+v1.37.0 scan shows `playerPositioner-4`, `playerPositioner-6`,
+`playerPositioner-1` and `position-6___` — indices ARE present, and
+`getDealerXid` resolves. HopesG's reading was right all along. The geometric
+ring in `seatRotationFromDom` stays primary anyway (it needs no marker at all
+and is proven), but the indexed path is a real corroborating source rather
+than a dead one.
 
 `classVocabMatching()` exists because of how these were missed: `classVocab`
 sorts by frequency and truncates at 45, and `self___` appears exactly once (your

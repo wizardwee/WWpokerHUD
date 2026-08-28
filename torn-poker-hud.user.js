@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.37.0
+// @version      1.38.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,63 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.38.0 - THE TORN API HAD NEVER WORKED. Not once, since v1.8.0. Found by
+ *          reading a live deep scan pasted back from the phone — the exact
+ *          thing that scan exists for, and the largest thing it has caught.
+ *            - pdaCall wrapped PDA_httpGet in a Promise resolved ONLY from a
+ *              callback passed as the last argument. Newer Torn PDA RETURNS a
+ *              Promise instead of taking a callback, so the callback was never
+ *              invoked, the result was discarded, and every request hung
+ *              forever. No throw, no rejection, nothing logged, nothing shown.
+ *            - Everything downstream was dead the whole time: 🔗 faction and
+ *              💍 marriage badges (v1.8.0), hospital/jail/travel status, attack
+ *              readiness. Fifteen versions of features that never ran once,
+ *              each shipped with an honest caveat about its FIELD NAMES while
+ *              the real fault sat one layer below, in the transport. The
+ *              comment above pdaFetch had already named the risk exactly.
+ *            - HOW THE SCAN CAUGHT IT: "apiKey set: true · successful lookups:
+ *              0 · last fetch: never" AND no recorded error.
+ *              targetLastFetchAt is set only AFTER the await and the "no lookup
+ *              yet" branch needs targetLastError empty, so a promise that never
+ *              settles is the ONLY state producing all four — a bad key, a rate
+ *              limit, a network failure and an uncalled function each give a
+ *              different combination. That block only existed because v1.34.0
+ *              added it after "I don't see anything".
+ *            - pdaCall now handles BOTH shapes (passes the callback AND adopts
+ *              a returned thenable, first outcome wins via a `settled` guard)
+ *              plus a 15s timeout. The timeout is half the fix: a hang must
+ *              never again look like a request that was never made. The scan
+ *              also prints "started: N" now, counted BEFORE the await — the gap
+ *              between started and completed IS the diagnosis.
+ *            - ONE THROW WAS KILLING FIVE OTHER JOBS. The 3s watcher ran six
+ *              bare calls in sequence, so a throw in any killed every later one
+ *              on that tick and every tick after, silently. The symptom then
+ *              surfaces nowhere near the cause. Each step is isolated now,
+ *              records its failure by name, and the scan prints them.
+ *            - THE BLIND WAS SITTING RIGHT THERE: scan read "blind level not
+ *              read yet" while "posted big blind $500,000" was in the log,
+ *              marked old___ — on screen at prime time, so never parsed. Not
+ *              parsing those as EVENTS stays correct; but a blind level is a
+ *              FACT about the table, not an event, so reading it replays
+ *              nothing. seedBlindFromVisibleLog takes it, only ever SEEDS, and
+ *              cannot override a live read or disturb table-switch detection.
+ *              Matters quietly: bbAmount prices P/L in bb, decides
+ *              isNotableHand, feeds v1.35.0's stored bb, drives stack warnings.
+ *            - HERO GHOST AGAIN: 7 hands in name:Wonkawee against 8911 real.
+ *              v1.6.0's fix holds but only once heroXid is RESOLVED, and that
+ *              retry ran on the 3s watcher while the log scan runs every
+ *              second. scanLogRows now binds hero before parsing anything.
+ *            - CLAUDE.md rewritten where the scan settles it: every v0.22.0
+ *              marker is now confirmed with evidence, and the claim that
+ *              playerPositioner had NO index (so getDealerXid must return null)
+ *              is DISPROVEN — playerPositioner-4/-6/-1 and position-6___ are
+ *              present and the dealer resolves. The geometric ring stays
+ *              primary; the indexed path is corroboration, not a dead end.
+ *            - STILL OPEN, not claimed fixed: pot dom=$3M vs log=$2.3M, known
+ *              residue of closed finding #1 (hand.pot is log-summed).
+ *            - 12 assertions in test/pda-call.test.js, verified non-vacuous by
+ *              restoring the old callback-only pdaCall and watching it fail.
  *
  * 1.37.0 - Calibration mode's live counts were frozen. Open finding #4, closed.
  *          Asked "Should we do a calibration mode too?" — it already exists
@@ -101,65 +158,6 @@
  *              gate moved inside it so both callers share one definition.
  *            - 23 assertions in test/board-repair.test.js.
  *
- * 1.35.0 - The History tab stops burying the interesting hands under the folds.
- *          Asked for directly: "I don't want it to show all hands because that
- *          includes hands they fold too without any calling or raising ... I
- *          want it to highlight hands that are interesting or out of blue,
- *          like big pots, or highlight interesting 3bets or reraise."
- *            - TWO DIFFERENT QUESTIONS. isNotableHand already existed but asks
- *              about the TABLE — was this pot big, for the storage cap. The
- *              History tab needs the other one: did THIS PLAYER do anything
- *              here, and was any of it interesting? A 60bb pot two others
- *              fought over is notable for the table and worthless as a read on
- *              the seat you are looking at. New handNotability(h, xid, ctx),
- *              kept a separate name the same way p.texture and p.boardTex are.
- *            - NOTHING NEW IS COLLECTED — fifth time checking first has paid
- *              off. It all comes off h.actions ({x,a,amt,s}, already persisted
- *              in full), so it works RETROACTIVELY on every stored hand.
- *            - The action vocabulary answered it exactly: post/fold/check/
- *              call/bet/raise. Voluntary is call/bet/raise only — a post is a
- *              blind you had no choice about, a check declines to invest, a
- *              fold leaves. Precisely the case the report named.
- *            - Tags: 3B/4B+ preflop tier, XR check-raise (checked THEN raised
- *              the same street), RR postflop raise (exclusive with XR), BIG
- *              pot, SD showdown, WON. Colour-grouped and matched to the badge
- *              role chips so 3B is one colour everywhere. Each carries a title
- *              — an unexplained two-letter chip is noise.
- *            - Notable at 50+. WON alone (10) deliberately does NOT clear it:
- *              winning uncontested is most hands, not a read. SD does — cards
- *              face-up is the only direct range evidence this HUD ever gets.
- *            - recordHandHistory now stores `bb`. It was already computed at
- *              record time for isNotableHand and thrown away, leaving the tab
- *              unable to price a pot. Pre-v1.35.0 records have bb:0 and fall
- *              back to 2.5x the MEDIAN pot of that player's hands — relative,
- *              because more than one stake gets played here. Unknown is never
- *              read as small OR big; an implausible blind (the BB-display
- *              hazard) falls to the median path rather than being believed.
- *              The median spans ALL their hands, not the filtered set, or
- *              filtering to Notable would recompute from already-big pots and
- *              stop calling any of them big.
- *            - Three filter chips (Played default / Notable / All), each with
- *              a title saying what it hides. The count reads "N of M ... K
- *              hidden by filter": it already had one way to mislead (the
- *              40-row cap) and the filter is a second. historyFilter is
- *              SESSION state — a persisted "Notable" would show an empty tab
- *              next time you opened a player who happened to have none.
- *            - A BUG I WROTE, AND THE TEST THAT AGREED WITH IT: the Nth raise
- *              is an (N+1)-bet, since the blind is the first bet — open is the
- *              1st raise, 3-bet the 2nd, 4-bet the 3rd, 5-bet the 4th. The
- *              first draft labelled the 4th raise "4B" and the assertion
- *              written beside it asserted exactly that. Both agreed, both
- *              wrong, suite green. Same shape as the v1.0.1 lesson. Label now
- *              counts tier+1; the CSS CLASS stays 4B above a 4-bet so the rule
- *              set stays finite. Verified by reintroducing the bug.
- *            - tph-hh-tag-* goes in no-orphans' DYNAMIC_PREFIXES (built by
- *              concatenation, invisible to a literal scan) but is NOT left
- *              unchecked: new HAND_TAG_KEYS, and the new test asserts every
- *              key has a CSS rule and nothing emits an undeclared one. A key
- *              with no rule renders grey and throws nothing. Same split
- *              BOARD_FLAGS uses.
- *            - 74 assertions in test/hand-notability.test.js.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -221,7 +219,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.37.0';
+  const HUD_VERSION = '1.38.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -358,12 +356,54 @@
   // copy of each other but for which function and args they called, which
   // quietly contradicted the "single place to patch" claim in pdaFetch's own
   // docstring: the real call shape would have needed patching in two places.
+  // Torn PDA's PDA_httpGet/PDA_httpPost have shipped in TWO shapes: an older
+  // form that takes a callback, and a newer one that returns a Promise.
+  // Handling only the callback form is what silently broke every Torn API
+  // feature in this file.
+  //
+  // Diagnosed from a live deep scan showing "apiKey set: true · successful
+  // lookups: 0 · last fetch: never" AND no recorded error. Only one state
+  // produces all of those at once: a promise that never settles. The old code
+  // returned a Promise resolved solely from a callback passed as the last
+  // argument — against the Promise-returning form that callback is never
+  // invoked, the real result is dropped on the floor, and every await hangs
+  // forever. No throw, no rejection, nothing to log, nothing on screen.
+  //
+  // Passing the callback to BOTH shapes is safe: a Promise-returning host
+  // ignores the extra argument, and a callback-taking host returns undefined.
+  // Whichever path produces a result first wins; `settled` makes the other a
+  // no-op.
+  //
+  // The timeout is the other half of the fix and matters just as much. A hung
+  // request must never again be indistinguishable from one that was never
+  // made — that ambiguity is the entire reason this took a live scan to find.
+  const PDA_CALL_TIMEOUT_MS = 15000;
+
   function pdaCall(fn, args) {
     return new Promise((resolve, reject) => {
-      try {
-        fn(...args, (result) => resolve(normalizePdaResponse(result)));
-      } catch (err) {
+      let settled = false;
+      let timer = null;
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        resolve(normalizePdaResponse(result));
+      };
+      const abort = (err) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
         reject(err);
+      };
+      timer = setTimeout(
+        () => abort(new Error(`PDA request timed out after ${PDA_CALL_TIMEOUT_MS}ms`)),
+        PDA_CALL_TIMEOUT_MS,
+      );
+      try {
+        const maybe = fn(...args, finish);
+        if (maybe && typeof maybe.then === 'function') maybe.then(finish, abort);
+      } catch (err) {
+        abort(err);
       }
     });
   }
@@ -1452,10 +1492,17 @@
   let targetLastError = '';
   let targetLastFetchAt = 0;
   let targetOkCount = 0;
+  // Counted BEFORE the await, where targetLastFetchAt is only set after it.
+  // The gap between the two is the diagnosis: "started 3, completed 0" is a
+  // request that is hanging, "started 0" is one that was never made. Not
+  // being able to tell those apart is what made the pdaCall hang take a live
+  // deep scan to find.
+  let targetFetchStarted = 0;
 
   async function fetchTargetStatus(xid) {
     const key = (STORE.settings.tornApiKey || '').trim();
     if (!key) return; // no key configured — the whole feature is a no-op
+    targetFetchStarted++;
     try {
       const { json } = await pdaFetchJson('GET',
         `https://api.torn.com/user/${xid}?selections=profile&key=${encodeURIComponent(key)}`);
@@ -1491,6 +1538,10 @@
       return 'No Torn API key set — Settings → Torn API features. Without one this does nothing.';
     }
     if (targetLastError) return targetLastError;
+    if (targetFetchStarted && !targetLastFetchAt) {
+      return `${targetFetchStarted} lookup(s) started but none have come back yet — `
+        + 'if this persists, the request is hanging rather than failing.';
+    }
     if (!targetLastFetchAt) return 'No lookup has run yet — sit at a table with other players.';
     return '';
   }
@@ -1883,6 +1934,32 @@
     hand.bbAmount = amt;
     lastSeenBB = amt;
     currentTableBB = amt;
+  }
+
+  // Read a blind level out of log lines that are already on screen, WITHOUT
+  // parsing them as events. See the caller in scanLogRows for why: those lines
+  // are deliberately never replayed, but the blind they mention is a fact
+  // about the table rather than something that happens, so taking it costs
+  // nothing and inflates no stat.
+  //
+  // Only ever SEEDS — it returns immediately once a blind is known, so it can
+  // never override a live reading or interfere with the table-switch detection
+  // in noteBlindLevel. Reads the newest matching line, since the log may span
+  // a table change.
+  function seedBlindFromVisibleLog(rows) {
+    if (lastSeenBB) return false;
+    const bbPattern = LOG_PATTERNS.find((p) => p.type === 'postBB');
+    if (!bbPattern) return false;
+    for (let i = (rows || []).length - 1; i >= 0; i--) {
+      const m = bbPattern.re.exec(rows[i] || '');
+      if (!m || !m[2]) continue;
+      const amt = parseAmount(m[2]);
+      if (!plausibleBB(amt)) continue;
+      lastSeenBB = amt;
+      currentTableBB = amt;
+      return true;
+    }
+    return false;
   }
 
   let currentTableBB = null;
@@ -3898,11 +3975,34 @@
     const cur = readLogRows();
     if (!cur) return false;
 
+    // Bind hero to a seat BEFORE parsing anything, not on the 3s watcher tick.
+    //
+    // v1.6.0 stopped hero's own log lines minting a `name:<username>` ghost by
+    // having nameToXidGuess return heroXid directly once it is resolved. That
+    // holds — but only once it IS resolved, and the retry that resolves it ran
+    // on a 3s timer while the log scan runs every second. Every line parsed in
+    // that opening window still fell through to the pseudo-id.
+    //
+    // A live scan found the residue: heroGhost(name:Wonkawee) EXISTS with 7
+    // hands against a real record of 8911. Tiny, but it is a fresh split of
+    // exactly the kind v1.6.0 was meant to close, and it re-accrues a little
+    // every session. Resolving here costs one DOM query on the ticks where
+    // hero is still unbound, and nothing at all afterwards.
+    if (heroUnresolved()) heroXid = findHeroXid();
+
     // Lines already on screen when the script loads are history, not events —
     // parsing them would replay an arbitrary slice of a hand already over.
     if (!logSnapshotPrimed) {
       logSnapshot = cur;
       logSnapshotPrimed = true;
+      // But a BLIND LEVEL is not an event, it is a fact about the table, and
+      // reading one costs nothing and replays nothing. Without this the whole
+      // session ran with no blind until the next hand posted its blinds: a
+      // live scan showed "posted big blind $500,000" sitting right there in
+      // the log while the HUD reported "blind level not read yet". That gap
+      // matters — bbAmount is what prices P/L in big blinds, what decides
+      // whether a hand is notable, and what the effective-stack warnings read.
+      seedBlindFromVisibleLog(cur);
       return true;
     }
 
@@ -4107,6 +4207,21 @@
       || Array.from(seat.classList || []).some((c) => /^folded[_-]/.test(c));
   }
 
+  // The last failure from each watcher step, by name. Surfaced in the deep
+  // scan: a step that has been throwing every 3s for an hour is invisible
+  // otherwise, and swallowing an error without recording it would just move
+  // the silence rather than remove it.
+  const tickErrors = {};
+
+  function tickStep(name, fn) {
+    try {
+      fn();
+      if (tickErrors[name]) delete tickErrors[name];
+    } catch (e) {
+      tickErrors[name] = (e && e.message) || String(e);
+    }
+  }
+
   function bootstrapTableWatchers() {
     heroXid = findHeroXid();
     const attached = attachLogObserver();
@@ -4128,19 +4243,26 @@
       // heroDelta reads 0, every plChipsEst gets `0 * share`, hero.netChips
       // never moves, and `xid === heroXid` stops skipping hero as their own
       // opponent. Keep retrying until it binds to a seat.
-      if (heroUnresolved()) heroXid = findHeroXid();
-      attachLogObserver();
+      // EACH STEP ISOLATED. These used to run bare, one after another, so a
+      // throw in any of them killed every step after it — on that tick and on
+      // every tick after, silently and forever. Six independent jobs sharing
+      // one uncaught exception is exactly the failure mode this file keeps
+      // paying for: the symptom shows up somewhere unrelated (stacks stop
+      // updating, or the Torn API never fires) and points nowhere near the
+      // step that actually threw.
+      tickStep('resolve hero', () => { if (heroUnresolved()) heroXid = findHeroXid(); });
+      tickStep('log observer', attachLogObserver);
       // Cheap, and it repairs "#<xid>" names from earlier versions as soon as
       // that player is seen at a table again.
-      harvestSeatNames();
-      trackStacks();
+      tickStep('seat names', harvestSeatNames);
+      tickStep('stacks', trackStacks);
       // No-op with no API key configured; otherwise gated by AFFIL_REFRESH_MS
       // so this fires network calls at most once a day per seated player.
-      refreshSeatedAffiliations();
+      tickStep('affiliations', refreshSeatedAffiliations);
       // Same no-op-without-a-key guard, but gated by TARGET_REFRESH_MS (30s)
       // instead of a day, and for every seated opponent — see the function for
       // why it is no longer scoped to sitting-out seats only.
-      refreshSeatedTargetStatus();
+      tickStep('target status', refreshSeatedTargetStatus);
     }, 3000);
     harvestSeatNames();
 
@@ -10180,9 +10302,14 @@
     // whether any lookup has succeeded, the last error, and the actual cache.
     L.push('--- TORN API / TARGET STATUS ---');
     L.push('apiKey set: ' + (!!(STORE.settings.tornApiKey || '').trim())
+      + '   started: ' + targetFetchStarted
       + '   successful lookups: ' + targetOkCount
       + '   last fetch: ' + (targetLastFetchAt ? Math.round((Date.now() - targetLastFetchAt) / 1000) + 's ago' : 'never'));
     L.push('diagnostic: ' + (targetDiagnostic() || 'OK — working'));
+    const tickBad = Object.keys(tickErrors);
+    L.push('watcher steps failing: ' + (tickBad.length
+      ? tickBad.map((k) => k + ' -> ' + tickErrors[k]).join(' | ')
+      : 'none'));
     const tEntries = Array.from(targetCache.keys());
     L.push('target cache: ' + tEntries.length + ' entr' + (tEntries.length === 1 ? 'y' : 'ies'));
     tEntries.forEach((k) => {
@@ -10655,6 +10782,11 @@
       targetStatusFor,
       refreshSeatedTargetStatus,
       requestTargetStatus,
+      pdaCall,
+      PDA_CALL_TIMEOUT_MS,
+      seedBlindFromVisibleLog,
+      tickStep,
+      tickErrors,
       repairBoardFromDom,
       boardIsPartial,
       dedupeCards,

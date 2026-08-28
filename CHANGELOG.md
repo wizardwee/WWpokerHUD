@@ -9,6 +9,125 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.38.0
+
+**The Torn API had never worked. Not once, since v1.8.0.**
+
+Found by reading a live deep scan pasted back from the phone — the exact
+thing the scan exists for, and the first time it has caught something this
+large.
+
+### A promise that never settled
+
+`pdaCall` wrapped `PDA_httpGet` in a Promise that resolved **only** from a
+callback passed as the last argument. Newer Torn PDA returns a *Promise*
+from `PDA_httpGet` rather than taking a callback. So the callback was never
+invoked, the real result was discarded, and every request hung forever.
+
+No throw. No rejection. Nothing logged. Nothing on screen.
+
+Every feature depending on it was dead the entire time: the 🔗 faction and
+💍 marriage badges from v1.8.0, hospital/jail/travel status, attack
+readiness. Fifteen versions of features that had literally never run once,
+each shipped with the honest caveat that its field names were unconfirmed —
+while the actual problem was one layer below, in the transport.
+
+The comment above `pdaFetch` had already named the risk: the signature
+"isn't fully documented publicly", and this adapter is "the single place to
+patch if the real call shape differs". It was exactly that.
+
+### How the scan caught it
+
+Three facts printed together, and a fourth by omission:
+
+```
+apiKey set: true   successful lookups: 0   last fetch: never
+diagnostic: No lookup has run yet
+```
+
+`targetLastFetchAt` is set only *after* the await, and the "no lookup yet"
+branch requires `targetLastError` to be empty. A promise that never settles
+is the **only** state that produces all four at once — a wrong key, a rate
+limit, a network failure or an uncalled function each produce a different
+combination.
+
+That diagnostic block only existed because v1.34.0 added it after a report
+of "I don't see anything". Without it this scan would have shown a blank
+section and nothing to reason from.
+
+`pdaCall` now handles **both** host shapes: it passes the callback *and*
+adopts the returned thenable if there is one, with a `settled` guard so the
+first outcome wins. Plus a 15-second timeout — that is half the fix, because
+a hang must never again be indistinguishable from a request that was never
+made. The scan now also prints `started: N` alongside the success count,
+counted *before* the await: the gap between the two is the diagnosis.
+
+### One throw was killing five other jobs
+
+The 3-second watcher ran six jobs bare, one after another. A throw in any of
+them killed every job after it — on that tick, and on every tick after,
+silently and forever.
+
+Six independent jobs sharing one uncaught exception is a failure mode where
+the symptom appears nowhere near the cause: stacks quietly stop updating
+because seat-name harvesting threw. Each step is now isolated, records its
+failure by name, and the deep scan prints `watcher steps failing:`.
+
+### The blind that was sitting right there
+
+The scan read `table: blind level not read yet` while
+`posted big blind $500,000` sat in the log two sections above it — marked
+`old___`, so already on screen when the snapshot primed, and therefore
+deliberately never parsed. ($500,000 *is* in the ladder: Old Folks Home.)
+
+Not parsing those lines as events is correct and stays. But a **blind level
+is a fact about the table, not an event** — reading one replays nothing and
+inflates no stat. `seedBlindFromVisibleLog` now takes it at prime time. It
+only ever *seeds*, returning immediately once a blind is known, so it can
+never override a live reading or interfere with the table-switch detection
+in `noteBlindLevel`.
+
+This one mattered quietly: `bbAmount` prices P/L in big blinds, decides
+whether a hand is notable, feeds the `bb` v1.35.0 started storing, and
+drives the effective-stack warnings.
+
+### The hero ghost, again
+
+`heroGhost(name:Wonkawee) EXISTS — 7 hands` against a real record of 8911.
+
+v1.6.0's fix holds — `nameToXidGuess` returns `heroXid` once resolved — but
+only once it *is* resolved, and the retry ran on the 3-second watcher while
+the log scan runs every second. Lines parsed in that opening window still
+fell through to the pseudo-id, re-accruing a little every session.
+`scanLogRows` now binds hero before parsing anything.
+
+### Fifteen versions of "unconfirmed", settled
+
+The scan confirms every v0.22.0 marker at once, and `CLAUDE.md`'s block for
+them is rewritten from "none of these are confirmed" to a table of evidence:
+hero's seat (`self___`), action buttons matched by label (3 of them), the
+dealer button (`dealer___` + `position-6___`, with `dealerXid` resolving),
+sitting-out (`state___`), stacks, and the PDA bridge.
+
+**And it disproves something that file asserted.** The note claiming the
+live layout showed `playerPositioner___` with *no index*, so `getDealerXid`
+had to return null, was wrong: the scan shows `playerPositioner-4`, `-6`,
+`-1` and `position-6___`, and the dealer resolves. HopesG's reading was
+right all along. The geometric ring stays primary — it needs no marker and
+is proven — but the indexed path is a real corroborating source rather than
+a dead one.
+
+### Still open
+
+`pot: dom=$3M log=$2.3M` is flagged by the scan and is known residue of
+closed finding #1 (`hand.pot` is log-summed, not the DOM figure). Not
+investigated this pass, and not claimed as fixed.
+
+12 assertions in `test/pda-call.test.js` — both host shapes, string results,
+synchronous throws, rejected promises, first-outcome-wins, and the timeout
+being armed. Verified non-vacuous by restoring the original callback-only
+`pdaCall` and confirming the suite fails loudly.
+
 ## 1.37.0
 
 Calibration mode's live counts were frozen. Open finding #4, closed.
