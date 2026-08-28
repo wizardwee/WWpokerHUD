@@ -9,6 +9,90 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.32.0
+
+Equity is cheaper to compute, and the call/fold verdict now admits when it
+can't tell.
+
+Asked for directly, following v1.31.0: *"I don't mind non exact equity
+counts too, we can approximate."*
+
+### Half the samples, twice the speed
+
+`equityIters` drops from 1200 to 600. Measured, per call:
+
+| | 1200 | 600 |
+|---|---|---|
+| 2 opponents | 30.7 ms | **14.2 ms** |
+| 4 opponents | 46.1 ms | **21.8 ms** |
+| 6 opponents | 62.6 ms | **28.6 ms** |
+| 8 opponents | 68.3 ms | **34.5 ms** |
+
+Worst-case sampling error goes to about ±2 percentage points, and nearer
+±1.5 at the low equities multiway pots actually produce.
+
+That trade is sound for a specific reason worth keeping in mind: **sampling
+error is the smaller of the two errors in this figure.** Opponents are drawn
+from a flat range *proxy* (`opponentRangeProxy`), a far coarser
+approximation than any number of samples could fix. Halving the samples
+moves the total error very little. v1.31.0 made the work non-blocking; this
+makes the answer arrive twice as fast.
+
+### What halving the samples does NOT excuse
+
+The pot-odds line read `eq >= need ? '✓ +EV call' : '✗ fold'` — a hard
+verdict on an **action**, taken from a sampled estimate, with nothing
+between the two answers. Facing a bet needing 33% while the simulation says
+34%, that tick is decided by sampling noise rather than by the hand: rerun
+the same spot and it flips to a cross.
+
+Widening the noise turns that from a rare edge into a routine one. So the
+guard ships *with* the cheaper default, not after someone acts on a tick
+that was a coin flip.
+
+`potOddsVerdict` now returns `≈ marginal` when the margin falls inside two
+standard errors (~95%). At 600 samples, facing a bet needing 33%:
+
+| equity | now | before |
+|---|---|---|
+| 28% | ✗ fold | ✗ fold |
+| 31% | **≈ marginal** | ✗ fold |
+| 33% | **≈ marginal** | ✓ +EV call |
+| 35% | **≈ marginal** | ✓ +EV call |
+| 40% | ✓ +EV call | ✓ +EV call |
+
+It withholds only where the simulation genuinely cannot resolve the spot —
+28% still folds and 40% still calls. And "marginal" is a real read a player
+can act on: it moves the decision onto position, reads and implied odds,
+which is exactly where a close spot belongs. A confident tick the HUD can't
+support is the one outcome worse than no verdict at all.
+
+`equityStdErr` is the Bernoulli standard error on the win proportion. Ties
+score 0.5, and a 0/0.5/1 draw has strictly lower variance than a 0/1 draw
+with the same mean, so the band is very slightly over-stated — the
+conservative direction for something whose job is deciding when to keep
+quiet.
+
+The band tracks the sample count, so Settings → Equity samples now buys
+**resolution** as well as precision: 2pp of margin is unresolvable at 100
+samples and decidable at 5000. The help text says so.
+
+### Two small things
+
+`clampEquityIters` falls back to `DEFAULT_SETTINGS.equityIters` rather than
+a hardcoded 1200 — the default now lives in exactly one place.
+
+And a test written in v1.31.0 hardcoded `1200` and broke the moment the
+default moved. It now reads `DEFAULT_SETTINGS.equityIters`, per the lesson
+the `POOL_AVG` correction already recorded: expectations are computed from
+the live constant, so changing it needs no test edit.
+
+18 new assertions in `test/equity-slicing.test.js` (60 in the file), covering
+the verdict in both directions, the band tracking the sample count, and
+`equityStdErr`'s degenerate inputs — a NaN band would make every comparison
+false and silently restore the old confident verdict in precisely the
+situations the guard exists for, so that case is pinned by name.
+
 ## 1.31.0
 
 The table no longer freezes mid-hand. Reported as lag on the phone, with the

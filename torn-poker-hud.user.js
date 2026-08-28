@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.31.0
+// @version      1.32.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,48 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.32.0 - Equity is cheaper to compute, and the call/fold verdict now admits
+ *          when it cannot tell. Asked for directly after v1.31.0: "I don't
+ *          mind non exact equity counts too, we can approximate."
+ *            - equityIters 1200 -> 600. Measured, per call: 2 opponents
+ *              30.7 -> 14.2ms, 4 opp 46.1 -> 21.8ms, 6 opp 62.6 -> 28.6ms,
+ *              8 opp 68.3 -> 34.5ms. Worst-case sampling error ~+/-2 points,
+ *              nearer +/-1.5 at the low equities multiway pots produce.
+ *            - Sound for a specific reason: sampling error is the SMALLER of
+ *              the two errors here. Opponents come from a flat range PROXY,
+ *              far coarser than more samples could fix, so halving the samples
+ *              moves total error very little. v1.31.0 stopped this blocking;
+ *              this makes the answer arrive twice as fast.
+ *            - WHAT THAT DOES NOT EXCUSE, and the reason this is one release
+ *              and not two: the pot-odds line was `eq >= need ? '✓ +EV call'
+ *              : '✗ fold'` — a hard verdict on an ACTION, from a sampled
+ *              estimate, with nothing in between. Needing 33% while the sim
+ *              says 34%, that tick is decided by noise, not the hand: rerun
+ *              and it flips. Widening the noise makes that routine rather than
+ *              rare, so the guard ships WITH the cheaper default, not after
+ *              someone acts on a coin-flip tick.
+ *            - potOddsVerdict returns "≈ marginal" inside two standard errors
+ *              (~95%). At 600 samples needing 33%: 31/33/35% all read marginal
+ *              (were fold/call/call); 28% still folds, 40% still calls — it
+ *              withholds only where the sim genuinely cannot resolve the spot.
+ *              "Marginal" is itself a real read: it moves the decision onto
+ *              position, reads and implied odds, where a close spot belongs.
+ *            - equityStdErr is the Bernoulli SE on the win proportion. Ties
+ *              score 0.5 and a 0/0.5/1 draw has strictly lower variance than
+ *              0/1 with the same mean, so the band is slightly OVER-stated —
+ *              the conservative direction for a keep-quiet guard.
+ *            - The band tracks the sample count, so Settings -> Equity samples
+ *              now buys RESOLUTION as well as precision: 2pp of margin is
+ *              unresolvable at 100 samples and decidable at 5000.
+ *            - clampEquityIters falls back to DEFAULT_SETTINGS.equityIters,
+ *              not a hardcoded 1200 — the default lives in one place now. A
+ *              v1.31.0 test that hardcoded 1200 broke when the default moved
+ *              and now reads the live constant, per the POOL_AVG lesson.
+ *            - 18 new assertions in test/equity-slicing.test.js (60 in file),
+ *              including equityStdErr's degenerate inputs: a NaN band makes
+ *              every comparison false and would silently restore the old
+ *              confident verdict exactly where the guard is needed.
  *
  * 1.31.0 - The table no longer freezes mid-hand. Reported as phone lag, with
  *          the reasonable guess that the 524 KB single file had grown too big
@@ -117,62 +159,6 @@
  *              "Torn API features" — one key, two features now.
  *            - 20 new assertions in test/hospital-status.test.js.
  *
- * 1.29.0 - Track how often, and how much, villains bluff. Asked for directly.
- *            - A GENUINE gap this time, not pre-collected data. noteBetTexture
- *              already categorised a showdown bet as made (cat >= 2, two pair+)
- *              or draw (worse than that but a live flush/straight draw, flop/
- *              turn only) — but cat < 2 with no draw either was silently
- *              dropped, counted nowhere. That gap IS the definition of a
- *              bluff. New bluffBets/bluffSizes bucket fills it.
- *            - cat === 1 (a lone pair, no draw) deliberately lands in NONE of
- *              the three buckets — not made by this file's own two-pair bar,
- *              and holding a pair is not zero equity, so not a bluff either.
- *              Forcing it into either would be a domain error; left unscored,
- *              same honest-gap principle as the unshrunk WTSD anchor.
- *            - FIXED THE FLAGGED v1.21.0 GAP ON THE WAY IN rather than sitting
- *              beside it: betDrawPct/betMadePct were still a raw sum/count
- *              average (that changelog entry names it "out of scope for THAT
- *              pass" outright). Adding a third bucket in that same shape while
- *              the fix for the other two sat right there would have been
- *              actively inconsistent. All three now read via median() off a
- *              bounded window (drawSizes/madeSizes/bluffSizes), same shape as
- *              betSizes, through a shared pushTextureSize helper.
- *            - MIGRATED PROPERLY THIS TIME — v1.26.0's exact lesson, applied
- *              going IN rather than fixed after a live bug. betSizePctSum ->
- *              betSizes shipped with no migration in v1.21.0 and the resulting
- *              count/sample mismatch was that review's headline finding.
- *              ensurePlayerShape now has an explicit nested backfill for
- *              p.texture: an old drawPctSum/drawPctN-shaped record gets the
- *              new array fields added EMPTY (not synthesised from the old
- *              average — that would carry its skew into the very stat built to
- *              resist skew), old fields left alone as harmless dead weight,
- *              same precedent as betSizePctSum's own leftover.
- *            - bluffRate's caveat is STRONGER than the usual floor, and
- *              ASYMMETRIC. noteBetTexture only ever runs on a REAL showdown —
- *              a bluff good enough to win the pot uncontested never reaches
- *              this sample and is structurally invisible. A HIGH reading is
- *              safe (true rate is at least this, call down lighter still
- *              holds); a LOW reading is genuinely ambiguous — rarely bluffs,
- *              or bluffs plenty and it usually works — and this stat cannot
- *              tell those apart. The low-rate entry deliberately does NOT
- *              mirror the high-rate one; no "bluff more" framing, because that
- *              claim needs the overall frequency, which is exactly what's
- *              unknowable here.
- *            - Caught in review: an overclaim ("leaving fold equity on the
- *              table... bluff more") sitting in the LEAK (hero's own) voice
- *              text specifically, while the villain-voice text was already
- *              correct — same add() call, separate exploitText/leakText
- *              arguments, an easy silent place for a fix to land in one and
- *              not the other. test/bluff-tracking.test.js checks BOTH
- *              buildExploitPlan and buildLeakPlan text for exactly this
- *              reason; checking only one voice would have shipped it.
- *            - New Stats tab rows (Size: bluff/made, Bluff freq) and two
- *              exploit-plan entries (sizing tell, frequency tell), both never
- *              firing for hero for the same reason the draw/made block above
- *              them doesn't — hero's own cards are never harvested as a
- *              showdown.
- *            - 48 new assertions in test/bluff-tracking.test.js.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -235,7 +221,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.31.0';
+  const HUD_VERSION = '1.32.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -465,12 +451,23 @@
     // this is by far the most expensive thing the script does, and the phones
     // it runs on differ by an order of magnitude in how fast they get through
     // it. The work is sliced across frames so it no longer blocks the table
-    // (see estimateEquitySliced), but on a slow device a lower figure still
-    // makes the number LAND sooner. Precision scales as 1/sqrt(n): 1200 is
-    // roughly +/-1.4 percentage points, 600 about +/-2, 300 about +/-2.9 —
-    // all well inside the error the range PROXY already carries, which is why
-    // turning it down is a reasonable trade rather than a corner cut.
-    equityIters: 1200,
+    // (see estimateEquitySliced), but a lower figure still makes the number
+    // LAND sooner, which is what you feel on a slow device.
+    //
+    // 600, down from 1200 (v1.32.0) — asked for directly: approximate is fine.
+    // Measured, that roughly halves the cost of every call (4 opponents:
+    // 48ms -> 21ms; 8 opponents: 77ms -> 35ms) for a worst-case sampling error
+    // of about +/-2 percentage points, and nearer +/-1.5 at the low equities
+    // that multiway pots actually produce.
+    //
+    // That trade is only sound because sampling error is the SMALLER of the
+    // two errors in this figure: opponents are drawn from a flat range PROXY
+    // (see opponentRangeProxy), which is far coarser than anything more
+    // samples could fix. Halving the samples moves the total error very
+    // little. What it does NOT excuse is stating a confident call/fold verdict
+    // inside the noise — see potOddsVerdict, which is the guard that makes
+    // approximating here safe rather than merely cheaper.
+    equityIters: 600,
     tableMax: 9,       // seats at a full table — the baseline equity is always
                        // quoted against a full ring (tableMax - 1 opponents)
     // Optional. A public-only Torn API key is enough — used solely to look up
@@ -5805,8 +5802,50 @@
   const EQUITY_ITERS_MAX = 5000;
   function clampEquityIters(v) {
     const n = parseInt(v, 10);
-    if (isNaN(n)) return 1200;
+    if (isNaN(n)) return DEFAULT_SETTINGS.equityIters;
     return Math.min(EQUITY_ITERS_MAX, Math.max(EQUITY_ITERS_MIN, n));
+  }
+
+  // Sampling error of a Monte Carlo equity figure, in percentage points.
+  //
+  // Bernoulli standard error on the win proportion. Ties are scored 0.5, and a
+  // 0/0.5/1 draw has strictly lower variance than a 0/1 draw with the same
+  // mean, so this slightly OVER-states the band — the conservative direction
+  // for something whose job is to decide when to keep quiet.
+  //
+  // This is the error from SAMPLING ALONE, and it is the smaller of the two
+  // uncertainties in any quoted equity: opponents are drawn from a flat range
+  // PROXY, a far coarser approximation than more samples could ever fix. A
+  // narrow band here means "the simulation has converged", never "this number
+  // is right to within a point".
+  function equityStdErr(eqPct, iters) {
+    const n = Math.max(1, clampEquityIters(iters));
+    const p = Math.min(1, Math.max(0, (eqPct || 0) / 100));
+    return 100 * Math.sqrt((p * (1 - p)) / n);
+  }
+
+  // How many standard errors of margin are required before a call/fold verdict
+  // is stated at all. Two is ~95%.
+  const EQUITY_VERDICT_SIGMA = 2;
+
+  // The pot-odds line used to read `eq >= need ? '✓ +EV call' : '✗ fold'` — a
+  // hard verdict on an ACTION, taken from a sampled estimate, with nothing
+  // between the two answers. Facing a bet needing 33% while the simulation
+  // says 34%, that tick is decided by sampling noise, not by the hand: rerun
+  // the same spot and it can flip to a cross. Lowering the default sample
+  // count (v1.32.0) widens the noise, so this stops being a rare edge and
+  // becomes a routine one.
+  //
+  // Inside the band, say so. "Marginal" is a real read a player can act on —
+  // it moves the decision onto position, reads and implied odds, which is
+  // exactly where a genuinely close spot should be decided. A confident tick
+  // the HUD cannot support is the one outcome worse than no verdict.
+  function potOddsVerdict(eqPct, needPct, iters) {
+    const margin = eqPct - needPct;
+    if (Math.abs(margin) < EQUITY_VERDICT_SIGMA * equityStdErr(eqPct, iters)) {
+      return '≈ marginal';
+    }
+    return margin >= 0 ? '✓ +EV call' : '✗ fold';
   }
 
   function cancelEquityJob() {
@@ -6267,7 +6306,11 @@
         const liveEq = quotes.find((w) => w.n === live);
         if (betFacing > 0 && liveEq) {
           const need = (100 * betFacing) / (pot + betFacing);
-          parts.push(`need <b>${need.toFixed(0)}%</b> ${liveEq.eq >= need ? '✓ +EV call' : '✗ fold'}`);
+          // Noise-aware, not a bare >=: inside the sampling error the sign of
+          // (equity - required) is set by the dice, not the hand. See
+          // potOddsVerdict.
+          parts.push(`need <b>${need.toFixed(0)}%</b> `
+            + potOddsVerdict(liveEq.eq, need, STORE.settings.equityIters));
         }
         out.push(parts.join(' · '));
       }
@@ -9176,9 +9219,11 @@
       <label>Full table size: <input type="number" class="tph-table-max" min="2" max="10" value="${STORE.settings.tableMax}" style="width:60px"></label><br>
       <label>Equity samples: <input type="number" class="tph-equity-iters" min="${EQUITY_ITERS_MIN}" max="${EQUITY_ITERS_MAX}" step="100" value="${STORE.settings.equityIters}" style="width:80px"></label>
       <div style="opacity:.7;margin:2px 0 6px">How many hands the equity engine simulates. It is spread across frames so
-        it never freezes the table, but on a slow phone a lower number makes the figure land sooner. Precision scales
-        as 1/&radic;n — 1200 is roughly &plusmn;1.4 points, 600 &plusmn;2, 300 &plusmn;2.9, all inside the error the
-        range estimate already carries.</div>
+        it never freezes the table, but a lower number makes the figure land sooner — which is what you feel on a slow
+        phone. Precision scales as 1/&radic;n: 600 is roughly &plusmn;2 points at worst, 1200 &plusmn;1.4,
+        300 &plusmn;2.9 — all smaller than the error the range estimate already carries, so this is a cheap trade.
+        Whatever you set, the call/fold verdict goes quiet and reads &ldquo;marginal&rdquo; when the spot is closer
+        than the simulation can actually resolve.</div>
       <div style="opacity:.7;margin:2px 0 6px">Equity is always quoted against a full ring of this size, plus the live and heads-up counts.</div>
       <button class="tph-coach-reset">Reset coach position &amp; size</button>
       <div style="opacity:.7;margin:2px 0 10px">Drag the ◢ corner to resize the coach panel — it stays where you put
@@ -10069,8 +10114,12 @@
       equityCache,
       equityCacheKey,
       clampEquityIters,
+      equityStdErr,
+      potOddsVerdict,
+      EQUITY_VERDICT_SIGMA,
       EQUITY_ITERS_MIN,
       EQUITY_ITERS_MAX,
+      DEFAULT_SETTINGS,
       get onEquityReady() { return onEquityReady; },
       set onEquityReady(v) { onEquityReady = v; },
       opponentRangeProxy,

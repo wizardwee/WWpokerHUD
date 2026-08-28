@@ -213,8 +213,15 @@ const card = (rank, suit) => ({ rank, suit });
   t.eq('a sane value passes through', T.clampEquityIters(600), 600);
   t.eq('below the floor clamps up', T.clampEquityIters(1), T.EQUITY_ITERS_MIN);
   t.eq('above the ceiling clamps down', T.clampEquityIters(999999), T.EQUITY_ITERS_MAX);
-  t.eq('a non-number falls back to the default', T.clampEquityIters('abc'), 1200);
-  t.eq('an empty string falls back to the default', T.clampEquityIters(''), 1200);
+  // Read from DEFAULT_SETTINGS, never written as a literal: this file first
+  // hardcoded 1200 and broke the moment the default moved to 600. CLAUDE.md
+  // records the same lesson from the POOL_AVG correction — expectations are
+  // computed from the live constant so changing it needs no test edit.
+  const DEF = T.DEFAULT_SETTINGS.equityIters;
+  t.eq('a non-number falls back to the default', T.clampEquityIters('abc'), DEF);
+  t.eq('an empty string falls back to the default', T.clampEquityIters(''), DEF);
+  t.ok('and that default is itself within the allowed range',
+    DEF >= T.EQUITY_ITERS_MIN && DEF <= T.EQUITY_ITERS_MAX);
   // The input is a text field in a webview; a string of digits is what a
   // change event actually hands over, not a number.
   t.eq('a numeric string is accepted', T.clampEquityIters('800'), 800);
@@ -226,6 +233,75 @@ const card = (rank, suit) => ({ rank, suit });
   T.STORE.settings.equityIters = 999999;
   const st = T.equityJobInit([card('A', 's'), card('K', 'd')], [], 2, 0);
   t.eq('equityJobInit clamps a wild stored value', st.iters, T.EQUITY_ITERS_MAX);
+}
+
+// --- potOddsVerdict: no confident tick inside the sampling noise -----------
+//
+// The pot-odds line used to be `eq >= need ? '✓ +EV call' : '✗ fold'` — a hard
+// verdict on an ACTION, read straight off a sampled estimate. Facing a bet
+// needing 33% with the simulation saying 34%, that tick is decided by sampling
+// noise: rerun the same spot and it flips. Lowering the default sample count
+// (v1.32.0, "approximate is fine") widens the noise, which turns that from a
+// rare edge into a routine one — so the guard ships WITH the cheaper default,
+// not after someone acts on a wrong tick.
+
+{
+  const T = load();
+
+  // Comfortably clear of the band in each direction: the verdict must still be
+  // stated, or the guard has just replaced one useless answer with another.
+  t.eq('equity far above the requirement is still a confident call',
+    T.potOddsVerdict(70, 30, 600), '✓ +EV call');
+  t.eq('equity far below the requirement is still a confident fold',
+    T.potOddsVerdict(12, 45, 600), '✗ fold');
+
+  // Inside the band, in both directions — the old code would have said
+  // "✓ +EV call" for the first and "✗ fold" for the second, off a coin flip.
+  t.eq('a hair above the requirement reads marginal, not a tick',
+    T.potOddsVerdict(34, 33.5, 600), '≈ marginal');
+  t.eq('a hair below the requirement reads marginal, not a cross',
+    T.potOddsVerdict(33, 33.5, 600), '≈ marginal');
+  t.eq('exactly on the requirement reads marginal',
+    T.potOddsVerdict(33, 33, 600), '≈ marginal');
+
+  // The band must track the sample count: more samples, more resolution, so a
+  // spot that is unresolvable at 200 becomes decidable at 5000. A guard that
+  // ignored `iters` would either over- or under-withhold at every other setting.
+  const margin = 2.0; // percentage points above the requirement
+  const coarse = T.potOddsVerdict(35 + margin, 35, T.EQUITY_ITERS_MIN);
+  const fine = T.potOddsVerdict(35 + margin, 35, T.EQUITY_ITERS_MAX);
+  t.eq(`${margin}pp of margin is not resolvable at ${T.EQUITY_ITERS_MIN} samples`, coarse, '≈ marginal');
+  t.eq(`the same margin IS resolvable at ${T.EQUITY_ITERS_MAX} samples`, fine, '✓ +EV call');
+}
+
+// --- equityStdErr: the band itself ----------------------------------------
+
+{
+  const T = load();
+
+  // Textbook Bernoulli SE, in percentage points: 100*sqrt(p(1-p)/n).
+  const expect = (p, n) => 100 * Math.sqrt(((p / 100) * (1 - p / 100)) / n);
+  t.ok('matches the Bernoulli standard error at p=50',
+    Math.abs(T.equityStdErr(50, 600) - expect(50, 600)) < 1e-9);
+  t.ok('matches at a realistic multiway equity (p=15)',
+    Math.abs(T.equityStdErr(15, 600) - expect(15, 600)) < 1e-9);
+
+  // Shape properties the verdict guard depends on.
+  t.ok('more samples give a tighter band', T.equityStdErr(50, 2400) < T.equityStdErr(50, 600));
+  t.ok('the band is widest at 50% — the worst case for a proportion',
+    T.equityStdErr(50, 600) > T.equityStdErr(20, 600)
+    && T.equityStdErr(50, 600) > T.equityStdErr(80, 600));
+  t.ok('halving the samples widens the band by about sqrt(2)',
+    Math.abs((T.equityStdErr(50, 300) / T.equityStdErr(50, 600)) - Math.SQRT2) < 0.01);
+
+  // Degenerate inputs must produce a number, not NaN — a NaN band makes every
+  // comparison false, which would silently restore the old confident verdict
+  // in exactly the situations the guard exists for.
+  t.eq('0% equity gives a zero band, not NaN', T.equityStdErr(0, 600), 0);
+  t.eq('100% equity gives a zero band, not NaN', T.equityStdErr(100, 600), 0);
+  t.ok('a null equity is treated as 0 rather than NaN', !isNaN(T.equityStdErr(null, 600)));
+  t.ok('a zero sample count does not divide by zero', isFinite(T.equityStdErr(50, 0)));
+  t.ok('a nonsense sample count does not produce NaN', !isNaN(T.equityStdErr(50, 'abc')));
 }
 
 process.exit(t.report());
