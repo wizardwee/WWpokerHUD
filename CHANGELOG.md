@@ -9,6 +9,84 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.30.0
+
+Player names now link to their Torn profile, and a new 🏥 hospital-status
+read.
+
+Asked for directly: "Can we make the players name clickable to their
+profile? Intent is to be ready to mug them when they sit out. Do show if
+they are in hospital or not."
+
+### The name
+
+The player panel's header name is now a link straight to
+`https://www.torn.com/profiles.php?XID=<xid>`, opened in a new tab. No API
+key required — the XID this HUD already resolves reliably (identity has been
+by XID since the v0.4.0 deep scan) is all a profile link needs.
+
+### The hospital read, and why it's scoped so tightly
+
+🏥 appears on a seat only while that seat is **sitting out** and is
+**currently in the hospital**. That double condition is deliberate, not
+timid — it's the exact moment the user's own framing makes the question
+real ("ready to mug them when they sit out"), and an active seat is neither
+fetched for this nor shown it.
+
+It reuses the same optional Torn API key and the same
+`user/{id}?selections=profile` endpoint the shared-affiliation badges
+(v1.8.0) already use — no new setting to add. What it does **not** reuse is
+that feature's cache. Faction and marriage are day-stable facts, worth
+caching for 24 hours (`AFFIL_REFRESH_MS`). Hospital status can flip in
+seconds, so it gets its own 30-second staleness window
+(`HOSPITAL_REFRESH_MS`), and — to keep this cheap even at a full table — is
+only ever fetched for seats that are actually sitting out right now, never
+for the whole table on every tick.
+
+### Kept out of the store entirely
+
+Unlike faction ID and spouse XID, hospital status is **not** written to
+`STORE.players` and never touches `localStorage`. It lives only in a
+runtime `hospitalCache` Map. A player record surviving across sessions is
+the whole point of the store; a "was in the hospital" read surviving across
+sessions is just wrong the moment the page reloads. This also keeps it out
+of Backup/Gist exports for free, with no addition to `LOCAL_ONLY_SETTINGS`
+needed.
+
+### The render is gated the same way the fetch is
+
+`renderBadges` checks `isSeatSittingOut` again before showing 🏥, not just
+at fetch time. Without that second gate, a player who returns from the
+hospital and keeps playing would carry a stale 🏥 forever — nothing
+refreshes the cache for an active seat, so an ungated render would just
+keep showing whatever was last fetched.
+
+The player panel's own hospital line is looser on purpose: it shows
+whatever is cached regardless of the seat's current state, because the
+panel is opened deliberately rather than glanced at mid-hand, and it says
+outright that the read was only ever taken while the seat was sitting out.
+
+### Unconfirmed, same as every Torn API field in this file
+
+`status.state` / `status.until` are written from Torn's documented API v1
+profile shape, not a live response anyone working on this has actually
+seen — same caveat v1.8.0 shipped with for `faction.faction_id` and
+`married.spouse_id`, and still true: nobody working on this holds a key to
+check one live. `parseHospitalStatus` fails to `null` on anything it
+doesn't recognise rather than throwing, same defensive shape as
+`parseAffiliationProfile`. Needs a live report: sit at a table with someone
+who sits out while actually in the hospital, and confirm the badge lights
+up (or paste back a raw API response so the field names can be checked
+directly).
+
+The Settings section this lives under was renamed "Shared-affiliation
+badges" → "Torn API features", since one key now drives two features.
+
+20 new assertions in `test/hospital-status.test.js`, mirroring
+`test/affiliation.test.js`'s shape: the pure parse and pure "are they in"
+check are tested directly; the real network call and Torn's actual response
+shape are not, for the same reason neither is tested there.
+
 ## 1.29.0
 
 Track how often, and how much, villains bluff.

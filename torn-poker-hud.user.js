@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.29.0
+// @version      1.30.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,40 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.30.0 - Player names are now clickable through to their Torn profile, and a
+ *          new 🏥 hospital-status read. Asked for directly — "ready to mug
+ *          them when they sit out. Do show if they are in hospital or not."
+ *            - The player panel's header name is now a link straight to
+ *              https://www.torn.com/profiles.php?XID=<xid>, opened in a new
+ *              tab. No API key needed — the XID this HUD already resolves is
+ *              enough.
+ *            - 🏥 appears on a seat ONLY while it is sitting out AND currently
+ *              in the hospital — the exact moment the user's own framing
+ *              makes the question real. An active seat is never fetched for
+ *              it and never shows it.
+ *            - Reuses the SAME optional Torn API key and endpoint as the
+ *              shared-affiliation badges (v1.8.0) — no new setting. NOT the
+ *              same cache though: faction/marriage are day-stable, cached 24h
+ *              (AFFIL_REFRESH_MS); hospital status can flip in seconds, so it
+ *              gets its own 30s window (HOSPITAL_REFRESH_MS) and is fetched
+ *              only for seats actually sitting out, never the whole table.
+ *            - Kept OUT of STORE.players and localStorage entirely — a
+ *              runtime-only hospitalCache Map. A stay from an hour ago is
+ *              wrong, not merely stale, so it must not survive a reload or a
+ *              Backup/Gist export.
+ *            - renderBadges gates the RENDER on isSeatSittingOut too, not
+ *              just the fetch — otherwise a player back from hospital and
+ *              still playing would carry a stale 🏥 forever, since nothing
+ *              refreshes an active seat's cache.
+ *            - UNCONFIRMED, same caveat as v1.8.0's affiliation fields:
+ *              status.state/status.until are from Torn's documented API
+ *              shape, not a live response anyone here has seen.
+ *              parseHospitalStatus fails to null rather than throwing, same
+ *              pattern as parseAffiliationProfile. Needs a live report.
+ *            - Settings section renamed "Shared-affiliation badges" ->
+ *              "Torn API features" — one key, two features now.
+ *            - 20 new assertions in test/hospital-status.test.js.
  *
  * 1.29.0 - Track how often, and how much, villains bluff. Asked for directly.
  *            - A GENUINE gap this time, not pre-collected data. noteBetTexture
@@ -99,52 +133,6 @@
  *            - 7 new assertions in test/board-texture.test.js pinning the
  *              column split and the modifier's declaration order.
  *
- * 1.28.0 - Board texture: how a villain plays a four-flush, three-flush,
- *          paired, four-straight or dry board. Asked for directly — "villain's
- *          betting pattern based on board texture, e.g. a 4 card flush".
- *            - The FOURTH time "check whether it's already collected" paid off.
- *              hand.board was already parsed from the log (with NO hero gate,
- *              so hands you folded preflop still contribute), every action
- *              already carried its street, the replayer already reconstructed
- *              the board as it stood on each street, and STORE.hands held 200
- *              past hands to seed from. Only the classifier and the per-flag
- *              counters were actually new.
- *            - NAME COLLISION, worth knowing: `p.texture` already meant HAND
- *              strength (made vs draw, v1.18.0). Board texture is boardTex /
- *              boardFlags / BOARD_* throughout so the two can't be confused.
- *            - FLAGS, not one class per board. A board can be paired AND four
- *              to a flush and both matter; a first-match-wins list (the
- *              LOG_PATTERNS pattern) would make "paired" quietly mean "paired
- *              AND not flushy" and would SHRINK each flag's sample by carving
- *              boards into whichever flag outranked them. Consequence the UI
- *              states outright: the rows overlap and do not sum.
- *            - Two rates, two denominators, deliberately not blended: `lead`
- *              is b/(b+k) (nobody has bet yet) and `foldToBet` is f/(f+c+r)
- *              (facing a bet) — the same "facing a bet is the only state where
- *              raise/call/fold are possible" insight streetRates.rr uses. Both
- *              withhold rather than report 0% on an empty denominator.
- *            - A four-flush board is RARE, so a per-villain read takes hundreds
- *              of shared hands. Three layers instead: the live board read (no
- *              storage, works on hand one), a measured pool baseline shown
- *              beside the villain figure, and the per-villain figure gated at
- *              BOARD_TEX_MIN (8) — checked against the SAME cell the figure is
- *              computed from, which is v1.26.0's lesson. Thin rows render
- *              dimmed rather than hidden.
- *            - Reads surface through the existing context tokens:
- *              handContextTokens emits board:<flag>, entries tag
- *              when: ['board:fl4'], so a texture read can only ever appear on
- *              the texture it describes. Tags are generated from BOARD_FLAGS,
- *              so a typo'd token is structurally impossible here.
- *            - Backfilled from stored hand history at init(), NOT migrateStore
- *              — that runs inside loadStore() where later consts are still in
- *              the temporal dead zone. It ADDS to counters, so a store flag is
- *              what makes it safe, not idempotence.
- *            - Storage measured, not guessed: 2 bytes on a fresh record
- *              (sparse — unseen flags absent), 198 worst case with all five
- *              seen, ~387 KB at PRUNE_PLAYER_CAP. One-letter keys for the same
- *              reason (open finding #2).
- *            - 63 new assertions in test/board-texture.test.js.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -207,7 +195,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.29.0';
+  const HUD_VERSION = '1.30.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -1310,6 +1298,99 @@
       }
     });
     return { flags, detail: details.join('; ') };
+  }
+
+  // Hospital status — "is this seat safe to hit once they leave the table".
+  // Reuses the same endpoint and the same Torn API key as the affiliation
+  // lookup above, but NOTHING else about it: faction/marriage are slow facts
+  // worth caching for a day, hospital status can flip in seconds, so a value
+  // more than HOSPITAL_REFRESH_MS old is actively misleading rather than
+  // merely stale. Deliberately kept OUT of STORE.players — it is never
+  // written to a player record and never persisted to localStorage, only
+  // held in this in-memory Map, so a session left open overnight can't show
+  // a hospital stay from yesterday as current.
+  //
+  // UNCONFIRMED, same caveat as parseAffiliationProfile just above: the v1
+  // `status.state`/`status.until` fields are written from Torn's documented
+  // API shape, not a live response anyone working on this has seen. A wrong
+  // guess here costs a missing/blank hospital read, not a crash — see the
+  // defensive-null handling below, same pattern as parseAffiliationProfile.
+  function parseHospitalStatus(json) {
+    if (!json || json.error) return null;
+    const status = json.status || {};
+    return {
+      state: status.state || 'Okay',
+      until: Number(status.until) || 0,
+    };
+  }
+
+  function isHospitalized(status) {
+    return !!(status && status.state === 'Hospital' && status.until * 1000 > Date.now());
+  }
+
+  // Minutes:seconds is overkill for a "should I hit them" read — whole
+  // minutes, rounded up so it never reads "0m" while still technically in.
+  function fmtHospitalRemaining(until) {
+    const ms = until * 1000 - Date.now();
+    if (ms <= 0) return 'due out';
+    const mins = Math.ceil(ms / 60000);
+    if (mins < 60) return `${mins}m`;
+    return `${Math.floor(mins / 60)}h ${mins % 60}m`;
+  }
+
+  const hospitalCache = new Map(); // xid (string) -> { state, until, fetchedAt }
+  const HOSPITAL_REFRESH_MS = 30 * 1000;
+
+  async function fetchHospitalStatus(xid) {
+    const key = (STORE.settings.tornApiKey || '').trim();
+    if (!key) return; // no key configured — the whole feature is a no-op
+    try {
+      const { json } = await pdaFetchJson('GET',
+        `https://api.torn.com/user/${xid}?selections=profile&key=${encodeURIComponent(key)}`);
+      const parsed = parseHospitalStatus(json);
+      if (!parsed) return; // bad key, rate-limited, unknown id — try again next window
+      hospitalCache.set(String(xid), { state: parsed.state, until: parsed.until, fetchedAt: Date.now() });
+    } catch (e) {
+      // Network hiccup. Never blocks anything — just try again next window.
+    }
+  }
+
+  function hospitalStatusFor(xid) {
+    return hospitalCache.get(String(xid)) || null;
+  }
+
+  // Player panel line — unlike the seat badge, this is worth showing even
+  // when the seat isn't currently sitting out (the panel is opened
+  // deliberately, not glanced at mid-hand), so it reads whatever the cache
+  // holds rather than gating on isSeatSittingOut. It still says how the
+  // figure was obtained: this HUD only ever fetches while sitting out, so a
+  // player who has been active for a while is showing a status from their
+  // last sit-out, not a live read.
+  function playerHospitalLine(xid) {
+    const hosp = hospitalStatusFor(xid);
+    if (!hosp) return '';
+    const inHosp = isHospitalized(hosp);
+    return `<div class="tph-hosp-line">🏥 ${inHosp
+      ? `In the hospital — ${escapeHtml(fmtHospitalRemaining(hosp.until))} left.`
+      : 'Not in the hospital (last checked while sitting out).'}</div>`;
+  }
+
+  // Fetches ONLY for seats currently SITTING OUT — that is the exact moment
+  // this feature exists for (the user's own framing: "ready to mug them when
+  // they sit out"). An active seat gets no fetch at all, which keeps this to
+  // a handful of calls even at a full table, and renderBadges gates its own
+  // display the same way — see the comment there for why an active seat must
+  // not show a stale hospital flag from before they sat back down.
+  function refreshSittingOutHospitalStatus() {
+    if (!(STORE.settings.tornApiKey || '').trim()) return;
+    document.querySelectorAll(SELECTORS.seatContainer).forEach((seat) => {
+      if (!isSeatSittingOut(seat)) return;
+      const xid = resolveSeatKey(seat);
+      if (!xid || isHeroRecord(xid)) return; // hero's own hospital status isn't the question
+      const cached = hospitalCache.get(String(xid));
+      const stale = !cached || (Date.now() - cached.fetchedAt) > HOSPITAL_REFRESH_MS;
+      if (stale) fetchHospitalStatus(xid);
+    });
   }
 
   // ===========================================================================
@@ -3647,6 +3728,10 @@
       // No-op with no API key configured; otherwise gated by AFFIL_REFRESH_MS
       // so this fires network calls at most once a day per seated player.
       refreshSeatedAffiliations();
+      // Same no-op-without-a-key guard, but gated by HOSPITAL_REFRESH_MS (30s)
+      // instead of a day, and only for seats currently sitting out — see the
+      // function for why.
+      refreshSittingOutHospitalStatus();
     }, 3000);
     harvestSeatNames();
 
@@ -6908,7 +6993,8 @@
     .tph-badge .tph-badge-dim { color: #9fb0bf !important; }
     /* Emoji render wider than the 10px text around them, so they are pulled
        down a size and given the minimum gap that still keeps 🤮🔥 apart. */
-    .tph-badge .tph-badge-tilt, .tph-badge .tph-badge-heat, .tph-badge .tph-badge-affil {
+    .tph-badge .tph-badge-tilt, .tph-badge .tph-badge-heat, .tph-badge .tph-badge-affil,
+    .tph-badge .tph-badge-hosp {
       margin-right: 1px; font-size: 9px; }
     /* No colour declared here, same as -tilt/-heat above: this is emoji-only
        content and pinTextColor never walks badges (only .tph-panel content),
@@ -6944,6 +7030,11 @@
     .tph-rep-l { color: #dfe5ea !important; font-size: 12px; line-height: 1.4; margin: 2px 0; }
     .tph-rep-act { color: #9ee6a0 !important; font-size: 12px; line-height: 1.4;
       margin: 1px 0 5px 10px; padding-left: 7px; border-left: 2px solid #9ee6a055; }
+    /* Player panel header. Own colour is mandatory — pinTextColor skips
+       tph- elements, and a bare <a> would otherwise pick up Torn's own link
+       styling (or none) rather than something visible on the panel. */
+    .tph-profile-link { color: #7fd4ff !important; text-decoration: underline; }
+    .tph-hosp-line { color: #ffb3a0 !important; font-size: 11px; margin: -4px 0 8px; }
     .tph-rep-act::before { content: "→ "; }
     .tph-rep-warn { color: #f0c674 !important; }
     .tph-rep-note { color: #8d959c !important; font-size: 10px; }
@@ -7774,6 +7865,15 @@
       // here, never a stored relationship. Empty for both when no Torn API key
       // is configured, so this is a pure no-op absent that setting.
       const affil = affiliationFlags(xid, seatedList);
+      // 🏥 in the hospital. Gated on isSeatSittingOut here as well as at the
+      // fetch site (refreshSittingOutHospitalStatus): the cache is never
+      // refreshed for a seat that's back in the hand, so without this gate an
+      // opponent who returned from hospital and kept playing would carry a
+      // stale 🏥 forever. Empty for hero (never fetched) and for anyone with
+      // no Torn API key configured.
+      const sittingOut = isSeatSittingOut(seat);
+      const hosp = (!isSelf && sittingOut) ? hospitalStatusFor(xid) : null;
+      const hospitalized = isHospitalized(hosp);
       // Always show a TYPE, never just a hand count. Below minHands `classify`
       // returns "Unrated", which told you nothing about the player — the read is
       // the point of the badge. Show the provisional archetype with a "?" so it
@@ -7813,9 +7913,11 @@
       // Appended outside the hands===0 branch: a faction/marriage match is a
       // real read even before a single hand has been tracked on this player.
       const affilHtml = affil.flags ? `<span class="tph-badge-affil">${affil.flags}</span>` : '';
+      const hospHtml = hospitalized ? '<span class="tph-badge-hosp">🏥</span>' : '';
       badge.innerHTML = (hands === 0
-        ? `${roleHtml}<b>NEW</b>`
+        ? `${roleHtml}${hospHtml}<b>NEW</b>`
         : roleHtml
+          + hospHtml
           + `${tilt ? '<span class="tph-badge-tilt">🤮</span>' : ''}`
           + `${heat ? '<span class="tph-badge-heat">🔥</span>' : ''}<b>${type}</b>`
           + statsHtml)
@@ -7837,6 +7939,7 @@
           ? ` Stack ${fmtMoney(player.stack.now)} (sitting low ${fmtMoney(player.stack.low)}, high ${fmtMoney(player.stack.high)}).`
           : '')
         + (affil.detail ? ` ⚠ ${affil.detail} — a fact from Torn's own profile data, not proof of anything at this table.` : '')
+        + (hospitalized ? ` 🏥 In the hospital, ${fmtHospitalRemaining(hosp.until)} left.` : '')
         + ' Tap for full stats.';
       badge.addEventListener('click', () => openPlayerPanel(xid));
       document.body.appendChild(badge);
@@ -8139,7 +8242,9 @@
       onClose: () => { openPlayerXid = null; renderPlayerPanel(); },
       html: !p ? '' : `
       <span class="tph-close">✕</span>
-      <h3>${escapeHtml(p.name)} — ${classify(p)}</h3>
+      <h3><a class="tph-profile-link" href="https://www.torn.com/profiles.php?XID=${encodeURIComponent(openPlayerXid)}"
+        target="_blank" rel="noopener">${escapeHtml(p.name)}</a> — ${classify(p)}</h3>
+      ${isSelf ? '' : playerHospitalLine(openPlayerXid)}
       <!-- Exploit/Leaks sits directly beside Report on purpose: they are the
            two written-out reads on the same player, one ranked and actionable,
            the other prose, and they are read together. Stats and Range are the
@@ -8835,12 +8940,15 @@
       <div style="opacity:.7;margin:2px 0 10px">Drag the ◢ corner to resize the coach panel — it stays where you put
         it, at the size you set, and now stays on screen between hands instead of disappearing.</div>
       <label><input type="checkbox" class="tph-calib-toggle" ${STORE.settings.calibrationMode ? 'checked' : ''}> Calibration mode</label><br><br>
-      <h4>Shared-affiliation badges</h4>
+      <h4>Torn API features</h4>
       <label>Torn API key: <input type="text" class="tph-torn-api-key" value="${escapeHtml(STORE.settings.tornApiKey)}" placeholder="optional, public access is enough" style="width:60%"></label>
       <div style="opacity:.7;margin:2px 0 10px">🔗 marks two seated players sharing a faction, 💍 marks two married
         to each other — both are facts from Torn's own profile data, checked only against whoever is CURRENTLY
-        seated, never stored as a relationship between two players. Leave blank and this does nothing; a public-only
-        key is enough, and it never leaves this device (stripped from Backup/Gist exports, same as the GitHub token).</div>
+        seated, never stored as a relationship between two players. 🏥 on a seat that's sitting out means they're
+        currently in the hospital — checked only while they're sitting out, refetched every 30s while that's true,
+        and never for an active seat. A player's name in their panel also links straight to their Torn profile.
+        Leave the key blank and none of this does anything; a public-only key is enough, and it never leaves this
+        device (stripped from Backup/Gist exports, same as the GitHub token).</div>
       <h4>GitHub Gist sync</h4>
       <label>OAuth App Client ID: <input type="text" class="tph-client-id" value="${escapeHtml(STORE.settings.githubClientId)}" style="width:70%"></label><br>
       <button class="tph-connect">${GistSync.status === 'connected' ? 'Re-sync now' : 'Connect'}</button>
@@ -9701,6 +9809,12 @@
       opponentRangeProxy,
       equityBasisLabel,
       parseAffiliationProfile,
+      parseHospitalStatus,
+      isHospitalized,
+      fmtHospitalRemaining,
+      hospitalStatusFor,
+      refreshSittingOutHospitalStatus,
+      hospitalCache,
       numericHandShorthand,
       cardToNum,
       handToShorthand,
