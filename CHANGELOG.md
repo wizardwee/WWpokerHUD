@@ -9,6 +9,96 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.36.0
+
+Two hands that couldn't have happened, and both had the same cause.
+
+Reported with a screenshot: *"Default view should be notable hands. Also how
+can board reached river but not show all 5 community cards, and not show
+player reveal cards."*
+
+### The board that lost its flop
+
+A stored hand read **"reached river · board: 5♦ 9♠"**. Two cards on a river
+board.
+
+The log's board line for a street can be missed — and the flop is the one
+that gets missed. Lines already on screen when the log snapshot primes are
+deliberately *not* parsed: `scanLogRows` treats them as a partial hand that
+is already over, which is correct and is what stops old lines being replayed
+as new events. But a hand in progress at that moment loses its flop line.
+The turn and river then append to an empty board — 0 + 1 + 1 = 2 — while the
+street still reads "river", because the street is set by the same lines that
+*did* parse.
+
+Nothing errors. The hand simply records a board it only partly saw.
+
+Worth noting the other hand in the same screenshot — "reached turn", four
+cards — was correct all along: three flop cards plus the turn. It must not
+be flagged, and isn't.
+
+Two fixes, because one alone isn't enough:
+
+**Repair it live.** `repairBoardFromDom()` reads the board off the table.
+`readBoardCards` already existed and was already trusted for the coach's
+live equity, so this needed no new DOM guesswork. It only ever *adds*, and
+is capped to what the street allows so the board and the street can never
+disagree. It runs on the 1s poll as well as at settlement, and running it
+live is the part that matters: board-texture stats are filed per action
+*during* the hand, so a missing flop was quietly filing every one of them
+against the wrong board.
+
+**Say so when it's too late to repair.** A hand already recorded short can't
+be fixed retroactively, so `boardIsPartial()` marks it — the tab, the
+clipboard and the export now read "partial — 2 of 5 seen" instead of
+printing two cards as though they were the whole board.
+
+**Unknown is not incomplete.** Hands recorded before v1.17.0 have no board
+at all, and are deliberately *not* flagged. Otherwise hundreds of old
+records would carry a warning about a field that didn't exist when they were
+written.
+
+`dedupeCards()` is load-bearing rather than tidiness: a DOM repair fills a
+street in, and the log line for that same street can still arrive afterwards
+and append. Without it the board would list a card twice.
+
+### The reveals that were never captured
+
+The same shape of bug, one function over.
+
+`harvestShownCards` bails on `if (!currentHand) return;` and runs on a 1s
+poll. But reveals land immediately *before* the "wins" line that settles the
+hand. A reveal-then-settle inside a single poll gap was therefore never
+captured: by the time the next tick came round `currentHand` was null and
+the poll bailed — even though the cards sit on the table for several seconds
+afterwards.
+
+`applyHandResultsAndReset` now takes one last look before banking the hand.
+That is the only moment when the cards are up *and* the hand is still live.
+
+### Notable by default
+
+The History tab now opens on **Notable** rather than Played. Asked for
+directly. It's safe as a default because the empty state names the way out
+when a player has no notable hands yet.
+
+### And a stale sentence
+
+The target-status line still read "is only read while they sit out" —
+untrue since v1.34.0 widened the fetch to every seated opponent. Rewritten,
+and it now distinguishes "no key" from "not checked yet".
+
+Opening a player panel also fetches their status now, via a new
+`requestTargetStatus`. The background sweep only covers players *currently
+seated*, so a panel opened on someone who had left the table read "not
+checked" forever. The staleness gate moved inside that function so the
+seated sweep and the panel share one definition of fresh enough.
+
+23 assertions in `test/board-repair.test.js`, including the exact hand from
+the screenshot, the turn hand that was always correct, and the
+unknown-is-not-incomplete case — verified non-vacuous by reintroducing the
+bug and watching it fail.
+
 ## 1.35.0
 
 The History tab stops burying the interesting hands under the folds.

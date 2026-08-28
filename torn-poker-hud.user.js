@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.35.0
+// @version      1.36.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,58 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.36.0 - Two hands that couldn't have happened, both with the same cause.
+ *          Reported with a screenshot: "Default view should be notable hands.
+ *          Also how can board reached river but not show all 5 community
+ *          cards, and not show player reveal cards."
+ *            - THE BOARD THAT LOST ITS FLOP. A stored hand read "reached river
+ *              · board: 5♦ 9♠". The log's board line for a street can be
+ *              missed, and the FLOP is the one that gets missed: lines already
+ *              on screen when the log snapshot primes are deliberately NOT
+ *              parsed (scanLogRows treats them as a partial hand already over,
+ *              which is what stops old lines replaying as new events). A hand
+ *              in progress at that moment loses its flop; turn and river then
+ *              append to an empty board — 0+1+1 = 2 — while the street still
+ *              reads river, being set by the lines that DID parse. Nothing
+ *              errors. (The screenshot's other hand, "reached turn" with four
+ *              cards, was correct all along and is not flagged.)
+ *            - FIX ONE, repair it live: repairBoardFromDom() reads the board
+ *              off the table. readBoardCards already existed and was already
+ *              trusted for the coach's live equity, so no new DOM guesswork.
+ *              It only ever ADDS, and is capped to what the street allows so
+ *              board and street can never disagree. Runs on the 1s poll as
+ *              well as at settlement — live is the part that matters, because
+ *              board-texture stats are filed per action DURING the hand, so a
+ *              missing flop was filing every one against the wrong board.
+ *            - FIX TWO, say so when it is too late: a hand already recorded
+ *              short cannot be fixed retroactively, so boardIsPartial() marks
+ *              it and the tab, clipboard and export read "partial — 2 of 5
+ *              seen" rather than printing two cards as the whole board.
+ *            - UNKNOWN IS NOT INCOMPLETE: pre-v1.17.0 hands have no board at
+ *              all and are deliberately not flagged, or hundreds of old
+ *              records would warn about a field that did not exist yet.
+ *            - dedupeCards() is load-bearing, not tidiness: a DOM repair fills
+ *              a street and the log line for that street can still arrive and
+ *              append, listing a card twice.
+ *            - THE REVEALS NEVER CAPTURED, same shape one function over.
+ *              harvestShownCards bails on !currentHand and runs on a 1s poll,
+ *              but reveals land immediately BEFORE the "wins" line that
+ *              settles the hand. Reveal-then-settle inside one poll gap was
+ *              never captured: by the next tick currentHand was null and the
+ *              poll bailed, though the cards sit there for seconds.
+ *              applyHandResultsAndReset now looks once more before banking —
+ *              the only moment cards are up AND the hand is still live.
+ *            - History opens on NOTABLE now, not Played. Asked for directly;
+ *              safe because the empty state names the way out.
+ *            - The target-status line still said "only read while they sit
+ *              out", untrue since v1.34.0 widened the fetch. Rewritten, and it
+ *              now separates "no key" from "not checked yet". Opening a panel
+ *              also fetches, via new requestTargetStatus — the background
+ *              sweep only covers CURRENTLY SEATED players, so a panel on
+ *              someone who had left read "not checked" forever. The staleness
+ *              gate moved inside it so both callers share one definition.
+ *            - 23 assertions in test/board-repair.test.js.
  *
  * 1.35.0 - The History tab stops burying the interesting hands under the folds.
  *          Asked for directly: "I don't want it to show all hands because that
@@ -118,64 +170,6 @@
  *              just optimised for layout thrash.
  *            - 68 assertions in test/target-status.test.js.
  *
- * 1.33.0 - The mugging workflow, finished: an attack link, and a straight
- *          answer on whether an attack would even land. Asked for directly
- *          after v1.30.0 — "the other features like player profile attack
- *          hospital".
- *            - WHAT v1.30.0 GOT WRONG: it read the hospital flag, reported it
- *              as a fact, and stopped. But hospital is not trivia about an
- *              opponent — it is THE REASON an attack won't land, and one of
- *              several such reasons, each a different length of wait. A player
- *              in jail, on a plane, or in fedjail showed NOTHING and looked
- *              like a clear target.
- *            - parseTargetStatus now reads state, until, level, and Torn's own
- *              status.description ("Travelling to Mexico") — kept verbatim for
- *              the tooltip, being the one field guaranteed to describe a state
- *              this file has never heard of.
- *            - attackReadiness returns THREE answers, not two: ready, blocked
- *              or unknown. Blockers: Hospital 🏥, Jail 🚔, Traveling/Travelling
- *              ✈️, Abroad 🌍, Federal 🚫. Both travel spellings are listed
- *              because which one Torn returns is unconfirmed and they are one
- *              letter apart — guessing wrong fails in the dangerous direction.
- *            - UNKNOWN IS NEVER "GO", the load-bearing decision here. 'Okay'
- *              is the ONLY state treated as clear; anything unrecognised
- *              reports as unknown. Torn can rename a state whenever it likes,
- *              and of the two ways to be wrong, "said go when they were
- *              untouchable" is the one that costs the user something. Same
- *              principle as parseAffiliationProfile refusing to read an error
- *              response as "no faction".
- *            - An `until` already past reads as clear again rather than
- *              reporting an elapsed wait (cache is <=30s stale). A blocker
- *              with NO until still blocks — no countdown is not evidence the
- *              state ended.
- *            - Attack link in the PANEL, never the badge. A tappable attack
- *              link over the felt is exactly what "never come between the user
- *              and the table" forbids. A LINK, never a click: advisory only,
- *              which goes double near the game's own controls. Shown whichever
- *              way the status reads — it is up to 30s stale, fetched only
- *              during sit-outs, on unconfirmed field names, so it steers and
- *              the decision stays the user's.
- *            - Badge shows BLOCKERS ONLY, never a positive mark. Most
- *              sitting-out players are attackable, so 🎯 on nearly all of them
- *              is noise, and the badge is width-constrained before it is
- *              information-constrained.
- *            - REMOVED isHospitalized: kept "as a helper for the badge", then
- *              the badge moved to attackReadiness and nothing called it.
- *              test/no-orphans.test.js caught it, which is what that lint is
- *              for. A hospital-only helper beside a general one also invites
- *              back the exact narrowness this release fixes.
- *            - fmtStatusRemaining (was fmtHospitalRemaining) gained a days
- *              tier — fedjail runs long enough that "73h 12m" reads worse
- *              than "3d 1h".
- *            - STILL UNCONFIRMED against a live response, same as v1.8.0 and
- *              v1.30.0. Fastest check: set a key, wait for someone to sit out
- *              while hospitalised, see if 🏥 lights and the panel counts down.
- *              One raw profile response would settle every field at once.
- *            - 60 assertions in test/target-status.test.js (renamed from
- *              hospital-status). Blocker cases are generated FROM
- *              ATTACK_BLOCKERS, so adding a state cannot leave a branch
- *              untested.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -238,7 +232,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.35.0';
+  const HUD_VERSION = '1.36.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -1549,7 +1543,9 @@
     let cls;
     if (!status) {
       cls = 'tph-target-unknown';
-      text = 'Status not checked — needs a Torn API key, and is only read while they sit out.';
+      text = (STORE.settings.tornApiKey || '').trim()
+        ? 'Status not checked yet — read for players at your table, so it fills in once they are seated.'
+        : 'Status not checked — needs a Torn API key (Settings → Torn API features).';
     } else if (r.blocked) {
       cls = 'tph-target-blocked';
       text = `${r.emoji} Can't attack — ${escapeHtml(r.label)}`
@@ -1587,14 +1583,20 @@
   // 100/min limit, with the 3s watcher tick only firing a request when an
   // entry is actually stale. Knowing which seats are viable targets BEFORE one
   // of them stands up is also the more useful read.
+  // One player, fetched only if nothing fresh is cached. The staleness gate
+  // lives here rather than at each call site so every caller — the seated
+  // sweep, and opening a panel — shares one definition of "fresh enough".
+  function requestTargetStatus(xid) {
+    if (!(STORE.settings.tornApiKey || '').trim()) return;
+    if (!xid || isHeroRecord(xid)) return; // hero's own status isn't the question
+    const cached = targetCache.get(String(xid));
+    if (cached && (Date.now() - cached.fetchedAt) <= TARGET_REFRESH_MS) return;
+    fetchTargetStatus(xid);
+  }
+
   function refreshSeatedTargetStatus() {
     if (!(STORE.settings.tornApiKey || '').trim()) return;
-    seatedXids({ includeSittingOut: true }).forEach((xid) => {
-      if (isHeroRecord(xid)) return; // hero's own status isn't the question
-      const cached = targetCache.get(String(xid));
-      const stale = !cached || (Date.now() - cached.fetchedAt) > TARGET_REFRESH_MS;
-      if (stale) fetchTargetStatus(xid);
-    });
+    seatedXids({ includeSittingOut: true }).forEach(requestTargetStatus);
   }
 
   // ===========================================================================
@@ -2668,7 +2670,12 @@
       hand.cbetOpportunity = {};
       hand.cbetFacedThisStreet = null;
       const boardCards = parseCardsFromText(m[1] || '');
-      if (boardCards.length) hand.board = (type === 'flop') ? boardCards : hand.board.concat(boardCards);
+      // Deduped, because repairBoardFromDom may already have filled this street
+      // in from the table. Without it a DOM repair followed by the log line for
+      // the same street would list a card twice.
+      if (boardCards.length) {
+        hand.board = dedupeCards((type === 'flop') ? boardCards : hand.board.concat(boardCards));
+      }
       if (hand.lastAggressor) {
         hand.cbetOpportunity[hand.lastAggressor] = true;
         getPlayer(hand.lastAggressor).cbetOpp += 1;
@@ -2813,6 +2820,49 @@
   // board AS IT STOOD on a given street — hand.board is the FINAL board, so a
   // flop action has to be read against its first three cards, not all five.
   const BOARD_COUNT_FOR = { preflop: 0, flop: 3, turn: 4, river: 5 };
+
+  function dedupeCards(cards) {
+    const seen = new Set();
+    return (cards || []).filter((c) => {
+      const k = c.rank + c.suit;
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+  }
+
+  // The log can miss a street's board line, and the flop is the one it misses.
+  // Lines already on screen when the snapshot primes are deliberately NOT
+  // parsed (see scanLogRows — they are a partial hand that is already over),
+  // so a hand in progress at that moment loses its flop. The turn and river
+  // then append to an empty board and the hand records as "reached river" with
+  // two cards. Reported exactly that way, from a real hand.
+  //
+  // The table still has the cards, so read them off it. This only ever ADDS —
+  // the log is authoritative whenever it is complete — and the result is
+  // capped to what the street allows, so the board and the street can never
+  // disagree. Running it live rather than only at settlement matters: board
+  // TEXTURE stats are recorded per action during the hand, so a missing flop
+  // would otherwise file every one of them against the wrong board.
+  function repairBoardFromDom() {
+    const hand = currentHand;
+    if (!hand) return;
+    const need = BOARD_COUNT_FOR[hand.street] || 0;
+    const have = (hand.board || []).length;
+    if (!need || have >= need) return;
+    const dom = dedupeCards(readBoardCards());
+    if (dom.length > have) hand.board = dom.slice(0, need);
+  }
+
+  // Did this hand's board ever get fully read? A stored hand that reached the
+  // river with two cards is not a two-card board, it is a board this HUD only
+  // partly saw — and printing it plainly reads as corruption. Callers say so
+  // instead. Hands recorded before v1.17.0 have no board at all and are
+  // excluded here: unknown is not the same as incomplete.
+  function boardIsPartial(h) {
+    const need = BOARD_COUNT_FOR[h && h.street] || 0;
+    return !!(need && Array.isArray(h.board) && h.board.length && h.board.length < need);
+  }
 
   // ===========================================================================
   // BOARD TEXTURE
@@ -3064,6 +3114,18 @@
   }
 
   function applyHandResultsAndReset() {
+    // One last look at the table before the hand is banked, while the cards are
+    // still up AND the hand is still live — the only moment both are true.
+    //
+    // harvestShownCards normally runs on a 1s poll, but reveals land
+    // immediately BEFORE the "wins" line that settles the hand. A
+    // reveal-then-settle inside a single poll gap was therefore never
+    // captured: by the time the next tick came round currentHand was null and
+    // the poll bailed, even though the cards sat on the table for seconds
+    // afterwards. That is why a hand could reach showdown and record nobody as
+    // having shown anything.
+    harvestShownCards();
+    repairBoardFromDom();
     if (currentHand) applyHandResults(currentHand);
     currentHand = freshHandState();
   }
@@ -3357,7 +3419,13 @@
     // — the replayer treats those differently ("unknown" vs "no cards fell"),
     // and so does this: silently omit the line rather than claim a known-empty
     // board for a hand this HUD never actually captured one on.
-    if (Array.isArray(h.board) && h.board.length) lines.push(`  board: ${cardsGlyphText(h.board)}`);
+    // A board shorter than the street implies is flagged, never printed as if
+    // it were the whole board — see boardIsPartial. The tab, the clipboard and
+    // the file must not describe the same hand differently.
+    if (Array.isArray(h.board) && h.board.length) {
+      lines.push(`  board: ${cardsGlyphText(h.board)}`
+        + (boardIsPartial(h) ? `  (partial — ${h.board.length} of ${BOARD_COUNT_FOR[h.street]} seen)` : ''));
+    }
     const byStreet = {};
     (h.actions || []).forEach((a) => { (byStreet[a.s] = byStreet[a.s] || []).push(a); });
     ['preflop', 'flop', 'turn', 'river'].forEach((street) => {
@@ -3418,7 +3486,10 @@
     // Same omission rule as formatHand: no line at all for a hand recorded
     // before board was persisted (v1.17.0), rather than claiming an empty one.
     if (Array.isArray(h.board) && h.board.length) {
-      parts.push(`<div class="tph-hh-row" style="${HH.row}">board: <b>${escapeHtml(cardsGlyphText(h.board))}</b></div>`);
+      parts.push(`<div class="tph-hh-row" style="${HH.row}">board: <b>${escapeHtml(cardsGlyphText(h.board))}</b>`
+        + (boardIsPartial(h)
+          ? ` <span class="tph-hh-partial" title="The log's board line for one street was missed — most often the flop, when the hand was already running as the HUD started reading the log. The cards shown are the ones it did see.">partial: ${h.board.length} of ${BOARD_COUNT_FOR[h.street]}</span>`
+          : '') + '</div>');
     }
 
     const byStreet = {};
@@ -4094,6 +4165,13 @@
     // deal clears them, so this has to poll rather than read at settlement.
     // Same 1s cadence as the log scan, and idempotent — first sighting wins.
     setInterval(harvestShownCards, 1000);
+
+    // Same cadence, same reason: the board can be short when the log's flop
+    // line was already on screen as the snapshot primed. Repairing it LIVE
+    // rather than only at settlement keeps board-texture stats — which are
+    // filed per action, during the hand — from being recorded against a board
+    // missing its flop.
+    setInterval(repairBoardFromDom, 1000);
   }
 
   // ===========================================================================
@@ -7623,6 +7701,7 @@
        gold = preflop aggression, blue = postflop aggression, red = a big pot,
        violet = cards seen, green = won. Matches the badge role-chip palette so
        3B means the same colour in both places. */
+    .tph-hh-partial { color: #f0c674 !important; font-size: 10px; }
     .tph-hh-tags { display: flex; gap: 4px; margin-bottom: 4px; flex-wrap: wrap; }
     .tph-hh-tag { font-size: 9.5px; font-weight: 700; letter-spacing: .5px;
       padding: 1px 5px; border-radius: 3px; color: #0d1117 !important; background: #8d959c; }
@@ -8731,11 +8810,14 @@
 
   let openPlayerXid = null;
   let openPlayerTab = 'stats';
-  // History tab filter. Session state, not a setting: it is a way of looking
-  // at one player right now, not a preference worth persisting — and a stored
-  // 'notable' would silently hide everything the next time a player with no
-  // notable hands was opened.
-  let historyFilter = 'played';
+  // History tab filter. Defaults to 'notable' — asked for directly after
+  // 'played' shipped: the hands worth reading are the ones with a marker, and
+  // everything else is scrolling. The empty state names the way out when a
+  // player has no notable hands yet, which is what makes this default safe.
+  //
+  // Session state, not a setting: it is a way of looking at one player right
+  // now, not a preference worth persisting.
+  let historyFilter = 'notable';
   // Survives the panel closing (openPlayerXid itself goes null on close, so
   // it can't answer "is this the same player as before"). Reopening the same
   // player you just closed on — the close-to-act-then-reopen cycle this is
@@ -8747,6 +8829,12 @@
     if (xid !== lastOpenPlayerXid) openPlayerTab = 'stats';
     lastOpenPlayerXid = xid;
     openPlayerXid = xid;
+    // Opening someone's panel is a deliberate act — it is exactly the moment
+    // their status is wanted. The background refresh only covers players
+    // CURRENTLY seated, so without this a panel opened on someone who has left
+    // the table would read "not checked" forever. Fires at most once per
+    // TARGET_REFRESH_MS per player, and is a no-op with no API key.
+    requestTargetStatus(xid);
     renderPlayerPanel();
   }
 
@@ -10568,6 +10656,11 @@
       fmtStatusRemaining,
       targetStatusFor,
       refreshSeatedTargetStatus,
+      requestTargetStatus,
+      repairBoardFromDom,
+      boardIsPartial,
+      dedupeCards,
+      BOARD_COUNT_FOR,
       targetDiagnostic,
       targetCache,
       attackUrl,
