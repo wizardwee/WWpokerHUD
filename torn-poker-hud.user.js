@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.36.0
+// @version      1.37.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,37 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.37.0 - Calibration mode's live counts were frozen. Open finding #4, closed.
+ *          Asked "Should we do a calibration mode too?" — it already exists
+ *          (Settings -> Calibration mode: live selector match counts, log
+ *          observer state, and the Run deep scan / Copy report buttons that
+ *          produce the report every DOM selector here was confirmed with). The
+ *          question surfaced that it shipped with a bug anyone turning it on
+ *          would hit immediately.
+ *            - init() had `if (STORE.settings.calibrationMode)
+ *              setInterval(renderCalibrationPanel, 3000)`. The refresh was only
+ *              armed if the setting was ALREADY ON AT LOAD, so toggling it on
+ *              mid-session — how anyone actually turns it on — rendered the
+ *              panel once and never refreshed it.
+ *            - Worse than "does not update": the live selector counts are the
+ *              whole point, and A FROZEN COUNT LOOKS EXACTLY LIKE A SELECTOR
+ *              THAT HAS STOPPED MATCHING — the precise failure the panel exists
+ *              to diagnose. It could invent a problem or hide a real one.
+ *            - Now always armed; renderCalibrationPanel returns immediately
+ *              when the setting is off, so the cost is one property read every
+ *              3s — the same trade the __TPH_TEST seam already makes.
+ *            - Teardown moved INTO that off-branch, so switching calibration
+ *              off by any route removes the panel: the toggle, the panel's own
+ *              ✕, or an imported store with calibrationMode:false. Both still
+ *              remove it immediately too — waiting 3s for a tap to visibly do
+ *              something is its own bug.
+ *            - Finding 4 removed from KNOWN GAPS above and from CLAUDE.md, both
+ *              closing lines citing 1.37.0. NOT renumbered: 3 and 5 keep their
+ *              numbers because the header and code comments cite them by number.
+ *            - No new tests, said plainly rather than padded: this is an init()
+ *              interval and a DOM teardown branch, and the harness drives
+ *              neither (setInterval is a no-op there, the default DOM is inert).
  *
  * 1.36.0 - Two hands that couldn't have happened, both with the same cause.
  *          Reported with a screenshot: "Default view should be notable hands.
@@ -129,47 +160,6 @@
  *              BOARD_FLAGS uses.
  *            - 74 assertions in test/hand-notability.test.js.
  *
- * 1.34.0 - The target status now actually appears, and can explain itself when
- *          it doesn't. Reported live: "How does the profile clicker work? I
- *          don't see anything or badges on their hospital status." Both halves
- *          were real problems with v1.30.0-v1.33.0.
- *            - WHY NOTHING SHOWED: the lookup only ever ran for seats that were
- *              SITTING OUT — from the original "mug them when they sit out"
- *              framing, and too clever by half. Sitting out is a RARE state, so
- *              most of the time nothing was fetched, the cache stayed empty and
- *              the feature showed nothing. renderBadges applied the SAME gate
- *              again on display, so it was double-gated. Now fetches for every
- *              seated opponent and badges a blocker whenever one is known.
- *            - Cost was never the reason to be narrow: 8 opponents on a 30s
- *              staleness gate is ~16 calls/min against Torn's 100/min, and the
- *              3s watcher only fires when an entry is actually stale. Knowing
- *              which seats are viable BEFORE one stands up is the better read.
- *            - WORSE, AND THE REAL LESSON: it failed SILENTLY in every mode.
- *              `if (!parsed) return;` swallowed no-key, wrong-key, rate-limit,
- *              network error and unrecognised-shape identically, and Torn
- *              answers auth failures and rate limits with HTTP 200 plus an
- *              error BODY so nothing upstream caught them either. Five causes,
- *              one symptom, no way to tell them apart — which is precisely how
- *              it came back as a report.
- *            - targetDiagnostic() now names the reason, in Settings (green
- *              "working — N lookups", or amber with the cause) and in a new
- *              deep-scan block "--- TORN API / TARGET STATUS ---" carrying the
- *              lookup count, last-fetch age, diagnostic and the whole target
- *              cache. Key-set is printed as a BOOLEAN, never the key: scans get
- *              pasted into chats, and a test asserts the diagnostic string
- *              can't leak it either. Same reasoning as heroProblem().
- *            - WHERE THE PROFILE LINK IS: the player PANEL, not the badge. Tap
- *              a seat badge; the name at the top of the panel is the link, with
- *              the attack link, status and level on the row beneath. No link on
- *              the badge itself — a tappable link over the felt is what "never
- *              come between the user and the table" exists to prevent. The
- *              Settings text now says so; it previously described only the old
- *              sitting-out behaviour and never said where the link was.
- *            - Removed the now-unused sittingOut read from renderBadges — a
- *              querySelector per seat per render, on the very path v1.31.0 had
- *              just optimised for layout thrash.
- *            - 68 assertions in test/target-status.test.js.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -181,14 +171,13 @@
  *     all-in CALL can make the coach read the spot as facing a 3-bet. Fixing it
  *     needs the all-in amount compared against the current bet, which the log
  *     does not always print.
- *  4. Calibration mode's 3s refresh only starts if the setting was already on at
- *     load; enabling it mid-session gives a panel that updates on log lines only.
  *  5. tableMax (default 9) drives ONLY the equity quote. The preflop charts read
  *     the per-hand seat count instead, so at a 6-max table with the default left
  *     alone the equity figure reads pessimistically (quoted vs 8 opponents).
  *
  * Findings 1 (no pot cross-check) and 2 (unbounded STORE.players) were closed in
- * 0.18.0 and 0.40.0-0.41.0. A "KNOWN UNRESOLVED" note used to sit here claiming
+ * 0.18.0 and 0.40.0-0.41.0; 4 (calibration's refresh only arming if the setting
+ * was on at load) in 1.37.0. A "KNOWN UNRESOLVED" note used to sit here claiming
  * actionButtons and the dealer button match nothing; it was stale from 0.22.0,
  * when both gained a working path, and is deleted rather than carried.
  */
@@ -232,7 +221,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.36.0';
+  const HUD_VERSION = '1.37.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -10295,7 +10284,16 @@
   }
 
   function renderCalibrationPanel() {
-    if (!STORE.settings.calibrationMode) return;
+    if (!STORE.settings.calibrationMode) {
+      // Torn down here, not only in the Settings toggle, so switching it off
+      // by ANY route removes the panel: the toggle, the panel's own ✕, or an
+      // imported store that carries calibrationMode: false. The toggle and the
+      // ✕ still remove it immediately as well — waiting up to 3s for a tap to
+      // visibly do something is its own bug.
+      const stale = document.querySelector('.tph-calib');
+      if (stale) stale.remove();
+      return;
+    }
     let el = document.querySelector('.tph-calib');
     const existingOut = el && el.querySelector('.tph-calib-out');
     const preserved = existingOut ? existingOut.value : '';
@@ -10905,7 +10903,14 @@
     // Faster than the coach panel: a turn cue that arrives 1.5s late has missed
     // a meaningful slice of the decision clock. Cheap — one button sweep.
     setInterval(renderTurnCue, 400);
-    if (STORE.settings.calibrationMode) setInterval(renderCalibrationPanel, 3000);
+    // Always armed, NOT gated on the setting being on at load — that gate was
+    // open finding #4. Toggling calibration on mid-session rendered the panel
+    // once and then never refreshed it, so the live selector counts (the
+    // entire point of the panel) sat frozen at whatever they were the moment
+    // it opened, and looked like selectors that had stopped matching.
+    // renderCalibrationPanel returns immediately when the setting is off, so
+    // always arming this costs one property read every 3s.
+    setInterval(renderCalibrationPanel, 3000);
 
     // Badges are anchored to seat positions via getBoundingClientRect(), which
     // goes stale on scroll/orientation change well before the 4s interval —

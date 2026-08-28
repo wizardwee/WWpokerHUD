@@ -371,18 +371,17 @@ script header, under the same numbers, so they're visible while editing —
 change one and change the other.
 
 Findings 1 (the pot had no cross-check) and 2 (`STORE.players` grew forever)
-were closed in v0.18.0 and v0.40.0–v0.41.0; `CHANGELOG.md` has the detail. The
-numbering below is kept as-is rather than renumbered, because the script header
-and several code comments cite these by number. One residue of #1 is still true
-and worth knowing: `hand.pot` (log-summed, not the DOM figure) is what P/L falls
-back to when a winner line carries no amount.
+were closed in v0.18.0 and v0.40.0–v0.41.0, and 4 (calibration's refresh only
+arming when the setting was already on at load) in v1.37.0; `CHANGELOG.md` has
+the detail. The numbering below is kept as-is rather than renumbered, because
+the script header and several code comments cite these by number. One residue
+of #1 is still true and worth knowing: `hand.pot` (log-summed, not the DOM
+figure) is what P/L falls back to when a winner line carries no amount.
 
 3. **All-in is counted as a raise** (`preflopRaiseEvents`), so a short-stack
    all-in *call* can make the coach read the spot as facing a 3-bet. Needs the
    all-in amount compared against the current bet, which the log doesn't always
    print.
-4. **Calibration's 3s refresh only starts if the setting was on at load.**
-   Enabling it mid-session gives a panel that updates on log lines only.
 5. **`tableMax` (default 9) only drives the equity quote**, not the preflop
    charts, which read the per-hand seat count. At a 6-max table with the default
    left alone, equity reads pessimistically (quoted vs 8 opponents).

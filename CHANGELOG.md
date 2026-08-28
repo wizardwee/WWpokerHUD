@@ -9,6 +9,66 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.37.0
+
+Calibration mode's live counts were frozen. Open finding #4, closed.
+
+Asked: *"Should we do a calibration mode too?"* — it already exists, under
+Settings → Calibration mode: live selector match counts, the log observer's
+state, and the **Run deep scan** / **Copy report** buttons that produce the
+report this project has used to confirm every DOM selector it has.
+
+But the question surfaced that it shipped with a bug anyone turning it on
+would hit immediately.
+
+### The bug
+
+`init()` had:
+
+```js
+if (STORE.settings.calibrationMode) setInterval(renderCalibrationPanel, 3000);
+```
+
+The 3-second refresh was only armed if the setting was **already on when the
+page loaded**. Toggling calibration on mid-session — which is how anyone
+actually turns it on — rendered the panel exactly once and then never
+refreshed it.
+
+So the live selector match counts, which are the entire point of the panel,
+sat frozen at whatever they happened to be the moment it opened. That is
+worse than the panel simply not updating: **a frozen count looks exactly
+like a selector that has stopped matching**, which is the precise failure
+the panel exists to diagnose. It could report a problem that wasn't there,
+or hide one that was.
+
+The interval is now always armed. `renderCalibrationPanel` returns
+immediately when the setting is off, so the cost of that is one property
+read every three seconds — the same "production cost is one falsy property
+read" trade the `__TPH_TEST` seam already makes.
+
+### Teardown moved with it
+
+Removing the panel now lives in `renderCalibrationPanel`'s off-branch rather
+than only in the Settings toggle, so switching calibration off by *any*
+route takes the panel down: the toggle, the panel's own ✕, or an imported
+store carrying `calibrationMode: false`. The toggle and the ✕ still remove
+it immediately as well — waiting up to three seconds for a tap to visibly do
+something is its own bug.
+
+### Bookkeeping
+
+Finding 4 is removed from the `KNOWN GAPS` block in the script header and
+from the open-findings list in `CLAUDE.md`, with both closing lines updated
+to cite v1.37.0 alongside the existing closures of 1 and 2. The numbering is
+deliberately **not** renumbered — 3 and 5 keep their numbers, because the
+header and several code comments cite them by number, a convention both
+files already state.
+
+No new tests. This is a wiring fix to an `init()` interval and a DOM
+teardown branch, and the harness can drive neither: `setInterval` is a no-op
+in the sandbox and the default DOM is inert. Said plainly rather than
+padded with an assertion that would pass without exercising anything.
+
 ## 1.36.0
 
 Two hands that couldn't have happened, and both had the same cause.
