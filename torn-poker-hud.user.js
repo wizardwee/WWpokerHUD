@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.40.0
+// @version      1.41.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,49 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.41.0 - A clean scan. A confirmation release, not a fix.
+ *            - THE TORN API RETURNS REAL DATA, first time since v1.8.0. Top-
+ *              level keys are Torn's actual profile shape (rank,level,honor,
+ *              ...,status,job,faction,married,last_action,...), and `level` IS
+ *              at top level — json.level was right all along and only read 0
+ *              because the envelope was being parsed instead of the body.
+ *            - The proof it stopped fabricating is not that it succeeds, it is
+ *              that the answers now VARY: state="Hospital" level=43 BLOCKED
+ *              (in hospital, 23m) desc="In hospital for 22 mins", beside four
+ *              genuinely-Okay players at levels 85/79/45/89. Against v1.39.0's
+ *              uniform wall of five invented "Okay"s. 10 started, 10 succeeded.
+ *            - POT MISMATCH DIAGNOSED BY ITS ABSENCE: "pot: dom=$1.8M
+ *              log=$1.8M". Nothing was changed to achieve that, which is the
+ *              point. v1.39.0 reasoned the gap was the blinds, whose log lines
+ *              were on screen at load and never counted; this scan was taken on
+ *              a hand watched from the start and the two agree exactly. That
+ *              turns a hypothesis into a confirmed diagnosis and reclassifies
+ *              the mismatch as a joined-mid-hand condition, not a defect.
+ *            - Also holding: heroGhost none, watcher steps failing none, table
+ *              named. And communityCards 0 again — CORRECT this time, the scan
+ *              being preflop with no board up. The v1.40.0 correction behaving
+ *              as corrected.
+ *            - THE ONE CHANGE, a diagnostic not a fix. The 🔗/💍 affiliation
+ *              badges (v1.8.0) are the last unverified feature, and were broken
+ *              by the same envelope bug for their whole life, so their field
+ *              names have never been checked against a real reply. The scan
+ *              proves `faction` and `married` exist at TOP level but says
+ *              nothing about what is inside them, which is what
+ *              parseAffiliationProfile reads. The scan now records the NESTED
+ *              key names under both, plus an affiliation-cache block showing
+ *              what was actually stored per seated player (or ABSENT / never
+ *              fetched). Needed because the badge only lights when two SEATED
+ *              players match — with no faction-mate at the table an absent
+ *              badge proves nothing, and this separates "read fine, nobody
+ *              matches" from "never read". Names only, never values.
+ *            - srOnly confirmed a THIRD time ("Donut called $500,000" — actor,
+ *              verb and amount in one element). Still not acted on: needs dedup
+ *              by (actor, action, street) against the visual log, which the
+ *              snapshot scanner does not solve — it dedups a source against its
+ *              own history, not two sources against each other.
+ *            - No new tests: this is runDeepScan output, which the harness
+ *              cannot drive (inert DOM, no network). Said rather than padded.
  *
  * 1.40.0 - Every seat was reported "attackable" without a single profile ever
  *          being read, and the diagnostic said everything was fine.
@@ -123,63 +166,6 @@
  *              solve that, it dedups a source against its own history.
  *            - 17 assertions in test/hero-ghost-cleanup.test.js.
  *
- * 1.38.0 - THE TORN API HAD NEVER WORKED. Not once, since v1.8.0. Found by
- *          reading a live deep scan pasted back from the phone — the exact
- *          thing that scan exists for, and the largest thing it has caught.
- *            - pdaCall wrapped PDA_httpGet in a Promise resolved ONLY from a
- *              callback passed as the last argument. Newer Torn PDA RETURNS a
- *              Promise instead of taking a callback, so the callback was never
- *              invoked, the result was discarded, and every request hung
- *              forever. No throw, no rejection, nothing logged, nothing shown.
- *            - Everything downstream was dead the whole time: 🔗 faction and
- *              💍 marriage badges (v1.8.0), hospital/jail/travel status, attack
- *              readiness. Fifteen versions of features that never ran once,
- *              each shipped with an honest caveat about its FIELD NAMES while
- *              the real fault sat one layer below, in the transport. The
- *              comment above pdaFetch had already named the risk exactly.
- *            - HOW THE SCAN CAUGHT IT: "apiKey set: true · successful lookups:
- *              0 · last fetch: never" AND no recorded error.
- *              targetLastFetchAt is set only AFTER the await and the "no lookup
- *              yet" branch needs targetLastError empty, so a promise that never
- *              settles is the ONLY state producing all four — a bad key, a rate
- *              limit, a network failure and an uncalled function each give a
- *              different combination. That block only existed because v1.34.0
- *              added it after "I don't see anything".
- *            - pdaCall now handles BOTH shapes (passes the callback AND adopts
- *              a returned thenable, first outcome wins via a `settled` guard)
- *              plus a 15s timeout. The timeout is half the fix: a hang must
- *              never again look like a request that was never made. The scan
- *              also prints "started: N" now, counted BEFORE the await — the gap
- *              between started and completed IS the diagnosis.
- *            - ONE THROW WAS KILLING FIVE OTHER JOBS. The 3s watcher ran six
- *              bare calls in sequence, so a throw in any killed every later one
- *              on that tick and every tick after, silently. The symptom then
- *              surfaces nowhere near the cause. Each step is isolated now,
- *              records its failure by name, and the scan prints them.
- *            - THE BLIND WAS SITTING RIGHT THERE: scan read "blind level not
- *              read yet" while "posted big blind $500,000" was in the log,
- *              marked old___ — on screen at prime time, so never parsed. Not
- *              parsing those as EVENTS stays correct; but a blind level is a
- *              FACT about the table, not an event, so reading it replays
- *              nothing. seedBlindFromVisibleLog takes it, only ever SEEDS, and
- *              cannot override a live read or disturb table-switch detection.
- *              Matters quietly: bbAmount prices P/L in bb, decides
- *              isNotableHand, feeds v1.35.0's stored bb, drives stack warnings.
- *            - HERO GHOST AGAIN: 7 hands in name:Wonkawee against 8911 real.
- *              v1.6.0's fix holds but only once heroXid is RESOLVED, and that
- *              retry ran on the 3s watcher while the log scan runs every
- *              second. scanLogRows now binds hero before parsing anything.
- *            - CLAUDE.md rewritten where the scan settles it: every v0.22.0
- *              marker is now confirmed with evidence, and the claim that
- *              playerPositioner had NO index (so getDealerXid must return null)
- *              is DISPROVEN — playerPositioner-4/-6/-1 and position-6___ are
- *              present and the dealer resolves. The geometric ring stays
- *              primary; the indexed path is corroboration, not a dead end.
- *            - STILL OPEN, not claimed fixed: pot dom=$3M vs log=$2.3M, known
- *              residue of closed finding #1 (hand.pot is log-summed).
- *            - 12 assertions in test/pda-call.test.js, verified non-vacuous by
- *              restoring the old callback-only pdaCall and watching it fail.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -241,7 +227,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.40.0';
+  const HUD_VERSION = '1.41.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -1562,6 +1548,14 @@
   // is not where parseTargetStatus looks. Guessing a second field name blind
   // is what produced the first wrong guess; this makes the next scan answer it.
   let targetLastKeys = '';
+  // NESTED key names under faction/married, from the same response. The
+  // affiliation badges (v1.8.0) read faction.faction_id / faction.faction_name
+  // / married.spouse_id, and those names have never been checked against a
+  // real reply — the envelope bug meant no reply was ever read at all. The
+  // v1.40.0 scan proved `faction` and `married` EXIST at top level; this says
+  // what is inside them. Names only, never values: a faction name is fine but
+  // a scan gets pasted into chats, so the rule stays absolute.
+  let affilLastKeys = '';
 
   async function fetchTargetStatus(xid) {
     const key = (STORE.settings.tornApiKey || '').trim();
@@ -1582,7 +1576,12 @@
       if (!parsed) { targetLastError = 'unrecognised API response shape'; return; }
       targetLastError = '';
       targetOkCount++;
-      try { targetLastKeys = Object.keys(json).join(','); } catch (e) { targetLastKeys = '(unreadable)'; }
+      try {
+        targetLastKeys = Object.keys(json).join(',');
+        const fk = json.faction && typeof json.faction === 'object' ? Object.keys(json.faction).join(',') : '(absent)';
+        const mk = json.married && typeof json.married === 'object' ? Object.keys(json.married).join(',') : '(absent)';
+        affilLastKeys = `faction{${fk}} married{${mk}}`;
+      } catch (e) { targetLastKeys = '(unreadable)'; }
       targetCache.set(String(xid), Object.assign({}, parsed, { fetchedAt: Date.now() }));
     } catch (e) {
       targetLastError = 'could not reach api.torn.com';
@@ -10417,6 +10416,23 @@
     // Key NAMES only — no values. This is what identifies where `level` (and
     // anything else still reading as absent) actually lives in the response.
     L.push('last response top-level keys: ' + (targetLastKeys || '(none captured)'));
+    L.push('affiliation sub-keys: ' + (affilLastKeys || '(none captured)'));
+    // What parseAffiliationProfile actually stored for seated players. The
+    // badge only lights when two SEATED players match, so with no faction-mate
+    // at the table an empty badge proves nothing — this shows whether the
+    // fields were read at all, which is the part still unverified.
+    const affilRows = Array.from(seatedXids({ includeSittingOut: true }))
+      .filter((x) => !isHeroRecord(x))
+      .map((x) => {
+        const p = STORE.players[x];
+        if (!p) return x + ' -> no record';
+        if (!p.affilFetchedAt) return x + ' -> never fetched';
+        return x + ' -> factionId=' + (p.factionId || 'ABSENT')
+          + ' factionName=' + (p.factionName ? JSON.stringify(squish(p.factionName, 24)) : 'ABSENT')
+          + ' spouseXid=' + (p.spouseXid || 'ABSENT');
+      });
+    L.push('affiliation cache (' + affilRows.length + '):');
+    affilRows.forEach((r) => L.push('  ' + r));
     const tickBad = Object.keys(tickErrors);
     L.push('watcher steps failing: ' + (tickBad.length
       ? tickBad.map((k) => k + ' -> ' + tickErrors[k]).join(' | ')

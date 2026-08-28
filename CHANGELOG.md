@@ -9,6 +9,101 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.41.0
+
+A clean scan. This is a confirmation release, not a fix.
+
+### What the fourth scan proves
+
+The Torn API returns **real data**, for the first time since v1.8.0:
+
+```
+last response top-level keys: rank,level,honor,gender,property,signup,awards,
+  friends,enemies,forum_posts,karma,age,role,donator,player_id,name,
+  property_id,revivable,profile_image,life,status,job,faction,married,
+  basicicons,states,last_action,competition
+```
+
+That is Torn's actual profile shape, and **`level` is at top level** — so
+`json.level` was right all along. It only ever read 0 because the envelope
+was being parsed instead of the body.
+
+The proof it has stopped fabricating is not that it succeeds, it's that the
+answers now **vary**:
+
+```
+2495718 -> state="Hospital" level=43 BLOCKED(in hospital, 23m)
+                                     desc="In hospital for 22 mins"
+2299671 -> state="Okay" level=85 ATTACKABLE
+2277713 -> state="Okay" level=79 ATTACKABLE
+3651864 -> state="Okay" level=45 ATTACKABLE
+3157771 -> state="Okay" level=89 ATTACKABLE
+```
+
+A genuinely hospitalised opponent, detected and counting down, beside four
+players who really are fine — against v1.39.0's uniform wall of five
+invented "Okay"s. 10 lookups started, 10 succeeded.
+
+### The pot mismatch, diagnosed by its absence
+
+```
+pot: dom=$1.8M log=$1.8M
+```
+
+No mismatch. Nothing was changed to achieve that, and it is worth recording
+precisely because of it: v1.39.0 reasoned the gap was the blinds, whose log
+lines were on screen at load and so never counted. This scan was taken on a
+hand watched from the start — and the two figures agree exactly.
+
+That turns a hypothesis into a confirmed diagnosis, and reclassifies the
+mismatch from a persistent defect into a known joined-mid-hand condition.
+
+Also holding: `heroGhost: none`, `watcher steps failing: none`, and the
+table named correctly. And `communityCards: 0` again — which this time is
+**correct**, because the scan was taken preflop with no board on the table.
+Exactly the reading v1.40.0 corrected, behaving as corrected.
+
+### The one change: the last unverified feature
+
+The 🔗 faction and 💍 marriage badges from v1.8.0 are now the only thing left
+that has never been confirmed — and they were broken by the same envelope
+bug for their entire existence, so their field names have never once been
+checked against a real reply.
+
+The scan proves `faction` and `married` exist at top level. It says nothing
+about what is *inside* them, which is what `parseAffiliationProfile` actually
+reads (`faction.faction_id`, `faction.faction_name`, `married.spouse_id`).
+
+So the deep scan now records the **nested** key names under both, taken from
+the response `fetchTargetStatus` already retrieves, plus an affiliation cache
+block showing what was actually stored per seated player — or `ABSENT` /
+`never fetched`.
+
+This matters because the badge only lights when two *seated* players match.
+With no faction-mate at the table, an absent badge proves nothing at all; the
+cache block distinguishes "read correctly, nobody matches" from "never read".
+Names only, never values — a scan gets pasted into chats, and that rule
+stays absolute.
+
+Same diagnostic-first move that found the hang in v1.38.0 and the envelope in
+v1.40.0, pointed at the one thing still unknown.
+
+### Also noted
+
+`SPAN.srOnly___` carrying `"Donut called $500,000"` — actor, verb *and*
+amount in a single element, where the visual log splits actor from verb
+across two spans. Confirmed a third time now, still not acted on for the
+same reason: it needs dedup by (actor, action, street) against the visual
+log, and the snapshot scanner doesn't solve that — it dedups a source
+against its own history, not two sources against each other.
+
+Findings #3 (an all-in counted as a raise) and #5 (`tableMax` driving only
+the equity quote) remain open and untouched.
+
+No new tests. This adds output to `runDeepScan`, which the harness cannot
+drive — inert DOM, no network. Said plainly rather than padded with an
+assertion that would pass without exercising anything.
+
 ## 1.40.0
 
 Every seat was reported "attackable" without a single profile ever being
