@@ -9,6 +9,115 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.42.0
+
+The field names were right. The bug was a day-long cache holding data from
+when the transport was broken.
+
+### The diagnostic did its job
+
+v1.41.0 added the nested key names rather than guessing again. One scan
+later:
+
+```
+affiliation sub-keys: faction{position,faction_id,days_in_faction,
+  faction_name,faction_tag,faction_tag_image}
+  married{spouse_id,spouse_name,duration}
+
+affiliation cache (5):
+  3157771 -> factionId=ABSENT factionName=ABSENT spouseXid=ABSENT
+  ... all five the same
+```
+
+`faction_id`, `faction_name`, `spouse_id` — all present, exactly as
+`parseAffiliationProfile` expects. **The v1.8.0 guesses were correct all
+along.** And the cache line only prints when `affilFetchedAt` *is* set
+(otherwise it reads "never fetched"), so the fetch completed and stored
+nothing.
+
+### The same dangerous default, one function over
+
+`parseAffiliationProfile` read `json.faction || {}` and manufactured
+`{factionId: 0, factionName: '', spouseXid: 0}` out of a response it had
+never understood.
+
+This is the identical shape v1.40.0 fixed in `parseTargetStatus` — and it
+survived that release because only the one function got looked at. During
+the broken-envelope era it ran on *every* call, and since a non-null return
+makes `fetchAffiliation` stamp `affilFetchedAt`, the fabricated "no faction,
+no spouse" was cached for `AFFIL_REFRESH_MS`: **a full 24 hours.**
+
+The badges weren't dead because the field names were wrong. They were dead
+because a day-long cache was holding invented data.
+
+Two fixes, both needed:
+
+**The parse refuses** a response carrying none of `faction` / `married` /
+`player_id`. The discriminator is worth stating: Torn returns `faction`
+*with* `faction_id: 0` for a genuinely factionless player, so the key is
+present either way — which is exactly what separates "read a profile, they
+have no faction" from "never read a profile". A factionless real profile
+still parses.
+
+**`repairAffiliationCache()` clears every `affilFetchedAt` stamp once**, at
+init. Fixing the parse alone was not enough: without this the badges stay
+dead for up to a day after the fix lands, which would read as the fix having
+failed. It clears the timestamp only, never the records — a cache repair,
+not a data purge. Runs from `init()` rather than `migrateStore` per the
+documented temporal-dead-zone hazard, and is made safe by a store flag
+rather than by being idempotent, the same way `backfillBoardTexture` is.
+
+### Four times now
+
+`test/affiliation.test.js` asserted *"missing faction/married keys entirely
+still parses (fields just read 0/empty)"*. Written from the implementation
+instead of the requirement, so it agreed with the bug and kept the suite
+green.
+
+That is the fourth instance in this project, and all four are the same
+mistake in the same hands:
+
+| | |
+|---|---|
+| v1.0.1 | a test re-implemented the regex and asserted against its own copy |
+| v1.35.0 | asserted the 4th raise was a "4B" — it's a 5-bet |
+| v1.40.0 | asserted `"defaults to Okay/0"` |
+| v1.42.0 | asserted `"fields just read 0/empty"` |
+
+Worth naming plainly rather than filing as repo folklore: writing the test
+after the code, from the code, produces a test that can only ever agree with
+it. The tell is a test name that *describes an implementation detail* —
+"defaults to", "still parses", "fields just read" — instead of stating a
+requirement. All four read that way.
+
+Replaced with assertions that the parse **refuses**, including the real PDA
+envelope shape, plus two proving a genuine factionless profile still parses.
+
+### A flaky test of my own
+
+`test/equity-slicing.test.js` ran its directional assertion — *more
+opponents is worse for a drawing hand* — at `EQUITY_ITERS_MIN`, 100 samples.
+Two independent runs at that size carry roughly ±5pp each, enough to invert
+the comparison occasionally. It failed once during this session.
+
+Raised to 3000 for that block, matching the precedent already in
+`test/equity-ranges.test.js`, where directional checks run well above the
+production default. A test that fails one run in twenty teaches nothing
+except to ignore it. The starvation assertions in the same block are
+untouched — they only need both quotes to resolve.
+
+### Also confirmed
+
+**Two** hospitalised opponents detected at once, with different countdowns
+(18m and 44m) and matching descriptions — a stronger version of the
+varied-data proof than last release. `pot: dom=$8.5M log=$8.5M` agrees for
+the second scan running. `communityCards` matched 3 with a flop on the
+board, the v1.40.0 correction still holding. `heroGhost: none`,
+`watcher steps failing: none`, three reveal rows all parsed.
+
+And `srOnly` confirmed a fourth time (`"Wilkee checked"`), still unexploited
+for the reason already recorded.
+
 ## 1.41.0
 
 A clean scan. This is a confirmation release, not a fix.

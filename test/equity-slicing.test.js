@@ -163,7 +163,15 @@ const card = (rank, suit) => ({ rank, suit });
 {
   const T = load();
   T.STORE = T.emptyStore();
-  T.STORE.settings.equityIters = 100;
+  // The STARVATION assertions below need only that both quotes resolve, and
+  // would run fine at the minimum. The DIRECTIONAL one at the end is a
+  // statistical claim, and at EQUITY_ITERS_MIN it flaked: two independent
+  // 100-sample runs carry roughly +/-5pp each, which is enough to invert a
+  // comparison now and then. Raised for stability, the same reason
+  // test/equity-ranges.test.js runs its directional checks well above the
+  // production default — a test that fails one run in twenty teaches nobody
+  // anything except to ignore it.
+  T.STORE.settings.equityIters = 3000;
   const hand = [card('Q', 's'), card('J', 's')];
 
   const live = T.estimateEquitySliced(hand, [], 2, 0);
@@ -174,7 +182,8 @@ const card = (rank, suit) => ({ rank, suit });
   t.ok('both are cached',
     T.equityCache.has(T.equityCacheKey(hand, [], 2, 0))
     && T.equityCache.has(T.equityCacheKey(hand, [], 8, 0)));
-  t.ok('more opponents is worse for a drawing hand', ring < live);
+  t.ok(`more opponents is worse for a drawing hand (${live.toFixed(1)}% vs ${ring.toFixed(1)}%)`,
+    ring < live);
 }
 
 // --- the completion hook ---------------------------------------------------

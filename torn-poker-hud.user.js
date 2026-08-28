@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.41.0
+// @version      1.42.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,59 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.42.0 - The field names were right. The bug was a day-long cache holding
+ *          data from when the transport was broken.
+ *            - THE DIAGNOSTIC DID ITS JOB. v1.41.0 added the nested key names
+ *              rather than guessing again, and one scan later:
+ *              faction{position,faction_id,days_in_faction,faction_name,
+ *              faction_tag,faction_tag_image} married{spouse_id,spouse_name,
+ *              duration} — all present, exactly as parseAffiliationProfile
+ *              expects. The v1.8.0 guesses were correct all along. Yet all five
+ *              seated players read factionId=ABSENT, and that line only prints
+ *              when affilFetchedAt IS set: the fetch completed and stored
+ *              nothing.
+ *            - THE SAME DANGEROUS DEFAULT AS v1.40.0, ONE FUNCTION OVER, and it
+ *              survived that release because only parseTargetStatus was looked
+ *              at. parseAffiliationProfile read `json.faction || {}` and
+ *              manufactured {factionId: 0, factionName: '', spouseXid: 0} from
+ *              a response it never understood. During the broken-envelope era
+ *              that ran on EVERY call, and a non-null return makes
+ *              fetchAffiliation stamp affilFetchedAt — so the fabricated "no
+ *              faction, no spouse" was cached for AFFIL_REFRESH_MS, 24 HOURS.
+ *              The badges were dead because of a day-long cache of invented
+ *              data, not because the field names were wrong.
+ *            - FIX ONE: the parse refuses a response carrying none of faction /
+ *              married / player_id. The discriminator matters — Torn returns
+ *              `faction` WITH faction_id: 0 for a genuinely factionless player,
+ *              so the key is present either way, which is exactly what
+ *              separates "read a profile, no faction" from "never read one".
+ *            - FIX TWO: repairAffiliationCache() clears every affilFetchedAt
+ *              stamp once at init(). The parse fix alone was NOT enough — the
+ *              badges would stay dead up to a day afterwards and read as the
+ *              fix having failed. Clears the TIMESTAMP only, never the records:
+ *              a cache repair, not a data purge. From init(), not migrateStore
+ *              (the documented TDZ hazard), made safe by a STORE flag rather
+ *              than by idempotence, same as backfillBoardTexture.
+ *            - FOUR TIMES NOW a test here asserted the implementation instead
+ *              of the requirement, so it agreed with the bug and stayed green:
+ *              v1.0.1 (asserted against its own copy of the regex), v1.35.0
+ *              (the 4th raise called "4B" when it is a 5-bet), v1.40.0
+ *              ("defaults to Okay/0"), and this ("fields just read 0/empty").
+ *              THE TELL IS THE TEST NAME describing an implementation detail —
+ *              "defaults to", "still parses", "fields just read" — rather than
+ *              stating a requirement. All four read that way.
+ *            - Also fixed a flaky test of my own: equity-slicing ran its
+ *              DIRECTIONAL assertion at EQUITY_ITERS_MIN (100), where two
+ *              independent runs carry ~±5pp each — enough to invert the
+ *              comparison, and it failed once this session. Raised to 3000 for
+ *              that block, matching equity-ranges' existing precedent.
+ *            - ALSO CONFIRMED: TWO hospitalised opponents at once with
+ *              different countdowns (18m, 44m) and matching descriptions — a
+ *              stronger varied-data proof than last release. pot dom=log for
+ *              the second scan running. communityCards matched 3 with a flop up
+ *              (v1.40.0's correction holding). heroGhost none, watcher steps
+ *              none, three reveal rows parsed. srOnly confirmed a FOURTH time.
  *
  * 1.41.0 - A clean scan. A confirmation release, not a fix.
  *            - THE TORN API RETURNS REAL DATA, first time since v1.8.0. Top-
@@ -115,57 +168,6 @@
  *            - STILL OPEN, untouched: pot dom=$10.5M vs log=$5M, cause already
  *              recorded in v1.39.0 (blind lines on screen at load).
  *
- * 1.39.0 - A second scan, and this time it confirms rather than condemns.
- *            - v1.38.0 VERIFIED ON THE DEVICE, all three shipped blind:
- *              "apiKey set: true · started: 8 · successful lookups: 4 · last
- *              fetch: 13s ago · diagnostic: OK — working" (the Torn API is
- *              alive for the first time since v1.8.0, where the previous scan
- *              read 0 lookups and "last fetch: never"); "watcher steps failing:
- *              none"; and "table: Old Folks Home · $500k BB · Mid" where the
- *              last scan said "blind level not read yet".
- *            - HERO GHOST DROPPED. The scan proves the leak is CLOSED, not
- *              merely narrowed: the ghost is frozen at 7 hands, identical to
- *              last scan, while hero's real record moved 8911 -> 8924. Thirteen
- *              new hands, zero new ghost hands. What remains is orphaned
- *              residue that still skews observedPoolAverages and holds a prune
- *              slot, so dropStaleHeroGhost() removes it.
- *            - DROPPED, NEVER MERGED: hands and dealtInXids were always counted
- *              through the seat path, so folding the ghost in would double-
- *              count them — the same reason mergePseudoPlayer bails when the
- *              real record exists.
- *            - Two guards, both proven by deleting them and watching the tests
- *              fail: it refuses when there is NO real record (never delete
- *              hero's only copy), and it treats a PSEUDO-ID heroXid as
- *              unresolved (the v0.20.0 lesson — `name:...` is truthy but is not
- *              bound to a seat, and deleting then removes the very record hero
- *              is being tracked under). Only ever hero's own ghost; another
- *              player's `name:` record is a real tracked opponent and survives.
- *            - `level` IS NOT WHERE THE PARSER LOOKS, and the scan proves it:
- *              all four cached entries read level=0 while status.state parsed
- *              correctly as "Okay", so the response IS the profile shape and
- *              json.level is the wrong path. Guessing a second field name blind
- *              is what produced the first wrong guess, so the scan now records
- *              the response's TOP-LEVEL KEY NAMES instead — names only, never
- *              values, since scans get pasted into chats. Meanwhile the UI
- *              stops asserting a level it lacks: omitted in the panel,
- *              "level=ABSENT" in the scan. 0 is not a level.
- *            - POT MISMATCH ROOT-CAUSED, NOT FIXED. Both scans: dom-vs-log gap
- *              is ~$0.7M each time, and this table's blinds are $250k+$500k =
- *              $750k. The blind lines were old___ in both — on screen at prime
- *              time, never parsed as events, so their contributions never
- *              reached the log-summed pot. Same missed-old-lines cause as the
- *              lost flop (1.36.0) and the unread blind level (1.38.0), a third
- *              time. seedBlindFromVisibleLog seeds the LEVEL only. Not fixed
- *              here: synthesising contributions for lines we deliberately do
- *              not replay would inflate every pot if done wrong. Residue of
- *              closed finding #1.
- *            - srOnly re-confirmed and still unexploited: SPAN.srOnly___
- *              carries "JonnySince folded", actor AND verb in one element,
- *              where the visual log splits them. Needs dedup by (actor, action,
- *              street) against the visual log — the snapshot scanner does not
- *              solve that, it dedups a source against its own history.
- *            - 17 assertions in test/hero-ghost-cleanup.test.js.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -227,7 +229,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.41.0';
+  const HUD_VERSION = '1.42.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -1340,6 +1342,27 @@
   // throwing, so a wrong guess here costs a missing badge, not a crash.
   function parseAffiliationProfile(json) {
     if (!json || json.error) return null;
+    // THE SAME DANGEROUS DEFAULT parseTargetStatus carried, one function over,
+    // and it survived v1.40.0's fix because only the other one was looked at.
+    //
+    // This used to read `json.faction || {}` and manufacture
+    // {factionId: 0, factionName: '', spouseXid: 0} out of a response it had
+    // never understood. During the broken-envelope era that happened on EVERY
+    // call — and because a non-null return makes fetchAffiliation stamp
+    // affilFetchedAt, the fabricated "no faction, no spouse" was then cached
+    // for AFFIL_REFRESH_MS, a full 24 hours. A live scan caught it: the field
+    // names were right all along (faction{faction_id,faction_name,...},
+    // married{spouse_id,...}) while every seated player read ABSENT.
+    //
+    // The discriminator is that Torn returns `faction` WITH faction_id: 0 for
+    // a genuinely factionless player, so the key is present either way. A
+    // response carrying none of faction / married / player_id is not a profile
+    // at all, and refusing it is the difference between "read a profile, they
+    // have no faction" and "never read a profile".
+    const looksLikeProfile = Object.prototype.hasOwnProperty.call(json, 'faction')
+      || Object.prototype.hasOwnProperty.call(json, 'married')
+      || Object.prototype.hasOwnProperty.call(json, 'player_id');
+    if (!looksLikeProfile) return null;
     const faction = json.faction || {};
     const married = json.married || {};
     return {
@@ -1352,6 +1375,35 @@
   // Faction/marriage don't change hand to hand — a day between refetches keeps
   // this to a handful of calls per session instead of one per seat per tick.
   const AFFIL_REFRESH_MS = 24 * 60 * 60 * 1000;
+
+  // One-time repair: discard affiliation timestamps written while the
+  // transport was broken.
+  //
+  // Fixing the parse is not enough on its own. Every affilFetchedAt stamp
+  // predating v1.42.0 was written from a response that was never actually
+  // read, and AFFIL_REFRESH_MS is 24 HOURS — so without this the badges stay
+  // dead for up to a day after the fix lands, which would read as the fix
+  // having failed. Clearing the stamp forces one re-fetch per seated player;
+  // the stored fields are left alone because they are all zeros anyway and
+  // affiliationFlags already shows nothing for a player with neither a
+  // factionId nor a spouseXid, so behaviour is identical until the real data
+  // arrives.
+  //
+  // Runs from init(), NOT migrateStore — the documented way to break this
+  // script at load is to touch anything declared later from inside
+  // loadStore(). Same placement as backfillBoardTexture, and made safe by the
+  // STORE flag rather than by being idempotent.
+  function repairAffiliationCache() {
+    if (STORE.affilCacheRepaired) return 0;
+    let cleared = 0;
+    Object.keys(STORE.players).forEach((xid) => {
+      const p = STORE.players[xid];
+      if (p && p.affilFetchedAt) { p.affilFetchedAt = 0; cleared++; }
+    });
+    STORE.affilCacheRepaired = true;
+    saveStore();
+    return cleared;
+  }
 
   async function fetchAffiliation(xid) {
     const key = (STORE.settings.tornApiKey || '').trim();
@@ -10895,6 +10947,7 @@
       opponentRangeProxy,
       equityBasisLabel,
       parseAffiliationProfile,
+      repairAffiliationCache,
       handNotability,
       filterHandsFor,
       HISTORY_FILTERS,
@@ -11156,6 +11209,9 @@
     // Before the watchers, so the first hand of the session already has the
     // history-seeded figures behind it rather than starting from zero.
     backfillBoardTexture();
+    // Discards affiliation timestamps written while the transport was broken,
+    // so the badges do not stay dead for up to 24h after the fix. Once only.
+    repairAffiliationCache();
     bootstrapTableWatchers();
 
     setInterval(renderBadges, 4000);

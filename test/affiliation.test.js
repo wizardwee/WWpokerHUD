@@ -28,8 +28,35 @@ const t = runner('affiliation');
     JSON.stringify(T.parseAffiliationProfile({ faction: {}, married: { spouse_id: 0 } })),
     JSON.stringify({ factionId: 0, factionName: '', spouseXid: 0 }));
 
-  t.eq('missing faction/married keys entirely still parses (fields just read 0/empty)',
-    JSON.stringify(T.parseAffiliationProfile({})),
+  // THE FOURTH TIME a test in this repo asserted the implementation instead of
+  // the requirement. It used to claim a response with NO faction/married keys
+  // "still parses (fields just read 0/empty)" — which is what the code did, and
+  // was wrong. During the broken-envelope era that path ran on every call, and
+  // a non-null return makes fetchAffiliation stamp affilFetchedAt, so the
+  // fabricated "no faction, no spouse" got cached for a full 24 hours. A live
+  // scan caught it: correct field names, every seated player reading ABSENT.
+  //
+  // Torn returns `faction` WITH faction_id: 0 for a genuinely factionless
+  // player, so the key is present either way. That is the discriminator.
+  t.eq('a response with none of faction/married/player_id refuses to parse',
+    T.parseAffiliationProfile({}), null);
+  t.eq('and so does an unrelated object',
+    T.parseAffiliationProfile({ something: 'else' }), null);
+
+  // The real PDA envelope, which is what was actually arriving.
+  t.eq('the PDA HTTP envelope refuses, rather than reading as "no faction"',
+    T.parseAffiliationProfile({ status: 200, statusText: 'OK', responseText: '{}', responseHeaders: {} }),
+    null);
+
+  // A REAL profile for a factionless, unmarried player must still parse — the
+  // tightened guard has to keep telling those two cases apart.
+  t.eq('a genuine profile with faction_id 0 parses as "no faction"',
+    JSON.stringify(T.parseAffiliationProfile({
+      player_id: 311421, faction: { faction_id: 0, faction_name: '' }, married: { spouse_id: 0 },
+    })),
+    JSON.stringify({ factionId: 0, factionName: '', spouseXid: 0 }));
+  t.eq('and player_id alone is enough to recognise a profile',
+    JSON.stringify(T.parseAffiliationProfile({ player_id: 311421 })),
     JSON.stringify({ factionId: 0, factionName: '', spouseXid: 0 }));
 
   t.eq('null input returns null, not a throw', T.parseAffiliationProfile(null), null);
@@ -116,6 +143,40 @@ const t = runner('affiliation');
   let threw = false;
   try { T.refreshSeatedAffiliations(); } catch (e) { threw = true; }
   t.eq('refreshSeatedAffiliations with no API key does not throw', threw, false);
+}
+
+// --- repairAffiliationCache: the poisoned 24-hour cache -------------------
+//
+// Fixing the parse alone was not enough. Every affilFetchedAt stamp written
+// during the broken-envelope era came from a response that was never read,
+// and AFFIL_REFRESH_MS is 24 HOURS — so without this the badges would stay
+// dead for up to a day after the fix, reading as the fix having failed.
+
+{
+  const T = load();
+  T.STORE = T.emptyStore();
+  const mk = (xid, fetchedAt) => {
+    T.STORE.players[xid] = T.emptyPlayer(xid, xid);
+    T.STORE.players[xid].affilFetchedAt = fetchedAt;
+  };
+  mk('A', Date.now());
+  mk('B', Date.now() - 1000);
+  mk('C', 0); // never fetched — nothing to clear
+
+  t.eq('it clears every stamped player', T.repairAffiliationCache(), 2);
+  t.eq('A is cleared', T.STORE.players.A.affilFetchedAt, 0);
+  t.eq('B is cleared', T.STORE.players.B.affilFetchedAt, 0);
+  t.eq('C was already unstamped', T.STORE.players.C.affilFetchedAt, 0);
+
+  // Once only: it runs from init() on every load, and re-clearing every
+  // session would force a full re-fetch of every player forever.
+  t.eq('a second run is a no-op', T.repairAffiliationCache(), 0);
+  t.eq('and the flag records that it ran', T.STORE.affilCacheRepaired, true);
+
+  // The player records themselves must survive — this clears a timestamp, not
+  // data. Anything else would discard tracked opponents to fix a cache.
+  t.ok('the player records are still there',
+    !!T.STORE.players.A && !!T.STORE.players.B && !!T.STORE.players.C);
 }
 
 process.exit(t.report());
