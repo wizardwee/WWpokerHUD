@@ -9,6 +9,120 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.33.0
+
+The mugging workflow, finished: an attack link, and a straight answer on
+whether an attack would even land.
+
+Asked for directly, following v1.30.0: *"How about the other features like
+player profile attack hospital."*
+
+### What v1.30.0 got wrong
+
+It read the hospital flag and reported it as a fact — and then stopped. But
+being in hospital isn't trivia about an opponent. It is *the reason an
+attack won't land*, and it is one of several such reasons, each lasting a
+different length of time.
+
+Reading only hospital meant a player in jail, or on a plane, or in federal
+jail showed **nothing at all** and looked like a clear target. The one
+state the HUD checked was the one it happened to have been asked about, not
+the one the decision needed.
+
+### Three answers, not two
+
+`parseTargetStatus` now reads `status.state`, `status.until`, `level`, and
+`status.description` — Torn's own human-readable line ("Travelling to
+Mexico"), kept verbatim for the tooltip because it is the one field
+guaranteed to describe a state this file has never heard of.
+
+`attackReadiness` returns **ready**, **blocked**, or **unknown**:
+
+| state | badge | panel |
+|---|---|---|
+| Okay | — | 🎯 Attackable |
+| Hospital | 🏥 | Can't attack — in hospital, 12m left |
+| Jail | 🚔 | Can't attack — in jail, 45m left |
+| Traveling / Travelling | ✈️ | Can't attack — travelling |
+| Abroad | 🌍 | Can't attack — abroad |
+| Federal | 🚫 | Can't attack — in federal jail, 2d 1h left |
+| anything else | — | ❔ Can't tell — unrecognised state "…" |
+
+Both spellings of the travel state are listed because which one Torn
+returns isn't confirmed and they are one letter apart. Guessing wrong there
+fails in the dangerous direction: a real blocker that goes unrecognised.
+
+### Unknown is never "go"
+
+The load-bearing decision. **`Okay` is the only state treated as clear.**
+Anything unrecognised reports as unknown — not as attackable.
+
+Torn can add or rename a state whenever it likes, and of the two ways to be
+wrong here, *"said go when they were untouchable"* is the one that costs
+the user something. This is the same principle that already stops
+`parseAffiliationProfile` reading an API error as "no faction": when the
+answer isn't known, say so rather than picking the convenient side.
+
+Two related cases: an `until` that has already passed reads as clear again,
+rather than reporting a wait that has elapsed (the cache is at most 30s
+stale). And a blocker carrying no `until` at all — travel legs may not —
+still blocks, because the absence of a countdown is not evidence the state
+has ended.
+
+### The attack link, and where it deliberately isn't
+
+The player panel gets a direct link to Torn's own attack loader, beside a
+colour-coded status line, their level, and how long ago the check was made.
+
+It is **not on the seat badge**, and that is not an oversight. A tappable
+attack link floating over the felt is exactly what CLAUDE.md's "never come
+between the user and the table" rule forbids — one tap swallowed on Fold or
+Call is worse than any convenience is good. It is also a *link*, never a
+click: this HUD is advisory and never acts for the user, which goes double
+for anything touching the game's own controls.
+
+The link shows whichever way the status reads. Offering it only when
+"ready" would mean trusting a figure that is up to 30 seconds stale,
+fetched only during sit-outs, and resting on unconfirmed field names. The
+status is a steer; the decision stays the user's.
+
+The badge shows **blockers only**, never a positive "attackable" mark. Most
+sitting-out players are attackable, so a 🎯 on nearly every one of them is
+noise, and the badge is width-constrained before it is
+information-constrained. Absence means "nothing known to be blocking", and
+the panel is one tap away to say it properly.
+
+### Removed rather than kept
+
+`isHospitalized` is gone. It was kept as "a named helper because the badge
+asks specifically about hospital" — and then the badge moved to
+`attackReadiness` and nothing called it. `test/no-orphans.test.js` caught
+that, which is precisely what that lint exists for. A hospital-only helper
+sitting beside a general one is also a standing invitation to reintroduce
+the exact narrowness this release fixes.
+
+`fmtStatusRemaining` (was `fmtHospitalRemaining`) gained a days tier, since
+federal jail runs long enough that "73h 12m" is worse to read than "3d 1h".
+
+### Still unconfirmed, and what would confirm it
+
+Every field here is written from Torn's documented API v1 shape, not a live
+response — nobody working on this holds a key, the same caveat v1.8.0 and
+v1.30.0 shipped with. A wrong guess costs a missing or unknown read, never
+a crash.
+
+The fastest live check: set a key, sit at a table, and wait for someone to
+sit out while hospitalised. If the badge lights up 🏥 and the panel counts
+down, the field names are right. Pasting back one raw
+`api.torn.com/user/{id}?selections=profile` response would settle all of
+them at once — including whether Torn spells it "Traveling" or
+"Travelling".
+
+60 assertions in `test/target-status.test.js` (renamed from
+`hospital-status`). The blocker cases are generated from `ATTACK_BLOCKERS`
+itself rather than a hand-copied list, so adding a state to the map cannot
+leave an untested branch behind it.
+
 ## 1.32.0
 
 Equity is cheaper to compute, and the call/fold verdict now admits when it

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.32.0
+// @version      1.33.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,64 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.33.0 - The mugging workflow, finished: an attack link, and a straight
+ *          answer on whether an attack would even land. Asked for directly
+ *          after v1.30.0 — "the other features like player profile attack
+ *          hospital".
+ *            - WHAT v1.30.0 GOT WRONG: it read the hospital flag, reported it
+ *              as a fact, and stopped. But hospital is not trivia about an
+ *              opponent — it is THE REASON an attack won't land, and one of
+ *              several such reasons, each a different length of wait. A player
+ *              in jail, on a plane, or in fedjail showed NOTHING and looked
+ *              like a clear target.
+ *            - parseTargetStatus now reads state, until, level, and Torn's own
+ *              status.description ("Travelling to Mexico") — kept verbatim for
+ *              the tooltip, being the one field guaranteed to describe a state
+ *              this file has never heard of.
+ *            - attackReadiness returns THREE answers, not two: ready, blocked
+ *              or unknown. Blockers: Hospital 🏥, Jail 🚔, Traveling/Travelling
+ *              ✈️, Abroad 🌍, Federal 🚫. Both travel spellings are listed
+ *              because which one Torn returns is unconfirmed and they are one
+ *              letter apart — guessing wrong fails in the dangerous direction.
+ *            - UNKNOWN IS NEVER "GO", the load-bearing decision here. 'Okay'
+ *              is the ONLY state treated as clear; anything unrecognised
+ *              reports as unknown. Torn can rename a state whenever it likes,
+ *              and of the two ways to be wrong, "said go when they were
+ *              untouchable" is the one that costs the user something. Same
+ *              principle as parseAffiliationProfile refusing to read an error
+ *              response as "no faction".
+ *            - An `until` already past reads as clear again rather than
+ *              reporting an elapsed wait (cache is <=30s stale). A blocker
+ *              with NO until still blocks — no countdown is not evidence the
+ *              state ended.
+ *            - Attack link in the PANEL, never the badge. A tappable attack
+ *              link over the felt is exactly what "never come between the user
+ *              and the table" forbids. A LINK, never a click: advisory only,
+ *              which goes double near the game's own controls. Shown whichever
+ *              way the status reads — it is up to 30s stale, fetched only
+ *              during sit-outs, on unconfirmed field names, so it steers and
+ *              the decision stays the user's.
+ *            - Badge shows BLOCKERS ONLY, never a positive mark. Most
+ *              sitting-out players are attackable, so 🎯 on nearly all of them
+ *              is noise, and the badge is width-constrained before it is
+ *              information-constrained.
+ *            - REMOVED isHospitalized: kept "as a helper for the badge", then
+ *              the badge moved to attackReadiness and nothing called it.
+ *              test/no-orphans.test.js caught it, which is what that lint is
+ *              for. A hospital-only helper beside a general one also invites
+ *              back the exact narrowness this release fixes.
+ *            - fmtStatusRemaining (was fmtHospitalRemaining) gained a days
+ *              tier — fedjail runs long enough that "73h 12m" reads worse
+ *              than "3d 1h".
+ *            - STILL UNCONFIRMED against a live response, same as v1.8.0 and
+ *              v1.30.0. Fastest check: set a key, wait for someone to sit out
+ *              while hospitalised, see if 🏥 lights and the panel counts down.
+ *              One raw profile response would settle every field at once.
+ *            - 60 assertions in test/target-status.test.js (renamed from
+ *              hospital-status). Blocker cases are generated FROM
+ *              ATTACK_BLOCKERS, so adding a state cannot leave a branch
+ *              untested.
  *
  * 1.32.0 - Equity is cheaper to compute, and the call/fold verdict now admits
  *          when it cannot tell. Asked for directly after v1.31.0: "I don't
@@ -125,40 +183,6 @@
  *              requestAnimationFrame/cancelAnimationFrame — they were only on
  *              `window`, so any path reaching one threw ReferenceError.
  *
- * 1.30.0 - Player names are now clickable through to their Torn profile, and a
- *          new 🏥 hospital-status read. Asked for directly — "ready to mug
- *          them when they sit out. Do show if they are in hospital or not."
- *            - The player panel's header name is now a link straight to
- *              https://www.torn.com/profiles.php?XID=<xid>, opened in a new
- *              tab. No API key needed — the XID this HUD already resolves is
- *              enough.
- *            - 🏥 appears on a seat ONLY while it is sitting out AND currently
- *              in the hospital — the exact moment the user's own framing
- *              makes the question real. An active seat is never fetched for
- *              it and never shows it.
- *            - Reuses the SAME optional Torn API key and endpoint as the
- *              shared-affiliation badges (v1.8.0) — no new setting. NOT the
- *              same cache though: faction/marriage are day-stable, cached 24h
- *              (AFFIL_REFRESH_MS); hospital status can flip in seconds, so it
- *              gets its own 30s window (HOSPITAL_REFRESH_MS) and is fetched
- *              only for seats actually sitting out, never the whole table.
- *            - Kept OUT of STORE.players and localStorage entirely — a
- *              runtime-only hospitalCache Map. A stay from an hour ago is
- *              wrong, not merely stale, so it must not survive a reload or a
- *              Backup/Gist export.
- *            - renderBadges gates the RENDER on isSeatSittingOut too, not
- *              just the fetch — otherwise a player back from hospital and
- *              still playing would carry a stale 🏥 forever, since nothing
- *              refreshes an active seat's cache.
- *            - UNCONFIRMED, same caveat as v1.8.0's affiliation fields:
- *              status.state/status.until are from Torn's documented API
- *              shape, not a live response anyone here has seen.
- *              parseHospitalStatus fails to null rather than throwing, same
- *              pattern as parseAffiliationProfile. Needs a live report.
- *            - Settings section renamed "Shared-affiliation badges" ->
- *              "Torn API features" — one key, two features now.
- *            - 20 new assertions in test/hospital-status.test.js.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -221,7 +245,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.32.0';
+  const HUD_VERSION = '1.33.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -1346,79 +1370,181 @@
     return { flags, detail: details.join('; ') };
   }
 
-  // Hospital status — "is this seat safe to hit once they leave the table".
+  // Target status — "can I actually hit this seat once they leave the table".
   // Reuses the same endpoint and the same Torn API key as the affiliation
   // lookup above, but NOTHING else about it: faction/marriage are slow facts
-  // worth caching for a day, hospital status can flip in seconds, so a value
-  // more than HOSPITAL_REFRESH_MS old is actively misleading rather than
-  // merely stale. Deliberately kept OUT of STORE.players — it is never
-  // written to a player record and never persisted to localStorage, only
-  // held in this in-memory Map, so a session left open overnight can't show
-  // a hospital stay from yesterday as current.
+  // worth caching for a day, this can flip in seconds, so a value more than
+  // TARGET_REFRESH_MS old is actively misleading rather than merely stale.
+  // Deliberately kept OUT of STORE.players — never written to a player record
+  // and never persisted to localStorage, only held in this in-memory Map, so
+  // a session left open overnight can't show a hospital stay from yesterday
+  // as current. That also keeps it out of Backup/Gist exports for free.
   //
-  // UNCONFIRMED, same caveat as parseAffiliationProfile just above: the v1
-  // `status.state`/`status.until` fields are written from Torn's documented
-  // API shape, not a live response anyone working on this has seen. A wrong
-  // guess here costs a missing/blank hospital read, not a crash — see the
-  // defensive-null handling below, same pattern as parseAffiliationProfile.
-  function parseHospitalStatus(json) {
+  // v1.30.0 read only the hospital flag, which reported a FACT without ever
+  // connecting it to the decision it exists for. Being in hospital is not
+  // trivia about an opponent, it is the reason an attack won't land — and it
+  // is one of several such reasons, each lasting a different length of time.
+  // Reading only hospital meant a player in jail or overseas showed nothing
+  // at all and looked like a clear target.
+  //
+  // UNCONFIRMED, same caveat as parseAffiliationProfile just above: these v1
+  // `status` / `level` fields are written from Torn's documented API shape,
+  // not a live response anyone working on this has seen. A wrong guess costs
+  // a missing read, not a crash — see the defensive handling throughout.
+  function parseTargetStatus(json) {
     if (!json || json.error) return null;
     const status = json.status || {};
     return {
       state: status.state || 'Okay',
+      // Torn's own human-readable line ("In hospital for 10 minutes",
+      // "Travelling to Mexico"). Shown verbatim in the tooltip rather than
+      // parsed — it is the one field guaranteed to describe whatever Torn
+      // actually means, including states this file has never heard of.
+      description: status.description || '',
       until: Number(status.until) || 0,
+      level: Number(json.level) || 0,
     };
   }
 
-  function isHospitalized(status) {
-    return !!(status && status.state === 'Hospital' && status.until * 1000 > Date.now());
+  // States that block an attack outright. Each is a different wait: a hospital
+  // stay is minutes, a flight is a fixed leg, federal jail can be days.
+  //
+  // 'Okay' is the ONLY state treated as clear. Anything unrecognised is
+  // reported as unknown rather than assumed attackable — a new or renamed
+  // Torn state must not silently read as "go", because that is the direction
+  // that wastes an attack. Same principle as parseAffiliationProfile refusing
+  // to read an error response as "no faction".
+  const ATTACK_BLOCKERS = {
+    Hospital: { emoji: '🏥', label: 'in hospital' },
+    Jail: { emoji: '🚔', label: 'in jail' },
+    Traveling: { emoji: '✈️', label: 'travelling' },
+    Travelling: { emoji: '✈️', label: 'travelling' }, // both spellings, see below
+    Abroad: { emoji: '🌍', label: 'abroad' },
+    Federal: { emoji: '🚫', label: 'in federal jail' },
+  };
+
+  // Which spelling Torn returns for the in-flight state is not confirmed from
+  // a live response, and the two are one letter apart. Both are listed above
+  // rather than guessing, because guessing wrong here fails in the dangerous
+  // direction: an unrecognised state that happens to be a real blocker.
+
+  // Returns { ready, blocked, unknown, emoji, label, until }.
+  //
+  // `ready` is only ever true for a state this file positively recognises as
+  // clear. `unknown` is its own answer, distinct from both — the UI says so
+  // rather than picking a side.
+  function attackReadiness(status) {
+    if (!status) return { ready: false, blocked: false, unknown: true, emoji: '', label: 'not checked yet', until: 0 };
+    const state = status.state || '';
+    const blocker = ATTACK_BLOCKERS[state];
+    if (blocker) {
+      // An expired `until` means the stay is over and Torn simply hasn't been
+      // re-asked. Treat that as clear rather than reporting a wait that has
+      // already elapsed — the cache is at most TARGET_REFRESH_MS stale.
+      const stillIn = !status.until || status.until * 1000 > Date.now();
+      if (!stillIn) return { ready: true, blocked: false, unknown: false, emoji: '', label: 'attackable', until: 0 };
+      return { ready: false, blocked: true, unknown: false, emoji: blocker.emoji, label: blocker.label, until: status.until };
+    }
+    if (state === 'Okay') {
+      return { ready: true, blocked: false, unknown: false, emoji: '', label: 'attackable', until: 0 };
+    }
+    return { ready: false, blocked: false, unknown: true, emoji: '❔', label: state ? `unrecognised state "${state}"` : 'unknown', until: 0 };
   }
 
-  // Minutes:seconds is overkill for a "should I hit them" read — whole
-  // minutes, rounded up so it never reads "0m" while still technically in.
-  function fmtHospitalRemaining(until) {
+  // (v1.30.0's isHospitalized was removed here rather than kept "for
+  // clarity": once the badge moved to attackReadiness nothing called it, and
+  // test/no-orphans.test.js is what caught that. A hospital-only helper
+  // sitting beside a general one is also an invitation to reintroduce the
+  // exact narrowness this release exists to fix.)
+
+  // Minutes:seconds is overkill for a "can I hit them" read — whole minutes,
+  // rounded up so it never reads "0m" while still technically inside.
+  function fmtStatusRemaining(until) {
     const ms = until * 1000 - Date.now();
     if (ms <= 0) return 'due out';
     const mins = Math.ceil(ms / 60000);
     if (mins < 60) return `${mins}m`;
-    return `${Math.floor(mins / 60)}h ${mins % 60}m`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return `${hrs}h ${mins % 60}m`;
+    return `${Math.floor(hrs / 24)}d ${hrs % 24}h`;
   }
 
-  const hospitalCache = new Map(); // xid (string) -> { state, until, fetchedAt }
-  const HOSPITAL_REFRESH_MS = 30 * 1000;
+  const targetCache = new Map(); // xid (string) -> { ...status, fetchedAt }
+  const TARGET_REFRESH_MS = 30 * 1000;
 
-  async function fetchHospitalStatus(xid) {
+  async function fetchTargetStatus(xid) {
     const key = (STORE.settings.tornApiKey || '').trim();
     if (!key) return; // no key configured — the whole feature is a no-op
     try {
       const { json } = await pdaFetchJson('GET',
         `https://api.torn.com/user/${xid}?selections=profile&key=${encodeURIComponent(key)}`);
-      const parsed = parseHospitalStatus(json);
+      const parsed = parseTargetStatus(json);
       if (!parsed) return; // bad key, rate-limited, unknown id — try again next window
-      hospitalCache.set(String(xid), { state: parsed.state, until: parsed.until, fetchedAt: Date.now() });
+      targetCache.set(String(xid), Object.assign({}, parsed, { fetchedAt: Date.now() }));
     } catch (e) {
       // Network hiccup. Never blocks anything — just try again next window.
     }
   }
 
-  function hospitalStatusFor(xid) {
-    return hospitalCache.get(String(xid)) || null;
+  function targetStatusFor(xid) {
+    return targetCache.get(String(xid)) || null;
   }
 
-  // Player panel line — unlike the seat badge, this is worth showing even
-  // when the seat isn't currently sitting out (the panel is opened
-  // deliberately, not glanced at mid-hand), so it reads whatever the cache
-  // holds rather than gating on isSeatSittingOut. It still says how the
-  // figure was obtained: this HUD only ever fetches while sitting out, so a
-  // player who has been active for a while is showing a status from their
-  // last sit-out, not a live read.
-  function playerHospitalLine(xid) {
-    const hosp = hospitalStatusFor(xid);
-    if (!hosp) return '';
-    const inHosp = isHospitalized(hosp);
-    return `<div class="tph-hosp-line">🏥 ${inHosp
-      ? `In the hospital — ${escapeHtml(fmtHospitalRemaining(hosp.until))} left.`
-      : 'Not in the hospital (last checked while sitting out).'}</div>`;
+  // Torn's own attack URL. A LINK, never a click: CLAUDE.md's rule is that
+  // this HUD is advisory and must never act for the user, and that applies to
+  // the game's own controls most of all. The tap is always theirs.
+  function attackUrl(xid) {
+    return `https://www.torn.com/loader.php?sid=attack&user2ID=${encodeURIComponent(xid)}`;
+  }
+
+  function profileUrl(xid) {
+    return `https://www.torn.com/profiles.php?XID=${encodeURIComponent(xid)}`;
+  }
+
+  // The panel's target block: status, level, and the attack link.
+  //
+  // Unlike the seat badge this shows whatever the cache holds regardless of
+  // whether the seat is sitting out right now — the panel is opened
+  // deliberately rather than glanced at mid-hand. It says so, because this
+  // HUD only ever fetches while a seat IS sitting out, so a player who has
+  // been back in the action for a while is showing their last sit-out read,
+  // not a live one.
+  //
+  // The attack link is shown whichever way the status reads. Offering it only
+  // when "ready" would be trusting a figure that is up to TARGET_REFRESH_MS
+  // stale, fetched only during sit-outs, and resting on unconfirmed field
+  // names — the status is a steer, and the decision stays the user's.
+  function playerTargetLine(xid) {
+    const status = targetStatusFor(xid);
+    const r = attackReadiness(status);
+    const ageS = status ? Math.round((Date.now() - status.fetchedAt) / 1000) : 0;
+
+    let text;
+    let cls;
+    if (!status) {
+      cls = 'tph-target-unknown';
+      text = 'Status not checked — needs a Torn API key, and is only read while they sit out.';
+    } else if (r.blocked) {
+      cls = 'tph-target-blocked';
+      text = `${r.emoji} Can't attack — ${escapeHtml(r.label)}`
+        + (r.until ? `, ${escapeHtml(fmtStatusRemaining(r.until))} left` : '') + '.';
+    } else if (r.unknown) {
+      cls = 'tph-target-unknown';
+      text = `❔ Can't tell — ${escapeHtml(r.label)}.`;
+    } else {
+      cls = 'tph-target-ready';
+      text = '🎯 Attackable.';
+    }
+
+    const meta = [];
+    if (status && status.level) meta.push(`level ${status.level}`);
+    if (status) meta.push(`checked ${ageS < 60 ? `${ageS}s` : `${Math.round(ageS / 60)}m`} ago`);
+
+    return `<div class="tph-target ${cls}" title="${escapeHtml(status && status.description ? status.description : '')}">
+      <span class="tph-target-txt">${text}</span>
+      ${meta.length ? `<span class="tph-target-meta">${escapeHtml(meta.join(' · '))}</span>` : ''}
+      <a class="tph-attack-link" href="${attackUrl(xid)}" target="_blank" rel="noopener">Attack ↗</a>
+    </div>`;
   }
 
   // Fetches ONLY for seats currently SITTING OUT — that is the exact moment
@@ -1427,15 +1553,15 @@
   // a handful of calls even at a full table, and renderBadges gates its own
   // display the same way — see the comment there for why an active seat must
   // not show a stale hospital flag from before they sat back down.
-  function refreshSittingOutHospitalStatus() {
+  function refreshSittingOutTargetStatus() {
     if (!(STORE.settings.tornApiKey || '').trim()) return;
     document.querySelectorAll(SELECTORS.seatContainer).forEach((seat) => {
       if (!isSeatSittingOut(seat)) return;
       const xid = resolveSeatKey(seat);
-      if (!xid || isHeroRecord(xid)) return; // hero's own hospital status isn't the question
-      const cached = hospitalCache.get(String(xid));
-      const stale = !cached || (Date.now() - cached.fetchedAt) > HOSPITAL_REFRESH_MS;
-      if (stale) fetchHospitalStatus(xid);
+      if (!xid || isHeroRecord(xid)) return; // hero's own status isn't the question
+      const cached = targetCache.get(String(xid));
+      const stale = !cached || (Date.now() - cached.fetchedAt) > TARGET_REFRESH_MS;
+      if (stale) fetchTargetStatus(xid);
     });
   }
 
@@ -3774,10 +3900,10 @@
       // No-op with no API key configured; otherwise gated by AFFIL_REFRESH_MS
       // so this fires network calls at most once a day per seated player.
       refreshSeatedAffiliations();
-      // Same no-op-without-a-key guard, but gated by HOSPITAL_REFRESH_MS (30s)
+      // Same no-op-without-a-key guard, but gated by TARGET_REFRESH_MS (30s)
       // instead of a day, and only for seats currently sitting out — see the
       // function for why.
-      refreshSittingOutHospitalStatus();
+      refreshSittingOutTargetStatus();
     }, 3000);
     harvestSeatNames();
 
@@ -7300,7 +7426,25 @@
        tph- elements, and a bare <a> would otherwise pick up Torn's own link
        styling (or none) rather than something visible on the panel. */
     .tph-profile-link { color: #7fd4ff !important; text-decoration: underline; }
-    .tph-hosp-line { color: #ffb3a0 !important; font-size: 11px; margin: -4px 0 8px; }
+    /* Target block: status, level, and the attack link, on one row. Every one
+       of these declares its own colour — pinTextColor skips tph- elements, so
+       an undeclared one is left to Torn's bare-element rules and renders
+       dark-on-dark (the v0.18.2 bug). */
+    .tph-target { display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+      font-size: 11px; margin: -2px 0 9px; padding: 4px 6px; border-radius: 4px;
+      background: rgba(255,255,255,.04); color: #cfd6dd !important; }
+    .tph-target-txt { color: inherit !important; }
+    .tph-target-meta { color: #8d959c !important; font-size: 10px; }
+    /* State colours are read at a glance, so they carry the meaning rather
+       than decorate it: red = cannot, green = can, amber = do not know. */
+    .tph-target-blocked .tph-target-txt { color: #ffb3a0 !important; }
+    .tph-target-ready .tph-target-txt { color: #7ee0a6 !important; }
+    .tph-target-unknown .tph-target-txt { color: #f0c674 !important; }
+    /* Pushed to the right so it is never adjacent to the status text it could
+       be confused with, and sized as a real tap target on a phone. */
+    .tph-attack-link { margin-left: auto; color: #ff9d8a !important;
+      border: 1px solid #ff9d8a66; border-radius: 3px; padding: 2px 7px;
+      text-decoration: none; white-space: nowrap; }
     .tph-rep-act::before { content: "→ "; }
     .tph-rep-warn { color: #f0c674 !important; }
     .tph-rep-note { color: #8d959c !important; font-size: 10px; }
@@ -8146,15 +8290,23 @@
       // here, never a stored relationship. Empty for both when no Torn API key
       // is configured, so this is a pure no-op absent that setting.
       const affil = affiliationFlags(xid, seatedList);
-      // 🏥 in the hospital. Gated on isSeatSittingOut here as well as at the
-      // fetch site (refreshSittingOutHospitalStatus): the cache is never
-      // refreshed for a seat that's back in the hand, so without this gate an
-      // opponent who returned from hospital and kept playing would carry a
-      // stale 🏥 forever. Empty for hero (never fetched) and for anyone with
-      // no Torn API key configured. `sittingOut` was measured in the read pass
-      // above, alongside the rect — it is a DOM read like any other.
-      const hosp = (!isSelf && sittingOut) ? hospitalStatusFor(xid) : null;
-      const hospitalized = isHospitalized(hosp);
+      // 🏥 hospital, 🚔 jail, ✈️ travelling — whatever is BLOCKING an attack on
+      // this seat. Gated on isSeatSittingOut here as well as at the fetch site
+      // (refreshSittingOutTargetStatus): the cache is never refreshed for a
+      // seat that's back in the hand, so without this gate an opponent who
+      // came out of hospital and kept playing would carry a stale 🏥 forever.
+      // Empty for hero (never fetched) and for anyone with no Torn API key.
+      // `sittingOut` was measured in the read pass above, alongside the rect —
+      // it is a DOM read like any other.
+      //
+      // Only BLOCKERS get a badge glyph, never a positive "attackable" mark.
+      // Most sitting-out players are attackable, so a 🎯 on nearly every one
+      // of them is noise, and the badge is width-constrained before it is
+      // information-constrained. Absence means "nothing known to be blocking";
+      // the panel is where that gets stated properly, one tap away.
+      const hosp = (!isSelf && sittingOut) ? targetStatusFor(xid) : null;
+      const readiness = hosp ? attackReadiness(hosp) : null;
+      const blockedBadge = readiness && readiness.blocked ? readiness : null;
       // Always show a TYPE, never just a hand count. Below minHands `classify`
       // returns "Unrated", which told you nothing about the player — the read is
       // the point of the badge. Show the provisional archetype with a "?" so it
@@ -8194,7 +8346,7 @@
       // Appended outside the hands===0 branch: a faction/marriage match is a
       // real read even before a single hand has been tracked on this player.
       const affilHtml = affil.flags ? `<span class="tph-badge-affil">${affil.flags}</span>` : '';
-      const hospHtml = hospitalized ? '<span class="tph-badge-hosp">🏥</span>' : '';
+      const hospHtml = blockedBadge ? `<span class="tph-badge-hosp">${blockedBadge.emoji}</span>` : '';
       badge.innerHTML = (hands === 0
         ? `${roleHtml}${hospHtml}<b>NEW</b>`
         : roleHtml
@@ -8220,7 +8372,8 @@
           ? ` Stack ${fmtMoney(player.stack.now)} (sitting low ${fmtMoney(player.stack.low)}, high ${fmtMoney(player.stack.high)}).`
           : '')
         + (affil.detail ? ` ⚠ ${affil.detail} — a fact from Torn's own profile data, not proof of anything at this table.` : '')
-        + (hospitalized ? ` 🏥 In the hospital, ${fmtHospitalRemaining(hosp.until)} left.` : '')
+        + (blockedBadge ? ` ${blockedBadge.emoji} Can't attack — ${blockedBadge.label}`
+          + (blockedBadge.until ? `, ${fmtStatusRemaining(blockedBadge.until)} left` : '') + '.' : '')
         + ' Tap for full stats.';
       badge.addEventListener('click', () => openPlayerPanel(xid));
       frag.appendChild(badge);
@@ -8524,9 +8677,9 @@
       onClose: () => { openPlayerXid = null; renderPlayerPanel(); },
       html: !p ? '' : `
       <span class="tph-close">✕</span>
-      <h3><a class="tph-profile-link" href="https://www.torn.com/profiles.php?XID=${encodeURIComponent(openPlayerXid)}"
+      <h3><a class="tph-profile-link" href="${profileUrl(openPlayerXid)}"
         target="_blank" rel="noopener">${escapeHtml(p.name)}</a> — ${classify(p)}</h3>
-      ${isSelf ? '' : playerHospitalLine(openPlayerXid)}
+      ${isSelf ? '' : playerTargetLine(openPlayerXid)}
       <!-- Exploit/Leaks sits directly beside Report on purpose: they are the
            two written-out reads on the same player, one ranked and actionable,
            the other prose, and they are read together. Stats and Range are the
@@ -10125,12 +10278,15 @@
       opponentRangeProxy,
       equityBasisLabel,
       parseAffiliationProfile,
-      parseHospitalStatus,
-      isHospitalized,
-      fmtHospitalRemaining,
-      hospitalStatusFor,
-      refreshSittingOutHospitalStatus,
-      hospitalCache,
+      parseTargetStatus,
+      attackReadiness,
+      ATTACK_BLOCKERS,
+      fmtStatusRemaining,
+      targetStatusFor,
+      refreshSittingOutTargetStatus,
+      targetCache,
+      attackUrl,
+      profileUrl,
       numericHandShorthand,
       cardToNum,
       handToShorthand,
