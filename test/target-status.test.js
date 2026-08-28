@@ -1,6 +1,6 @@
 // Target status — can this seat actually be attacked once they leave the
 // table. See parseTargetStatus / attackReadiness / ATTACK_BLOCKERS and
-// refreshSittingOutTargetStatus in the userscript.
+// refreshSeatedTargetStatus in the userscript.
 //
 // Same rule as test/affiliation.test.js, which this mirrors: the real network
 // call (fetchTargetStatus) and the Torn API's actual response shape are NOT
@@ -162,7 +162,7 @@ const past = () => Math.floor(Date.now() / 1000) - 600;  // 10 min ago
     T.attackReadiness(T.targetStatusFor('123')).blocked, true);
 }
 
-// --- refreshSittingOutTargetStatus: no key configured is a hard no-op -----
+// --- refreshSeatedTargetStatus: no key configured is a hard no-op ---------
 
 {
   const T = load();
@@ -173,8 +173,43 @@ const past = () => Math.floor(Date.now() / 1000) - 600;  // 10 min ago
   // touches no network path before that guard — same shape as the
   // affiliation equivalent test.
   let threw = false;
-  try { T.refreshSittingOutTargetStatus(); } catch (e) { threw = true; }
-  t.eq('refreshSittingOutTargetStatus with no API key does not throw', threw, false);
+  try { T.refreshSeatedTargetStatus(); } catch (e) { threw = true; }
+  t.eq('refreshSeatedTargetStatus with no API key does not throw', threw, false);
 }
+
+// --- targetDiagnostic: the feature must be able to explain its own silence -
+//
+// This is the whole point of the v1.34.0 fix. v1.30.0-v1.33.0 had FIVE
+// distinct reasons to show nothing — no key, wrong key, rate limit, network
+// failure, and "nobody here is blocked" — and every one of them looked
+// identical from the outside. It came back as a live report of exactly that.
+// Nobody working on this can see the screen, so a feature resting on
+// unverified field names has to be able to say why it is quiet.
+
+{
+  const T = load();
+  T.STORE = T.emptyStore();
+  T.STORE.settings.tornApiKey = '';
+  const d = T.targetDiagnostic();
+  t.ok('with no key, the diagnostic says so', d.indexOf('No Torn API key') !== -1);
+  t.ok('and points at where to set one', d.indexOf('Settings') !== -1);
+}
+
+{
+  const T = load();
+  T.STORE = T.emptyStore();
+  T.STORE.settings.tornApiKey = 'abc123';
+  // A key is set but nothing has been fetched yet — distinct from both "no
+  // key" and "working fine", and the commonest state when first switching on.
+  const d = T.targetDiagnostic();
+  t.ok(`with a key but no lookup yet, it says so (got: ${JSON.stringify(d)})`,
+    d.indexOf('No lookup') !== -1);
+  t.ok('and does not claim a missing key', d.indexOf('No Torn API key') === -1);
+  // The key itself must never appear in a diagnostic — it is a credential,
+  // and this string is shown in Settings and printed into the deep scan that
+  // gets pasted into a chat.
+  t.eq('the diagnostic never leaks the key', d.indexOf('abc123'), -1);
+}
+
 
 process.exit(t.report());

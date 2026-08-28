@@ -9,6 +9,91 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.34.0
+
+The target status now actually appears, and can explain itself when it
+doesn't.
+
+Reported from a live install: *"How does the profile clicker work? I don't
+see anything or badges on their hospital status."* Both halves of that
+turned out to be real problems with v1.30.0–v1.33.0, not a
+misunderstanding.
+
+### Why nothing showed
+
+The lookup only ever ran for seats that were **sitting out**.
+
+That came from the original framing — "ready to mug them when they sit out"
+— and it was too clever by half. Sitting out is a *rare* state. Most of the
+time nobody at the table is, so nothing was ever fetched, the cache stayed
+empty, and the feature displayed nothing at all. `renderBadges` then applied
+the *same* gate again on the display side, so it was double-gated: even a
+cached reading wouldn't render unless that seat happened to be sitting out
+at that moment.
+
+It now fetches for **every seated opponent**, and the badge shows a blocker
+whenever one is known.
+
+Cost was never a good reason to be narrow here. At a full table that is
+eight opponents on a 30-second staleness gate — about 16 calls a minute
+against Torn's 100/minute limit, and the 3-second watcher only fires a
+request when an entry is actually stale. Knowing which seats are viable
+targets *before* one of them stands up is also simply the more useful read.
+
+### Why it couldn't be diagnosed
+
+Worse than the bug: the feature failed **silently in every mode**.
+
+`if (!parsed) return;` swallowed no key, a wrong key, a rate limit, a
+network error and an unrecognised response shape — identically. Torn
+compounds this by answering auth failures and rate limits with HTTP 200 and
+an error *body*, so nothing upstream caught them either. Five distinct
+causes, one indistinguishable symptom: nothing on screen.
+
+That is exactly how it came back as a report, and it is not a debuggable
+state — nobody working on this can see the screen it runs on, and the field
+names are still unverified, so "I see nothing" had five possible meanings
+and no way to tell them apart.
+
+`targetDiagnostic()` now names the reason, surfaced in two places:
+
+- **Settings**, under the API key: a green `✓ Torn API working — N lookups`
+  or an amber line saying precisely what is wrong.
+- **The deep scan**, in a new `--- TORN API / TARGET STATUS ---` block:
+  whether a key is set, how many lookups have succeeded, how long ago the
+  last one ran, the diagnostic, and the full contents of the target cache
+  with each entry's state, level, readiness and Torn's own description.
+
+The scan prints whether a key is set as a **boolean, never the key** — deep
+scans get pasted into chats, and the diagnostic string is asserted in the
+tests to never contain it either.
+
+This is the same reasoning `heroProblem()` already follows for the same
+class of bug: a feature that can fail invisibly must be able to say why it
+is quiet.
+
+### Where the profile link actually is
+
+It is in the **player panel**, not on the seat badge. Tap a seat badge, and
+the player's name at the top of the panel is the link — with the attack
+link, their status and their level on the row beneath it.
+
+There is deliberately no link on the badge itself: a tappable link floating
+over the felt is what CLAUDE.md's "never come between the user and the
+table" rule exists to prevent, since one tap swallowed on Fold or Call
+costs more than the shortcut saves. The Settings help text now says all of
+this, having previously described only the old sitting-out-only behaviour
+and never mentioned where the link was at all.
+
+### Also
+
+Removed the now-unused `sittingOut` read from `renderBadges` — a
+`querySelector` per seat per render, on the exact path v1.31.0 had just
+finished optimising for layout thrash.
+
+68 assertions in `test/target-status.test.js`, including the new diagnostic
+cases and the assertion that it never leaks the key.
+
 ## 1.33.0
 
 The mugging workflow, finished: an attack link, and a straight answer on

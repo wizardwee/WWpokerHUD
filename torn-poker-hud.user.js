@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.33.0
+// @version      1.34.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,47 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.34.0 - The target status now actually appears, and can explain itself when
+ *          it doesn't. Reported live: "How does the profile clicker work? I
+ *          don't see anything or badges on their hospital status." Both halves
+ *          were real problems with v1.30.0-v1.33.0.
+ *            - WHY NOTHING SHOWED: the lookup only ever ran for seats that were
+ *              SITTING OUT — from the original "mug them when they sit out"
+ *              framing, and too clever by half. Sitting out is a RARE state, so
+ *              most of the time nothing was fetched, the cache stayed empty and
+ *              the feature showed nothing. renderBadges applied the SAME gate
+ *              again on display, so it was double-gated. Now fetches for every
+ *              seated opponent and badges a blocker whenever one is known.
+ *            - Cost was never the reason to be narrow: 8 opponents on a 30s
+ *              staleness gate is ~16 calls/min against Torn's 100/min, and the
+ *              3s watcher only fires when an entry is actually stale. Knowing
+ *              which seats are viable BEFORE one stands up is the better read.
+ *            - WORSE, AND THE REAL LESSON: it failed SILENTLY in every mode.
+ *              `if (!parsed) return;` swallowed no-key, wrong-key, rate-limit,
+ *              network error and unrecognised-shape identically, and Torn
+ *              answers auth failures and rate limits with HTTP 200 plus an
+ *              error BODY so nothing upstream caught them either. Five causes,
+ *              one symptom, no way to tell them apart — which is precisely how
+ *              it came back as a report.
+ *            - targetDiagnostic() now names the reason, in Settings (green
+ *              "working — N lookups", or amber with the cause) and in a new
+ *              deep-scan block "--- TORN API / TARGET STATUS ---" carrying the
+ *              lookup count, last-fetch age, diagnostic and the whole target
+ *              cache. Key-set is printed as a BOOLEAN, never the key: scans get
+ *              pasted into chats, and a test asserts the diagnostic string
+ *              can't leak it either. Same reasoning as heroProblem().
+ *            - WHERE THE PROFILE LINK IS: the player PANEL, not the badge. Tap
+ *              a seat badge; the name at the top of the panel is the link, with
+ *              the attack link, status and level on the row beneath. No link on
+ *              the badge itself — a tappable link over the felt is what "never
+ *              come between the user and the table" exists to prevent. The
+ *              Settings text now says so; it previously described only the old
+ *              sitting-out behaviour and never said where the link was.
+ *            - Removed the now-unused sittingOut read from renderBadges — a
+ *              querySelector per seat per render, on the very path v1.31.0 had
+ *              just optimised for layout thrash.
+ *            - 68 assertions in test/target-status.test.js.
  *
  * 1.33.0 - The mugging workflow, finished: an attack link, and a straight
  *          answer on whether an attack would even land. Asked for directly
@@ -118,71 +159,6 @@
  *              every comparison false and would silently restore the old
  *              confident verdict exactly where the guard is needed.
  *
- * 1.31.0 - The table no longer freezes mid-hand. Reported as phone lag, with
- *          the reasonable guess that the 524 KB single file had grown too big
- *          to run well. It hadn't — that file is fetched and parsed ONCE and
- *          costs nothing per frame, and splitting it needs a bundler, the one
- *          thing "install by URL, fetch one file whole" cannot have.
- *            - MEASURED, which found it immediately. estimateEquity at the
- *              1200-iteration default: ~45-50ms at five opponents, ~212ms at
- *              eight vs FOUR_BET_RANGE, on a desktop-class CPU. Every OTHER
- *              pure-logic path in the file COMBINED is under 2ms. The coach
- *              asks two quotes per render and a phone is several times slower
- *              again, and it all ran inline on the main thread.
- *            - It missed cache constantly: the live opponent count is part of
- *              the key, so EVERY FOLD recomputes, as does every street and
- *              every raise — eight to ten freezes a hand. That is also why
- *              "the file is too big" was such a fair guess: the symptom is
- *              indistinguishable from a heavy page.
- *            - SLICED, NOT SHRUNK. The Monte Carlo is now equityJobInit /
- *              equityJobStep / equityJobValue, run ~6ms at a time across
- *              animation frames. Longest uninterrupted block on that worst
- *              case: 212ms -> 6.6ms, a 32x cut over 26 frames, with all 1200
- *              iterations still run. The arithmetic is untouched.
- *            - ONE implementation of the loop: estimateEquity is now built on
- *              the same three functions, so the blocking path (every existing
- *              test, and the replayer, where blocking briefly is right) cannot
- *              drift from the sliced one. A second UI-only copy is exactly the
- *              v1.0.1 trap — a test of a copy cannot fail when the original is
- *              wrong.
- *            - STARVATION BUG, caught before shipping. The first scheduler had
- *              one slot and cancelled on key mismatch; the coach's two quotes
- *              cancelled each other every render and NEITHER ever finished.
- *              Requests are queued instead, capped at 3, oldest dropped first.
- *              Pinned by name in test/equity-slicing.test.js.
- *            - renderBadges was THRASHING LAYOUT: getBoundingClientRect (read)
- *              interleaved with body.appendChild (the write that dirties
- *              layout) in one loop = a forced synchronous reflow per seat.
- *              Nine per render, and nine per FRAME while scrolling, since
- *              badges re-render on scroll via rAF. Now two passes — all reads,
- *              then a DocumentFragment attached in one write.
- *            - The engine no longer reaches into the UI: the pump notifies
- *              through an onEquityReady hook that init() binds, instead of
- *              calling renderCoachPanel itself. One-way dependency, and it is
- *              what makes the scheduler testable with no DOM at all.
- *            - Settings -> Coach exposes "Equity samples" (100-5000, default
- *              1200). Slicing means it never blocks now whatever the value,
- *              but a lower one makes the figure LAND sooner on a slow phone.
- *              Precision goes as 1/sqrt(n): 1200 ~ +/-1.4 points, 600 ~ +/-2,
- *              300 ~ +/-2.9 — all inside the error the range proxy already
- *              carries. Changing it clears the cache so two precisions can't
- *              share the screen. clampEquityIters is applied inside
- *              equityJobInit too, so an imported store can't hang the coach.
- *            - The coach says "Eq ... working..." while a figure is pending,
- *              rather than letting the line vanish and reappear.
- *            - ALSO FIXED, pre-existing: test/equity-ranges.test.js asserted a
- *              wall-clock budget (ms < 150) and failed intermittently on any
- *              box slower than the one it was written on — confirmed against
- *              UNCHANGED code before touching it. It flagged the CPU, not a
- *              regression. Now a hardware-independent ratio (weighted vs
- *              unweighted, <= 6x) that still catches the ~16x regression it
- *              exists for, and doesn't stop testing anything when the machine
- *              gets faster.
- *            - 42 new assertions in test/equity-slicing.test.js. harness.js
- *              gained createDocumentFragment and bare-global
- *              requestAnimationFrame/cancelAnimationFrame — they were only on
- *              `window`, so any path reaching one threw ReferenceError.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -245,7 +221,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.33.0';
+  const HUD_VERSION = '1.34.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -1471,6 +1447,11 @@
 
   const targetCache = new Map(); // xid (string) -> { ...status, fetchedAt }
   const TARGET_REFRESH_MS = 30 * 1000;
+  // Diagnostics, so the feature can explain its own silence — see
+  // targetDiagnostic below. Runtime only, never persisted.
+  let targetLastError = '';
+  let targetLastFetchAt = 0;
+  let targetOkCount = 0;
 
   async function fetchTargetStatus(xid) {
     const key = (STORE.settings.tornApiKey || '').trim();
@@ -1478,12 +1459,40 @@
     try {
       const { json } = await pdaFetchJson('GET',
         `https://api.torn.com/user/${xid}?selections=profile&key=${encodeURIComponent(key)}`);
+      targetLastFetchAt = Date.now();
+      // Torn answers an auth failure or a rate limit with HTTP 200 and an
+      // error BODY, so this is the only place either can be noticed. Recording
+      // the message is what turns "nothing is showing" into "Incorrect key".
+      if (json && json.error) {
+        targetLastError = 'Torn API: ' + (json.error.error || 'error code ' + json.error.code);
+        return;
+      }
       const parsed = parseTargetStatus(json);
-      if (!parsed) return; // bad key, rate-limited, unknown id — try again next window
+      if (!parsed) { targetLastError = 'unrecognised API response shape'; return; }
+      targetLastError = '';
+      targetOkCount++;
       targetCache.set(String(xid), Object.assign({}, parsed, { fetchedAt: Date.now() }));
     } catch (e) {
-      // Network hiccup. Never blocks anything — just try again next window.
+      targetLastError = 'could not reach api.torn.com';
     }
+  }
+
+  // Why the target feature is showing nothing — '' when it is actually working.
+  //
+  // v1.30.0-v1.33.0 failed SILENTLY in every mode: no key, a wrong key, a rate
+  // limit, a network error and "nobody at this table is blocked" all looked
+  // identical from the outside, which is exactly how it came back as a report
+  // ("I don't see anything"). A feature whose field names are still unverified
+  // MUST be able to say why it is quiet — nobody working on this can see the
+  // screen it runs on, so silence that has five possible causes is undebuggable
+  // at a distance. Same reasoning as heroProblem(), for the same class of bug.
+  function targetDiagnostic() {
+    if (!(STORE.settings.tornApiKey || '').trim()) {
+      return 'No Torn API key set — Settings → Torn API features. Without one this does nothing.';
+    }
+    if (targetLastError) return targetLastError;
+    if (!targetLastFetchAt) return 'No lookup has run yet — sit at a table with other players.';
+    return '';
   }
 
   function targetStatusFor(xid) {
@@ -1547,18 +1556,24 @@
     </div>`;
   }
 
-  // Fetches ONLY for seats currently SITTING OUT — that is the exact moment
-  // this feature exists for (the user's own framing: "ready to mug them when
-  // they sit out"). An active seat gets no fetch at all, which keeps this to
-  // a handful of calls even at a full table, and renderBadges gates its own
-  // display the same way — see the comment there for why an active seat must
-  // not show a stale hospital flag from before they sat back down.
-  function refreshSittingOutTargetStatus() {
+  // Every seated opponent, not just the ones sitting out.
+  //
+  // v1.30.0-v1.33.0 fetched ONLY for sitting-out seats, reasoning from the
+  // original framing ("ready to mug them when they sit out"). That was too
+  // clever by half: sitting out is a RARE state, so most of the time nothing
+  // was ever fetched, the cache stayed empty, and the whole feature showed
+  // nothing at all. Reported as exactly that — "I don't see anything or badges
+  // on their hospital status."
+  //
+  // Cost is not the reason to be narrow here. At a full table this is 8
+  // opponents on a 30s staleness gate — about 16 calls a minute against Torn's
+  // 100/min limit, with the 3s watcher tick only firing a request when an
+  // entry is actually stale. Knowing which seats are viable targets BEFORE one
+  // of them stands up is also the more useful read.
+  function refreshSeatedTargetStatus() {
     if (!(STORE.settings.tornApiKey || '').trim()) return;
-    document.querySelectorAll(SELECTORS.seatContainer).forEach((seat) => {
-      if (!isSeatSittingOut(seat)) return;
-      const xid = resolveSeatKey(seat);
-      if (!xid || isHeroRecord(xid)) return; // hero's own status isn't the question
+    seatedXids({ includeSittingOut: true }).forEach((xid) => {
+      if (isHeroRecord(xid)) return; // hero's own status isn't the question
       const cached = targetCache.get(String(xid));
       const stale = !cached || (Date.now() - cached.fetchedAt) > TARGET_REFRESH_MS;
       if (stale) fetchTargetStatus(xid);
@@ -3901,9 +3916,9 @@
       // so this fires network calls at most once a day per seated player.
       refreshSeatedAffiliations();
       // Same no-op-without-a-key guard, but gated by TARGET_REFRESH_MS (30s)
-      // instead of a day, and only for seats currently sitting out — see the
-      // function for why.
-      refreshSittingOutTargetStatus();
+      // instead of a day, and for every seated opponent — see the function for
+      // why it is no longer scoped to sitting-out seats only.
+      refreshSeatedTargetStatus();
     }, 3000);
     harvestSeatNames();
 
@@ -7434,6 +7449,11 @@
       font-size: 11px; margin: -2px 0 9px; padding: 4px 6px; border-radius: 4px;
       background: rgba(255,255,255,.04); color: #cfd6dd !important; }
     .tph-target-txt { color: inherit !important; }
+    /* Settings diagnostic. Its own colours for the same pinTextColor reason. */
+    .tph-target-diag { font-size: 11px; margin: 2px 0 6px; padding: 4px 6px;
+      border-radius: 4px; background: rgba(255,255,255,.04); color: #cfd6dd !important; }
+    .tph-target-diag-bad { color: #f0c674 !important; }
+    .tph-target-diag-ok { color: #7ee0a6 !important; }
     .tph-target-meta { color: #8d959c !important; font-size: 10px; }
     /* State colours are read at a glance, so they carry the meaning rather
        than decorate it: red = cannot, green = can, amber = do not know. */
@@ -8234,13 +8254,13 @@
       if (isSelf && !STORE.settings.showSelfBadge) return;
       const rect = seat.getBoundingClientRect();
       if (!rect.width && !rect.height) return; // seat not laid out (empty/hidden)
-      measured.push({ xid, isSelf, rect, sittingOut: isSeatSittingOut(seat) });
+      measured.push({ xid, isSelf, rect });
     });
 
     // Built into a fragment and attached in ONE write, so the badges cost a
     // single layout between them rather than one apiece.
     const frag = document.createDocumentFragment();
-    measured.forEach(({ xid, isSelf, rect, sittingOut }) => {
+    measured.forEach(({ xid, isSelf, rect }) => {
       const player = STORE.players[xid];
       // This-hand role marker. A player can't be both, since handRoles skips the
       // preflop raiser when it looks at postflop aggression.
@@ -8291,20 +8311,22 @@
       // is configured, so this is a pure no-op absent that setting.
       const affil = affiliationFlags(xid, seatedList);
       // 🏥 hospital, 🚔 jail, ✈️ travelling — whatever is BLOCKING an attack on
-      // this seat. Gated on isSeatSittingOut here as well as at the fetch site
-      // (refreshSittingOutTargetStatus): the cache is never refreshed for a
-      // seat that's back in the hand, so without this gate an opponent who
-      // came out of hospital and kept playing would carry a stale 🏥 forever.
-      // Empty for hero (never fetched) and for anyone with no Torn API key.
-      // `sittingOut` was measured in the read pass above, alongside the rect —
-      // it is a DOM read like any other.
+      // this seat. Empty for hero (never fetched) and for anyone with no Torn
+      // API key configured, so this is a pure no-op absent that setting.
+      //
+      // NO LONGER gated on sittingOut. It was, on the reasoning that the cache
+      // went stale for a seat back in the hand — but the fetch is no longer
+      // scoped to sitting-out seats either (see refreshSeatedTargetStatus), so
+      // every seated opponent now carries a reading at most TARGET_REFRESH_MS
+      // old and there is nothing stale to hide. The old pair of gates between
+      // them meant the feature showed nothing almost all of the time.
       //
       // Only BLOCKERS get a badge glyph, never a positive "attackable" mark.
-      // Most sitting-out players are attackable, so a 🎯 on nearly every one
-      // of them is noise, and the badge is width-constrained before it is
+      // Most players are attackable, so a 🎯 on nearly every seat is noise,
+      // and the badge is width-constrained before it is
       // information-constrained. Absence means "nothing known to be blocking";
       // the panel is where that gets stated properly, one tap away.
-      const hosp = (!isSelf && sittingOut) ? targetStatusFor(xid) : null;
+      const hosp = !isSelf ? targetStatusFor(xid) : null;
       const readiness = hosp ? attackReadiness(hosp) : null;
       const blockedBadge = readiness && readiness.blocked ? readiness : null;
       // Always show a TYPE, never just a hand count. Below minHands `classify`
@@ -9384,11 +9406,17 @@
       <label><input type="checkbox" class="tph-calib-toggle" ${STORE.settings.calibrationMode ? 'checked' : ''}> Calibration mode</label><br><br>
       <h4>Torn API features</h4>
       <label>Torn API key: <input type="text" class="tph-torn-api-key" value="${escapeHtml(STORE.settings.tornApiKey)}" placeholder="optional, public access is enough" style="width:60%"></label>
+      <div class="tph-target-diag ${targetDiagnostic() ? 'tph-target-diag-bad' : 'tph-target-diag-ok'}">${
+        targetDiagnostic()
+          ? '⚠ ' + escapeHtml(targetDiagnostic())
+          : `✓ Torn API working — ${targetOkCount} lookup${targetOkCount === 1 ? '' : 's'} so far.`
+      }</div>
       <div style="opacity:.7;margin:2px 0 10px">🔗 marks two seated players sharing a faction, 💍 marks two married
         to each other — both are facts from Torn's own profile data, checked only against whoever is CURRENTLY
-        seated, never stored as a relationship between two players. 🏥 on a seat that's sitting out means they're
-        currently in the hospital — checked only while they're sitting out, refetched every 30s while that's true,
-        and never for an active seat. A player's name in their panel also links straight to their Torn profile.
+        seated, never stored as a relationship between two players. 🏥 / 🚔 / ✈️ on a seat means something is
+        blocking an attack on them (hospital, jail, travelling) — checked for every seated opponent, refreshed
+        every 30s. No mark means nothing known to be blocking. Tap a seat badge to open their panel: their name
+        there links to their Torn profile, and there's a direct attack link beside their status and level.
         Leave the key blank and none of this does anything; a public-only key is enough, and it never leaves this
         device (stripped from Backup/Gist exports, same as the GitHub token).</div>
       <h4>GitHub Gist sync</h4>
@@ -9840,6 +9868,28 @@
     const outNow = Array.from(document.querySelectorAll(SELECTORS.seatContainer))
       .filter(isSeatSittingOut).map((s) => s.id);
     L.push('sittingOut: ' + (outNow.length ? outNow.join(', ') : 'none right now'));
+
+    // Torn API block. This feature's field names are unverified and it has no
+    // visible output when it is working but nobody happens to be blocked, so
+    // "I don't see anything" needs a place to be answered from. Prints whether
+    // a key is set (NEVER the key itself — this scan gets pasted into chats),
+    // whether any lookup has succeeded, the last error, and the actual cache.
+    L.push('--- TORN API / TARGET STATUS ---');
+    L.push('apiKey set: ' + (!!(STORE.settings.tornApiKey || '').trim())
+      + '   successful lookups: ' + targetOkCount
+      + '   last fetch: ' + (targetLastFetchAt ? Math.round((Date.now() - targetLastFetchAt) / 1000) + 's ago' : 'never'));
+    L.push('diagnostic: ' + (targetDiagnostic() || 'OK — working'));
+    const tEntries = Array.from(targetCache.keys());
+    L.push('target cache: ' + tEntries.length + ' entr' + (tEntries.length === 1 ? 'y' : 'ies'));
+    tEntries.forEach((k) => {
+      const st = targetCache.get(k);
+      const r = attackReadiness(st);
+      L.push('  ' + k + ' -> state=' + JSON.stringify(st.state)
+        + ' level=' + st.level
+        + ' ' + (r.blocked ? 'BLOCKED(' + r.label + (r.until ? ', ' + fmtStatusRemaining(r.until) : '') + ')'
+          : r.unknown ? 'UNKNOWN(' + r.label + ')' : 'ATTACKABLE')
+        + (st.description ? '  desc=' + JSON.stringify(squish(st.description, 40)) : ''));
+    });
     L.push('seatedXids: ' + Array.from(seatedXids()).join(',')
       + '  (incl. sitting out: ' + Array.from(seatedXids({ includeSittingOut: true })).join(',') + ')');
     const btns = findActionButtons();
@@ -10283,7 +10333,8 @@
       ATTACK_BLOCKERS,
       fmtStatusRemaining,
       targetStatusFor,
-      refreshSittingOutTargetStatus,
+      refreshSeatedTargetStatus,
+      targetDiagnostic,
       targetCache,
       attackUrl,
       profileUrl,
