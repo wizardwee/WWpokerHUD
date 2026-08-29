@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.45.0
+// @version      1.46.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,32 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.46.0 - Departure panel: show the stack ("chips") they left with, not just
+ *          level. Asked directly: "current departure panel pill does not show
+ *          chips."
+ *            - THE DATA ALREADY EXISTED. trackStacks() already freezes
+ *              p.stack.now the instant a seat stops reporting someone —
+ *              readAllStacks() only sees who is still seated — so the
+ *              departure list had nothing to snapshot itself; it just reads
+ *              what trackStacks already froze. The same "check whether it's
+ *              already collected" pattern that has paid off several times in
+ *              this file (fold-to-c-bet, per-street aggression, postflop
+ *              re-raise).
+ *            - Read via a plain STORE.players[xid] lookup, NOT getPlayer(xid,
+ *              name). getPlayer bumps lastSeen on every call, and the panel
+ *              calls departedList() on every render tick — going through it
+ *              would have made an open panel keep a long-departed player
+ *              looking "recently seen" purely from being displayed, a write
+ *              side effect from what should be a read.
+ *            - Renders as "$41.2M chips" beside level, through fmtMoney like
+ *              every other money figure here. No stack ever recorded (the
+ *              seat's stack selector never matched this player before they
+ *              left) renders nothing rather than "$0 chips" — absent reads as
+ *              absent, not as broke.
+ *            - 9 new assertions in test/departure-watch.test.js, including one
+ *              that pins the getPlayer/STORE.players[xid] distinction
+ *              directly: reading the list must not move lastSeen.
  *
  * 1.45.0 - Villains' revealed hands going missing from History. ONE gap closed,
  *          and the diagnostic to find the rest. Reported: "I want it to show
@@ -100,60 +126,6 @@
  *            - 16 assertions in test/hand-render.test.js, each checking both
  *              renderers.
  *
- * 1.43.0 - Departure watch: the seat vanishes, the target doesn't. Asked for
- *          directly — "if I see a player who is not in hospital suddenly leave
- *          table, this is a trigger for me to attack ... when the player leaves
- *          his info is gone and I can't click into him".
- *            - That last clause IS the problem: the seat is the only handle on
- *              a player and it disappears at exactly the moment they become
- *              worth attacking. Everything needed to keep it was already here —
- *              the seat sweep knows who WAS seated, targetCache whether they
- *              were attackable, STORE.players their name, and attackUrl needs
- *              only an xid. The work is noticing, and holding on.
- *            - THE GUARDS ARE THE FEATURE. Departures are a diff of successive
- *              seat sweeps, so every false positive comes from a sweep reading
- *              empty or short. A HUD announcing "eight players left, attack
- *              them" because a re-render blinked is worse than one that says
- *              nothing. (1) An empty sweep is NEVER "everyone left", and must
- *              not become the baseline either or the next sweep diffs against
- *              nothing and loses the real departures. (2) A player must be
- *              missing from TWO consecutive sweeps. Both proven by deleting
- *              them and watching the right assertions fail.
- *            - Same asymmetry attackReadiness enforces: only someone POSITIVELY
- *              known attackable when they left raises the alarm. In hospital,
- *              or never checked, is still LISTED but does not buzz, flash or
- *              count toward the pill. Unknown is never "go".
- *            - A "🎯 N left" pill opens a panel with name, level, LIVE status,
- *              attack link and per-row dismiss. Amber screen-edge flash, opt-in
- *              buzz and chime. The chime FALLS where the turn chime rises, so
- *              it cannot be mistaken for "it's your turn" mid-decision, and the
- *              flash is pointer-events: none like every overlay here — absolute
- *              rule, and this one can fire mid-hand. Alerts ONCE per departure,
- *              latched, never per tick.
- *            - Status keeps refreshing for the 5 minutes someone is watched, so
- *              a player hospitalised AFTER leaving stops reading as a target.
- *              Runtime only: a stale target list surviving a reload would
- *              invite acting on cold information.
- *            - TWO THINGS I GOT WRONG, the same lesson twice. (a) THE TEST WAS
- *              VACUOUS: it stubbed the seam export to fake the sweep, which does
- *              not rebind the module's own function — the exact trap CLAUDE.md
- *              records as the reason STORE and heroXid need get/set accessors.
- *              Against an inert DOM every assertion sailed through guard 1 and
- *              tested nothing. Fifth instance here of a test agreeing with
- *              itself. (b) AND IT WAS HIDING A REAL BUG: guard 2 counted misses
- *              over `prev`, but a player missing from sweep N is also absent
- *              from sweep N+1's `prev` — which IS sweep N — so the second miss
- *              was unreachable and THE FEATURE WOULD NEVER HAVE FIRED ONCE.
- *              Now counted over the pending set.
- *            - The fix for both is the repo's existing shouldEscalateTurnCue
- *              pattern: noteSeatDepartures TAKES the seated list rather than
- *              reading it, so the diff is drivable with no DOM. Pulling the pure
- *              decision out was not tidiness — it is what made the bug findable.
- *            - Settings: departureWatch (default on, no-op without an API key)
- *              plus separate departureCue / departureVibrate / departureSound,
- *              so the alert can be softened without losing the list.
- *            - 30 assertions in test/departure-watch.test.js.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -215,7 +187,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.45.0';
+  const HUD_VERSION = '1.46.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -1766,9 +1738,19 @@
       if (e.dismissed) return;
       if (Date.now() - e.leftAt > DEPARTED_WATCH_MS) return;
       const status = targetStatusFor(e.xid);
+      // Read-only lookup, not getPlayer(): this renders on every panel tick,
+      // and getPlayer() bumps lastSeen on every call — a departed player's
+      // stack would otherwise keep pruning as "recently seen" just because
+      // the panel stayed open. trackStacks() already froze `.stack.now` at
+      // whatever they last showed while seated, which is exactly "what they
+      // walked away with" — the figure that matters for deciding whether
+      // they're worth the trip.
+      const rec = STORE.players[e.xid];
+      const stack = rec && rec.stack && rec.stack.now > 0 ? rec.stack.now : 0;
       out.push(Object.assign({}, e, {
         readiness: attackReadiness(status),
         level: status && status.level > 0 ? status.level : 0,
+        stack,
         agoMs: Date.now() - e.leftAt,
       }));
     });
@@ -10063,7 +10045,7 @@
           : r.ready ? '🎯 attackable' : `❔ ${escapeHtml(r.label)}`;
         const mins = Math.max(1, Math.round(e.agoMs / 60000));
         return `<div class="tph-depart-row ${cls}" data-xid="${escapeHtml(e.xid)}">
-          <div class="tph-depart-who"><b>${escapeHtml(e.name)}</b>${e.level ? ` <span class="tph-depart-meta">lvl ${e.level}</span>` : ''}
+          <div class="tph-depart-who"><b>${escapeHtml(e.name)}</b>${e.level ? ` <span class="tph-depart-meta">lvl ${e.level}</span>` : ''}${e.stack ? ` <span class="tph-depart-meta">${fmtMoney(e.stack)} chips</span>` : ''}
             <span class="tph-depart-meta">left ${mins}m ago</span></div>
           <div class="tph-depart-state">${state}</div>
           <a class="tph-attack-link" href="${attackUrl(e.xid)}" target="_blank" rel="noopener">Attack ↗</a>

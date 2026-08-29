@@ -192,6 +192,51 @@ const hosp = () => ({
     T.departedWatch.size <= T.DEPARTED_MAX);
 }
 
+// --- stack ("chips") rides along, read-only -------------------------------
+//
+// The panel exists to answer "is this worth the trip", and level alone
+// doesn't say that — someone's table stack when they walked away does.
+// trackStacks() already freezes p.stack.now the moment a seat stops
+// reporting them (readAllStacks only sees who's still seated), so
+// departedList() has nothing to snapshot itself; it just reads what's
+// already frozen in the player record.
+
+{
+  const T = setup({ players: ['A'] });
+  T.targetCache.set('A', okay());
+  T.STORE.players.A.stack = { now: 41200000, low: 9000000, high: 52000000, start: 20000000, bb: 1000000, at: Date.now() };
+  T.lastSeatedSnapshot = ['A', 'HERO'];
+  T.noteSeatDepartures(['HERO']);
+  T.noteSeatDepartures(['HERO']);
+  t.eq('the frozen stack rides along on the departure row', T.departedList()[0].stack, 41200000);
+}
+
+{
+  const T = setup({ players: ['A'] });
+  T.targetCache.set('A', okay());
+  // No .stack ever recorded — the seat's stack selector never matched.
+  T.lastSeatedSnapshot = ['A', 'HERO'];
+  T.noteSeatDepartures(['HERO']);
+  T.noteSeatDepartures(['HERO']);
+  t.eq('no recorded stack reads as 0, not a throw', T.departedList()[0].stack, 0);
+}
+
+{
+  // getPlayer() bumps lastSeen on every call, which would make an open panel
+  // keep a departed (and possibly long-gone) player looking "recently seen"
+  // purely from being rendered — a read that isn't supposed to have a write
+  // side effect. departedList() must use a plain STORE.players lookup.
+  const T = setup({ players: ['A'] });
+  T.targetCache.set('A', okay());
+  T.STORE.players.A.stack = { now: 5000000, low: 5000000, high: 5000000, start: 5000000, bb: 100000, at: Date.now() };
+  T.STORE.players.A.lastSeen = 12345;
+  T.lastSeatedSnapshot = ['A', 'HERO'];
+  T.noteSeatDepartures(['HERO']);
+  T.noteSeatDepartures(['HERO']);
+  T.departedList();
+  t.eq('reading the departure list does not touch lastSeen', T.STORE.players.A.lastSeen, 12345);
+}
+
 // --- clearDepartures ------------------------------------------------------
 
 {

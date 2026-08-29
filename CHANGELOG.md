@@ -9,6 +9,48 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.46.0
+
+Departure panel: show the stack ("chips") they left with, not just level.
+
+Reported directly: *"current departure panel pill does not show chips."*
+
+### The data already existed
+
+`trackStacks()` (v0.42.0-era) already freezes `p.stack.now` the instant a
+seat stops reporting someone — `readAllStacks()` only sees who is still
+seated, so once a player leaves the table their record's stack simply stops
+being updated and sits at whatever they last showed. The departure list had
+nothing to snapshot itself; it only needed to read what `trackStacks` had
+already frozen.
+
+The same "check whether it's already collected" pattern that has paid off
+repeatedly in this file — fold-to-c-bet, per-street aggression, postflop
+re-raise, board texture were all the same shape: data already landing in the
+store, simply never surfaced.
+
+### Read-only, on purpose
+
+The lookup is a plain `STORE.players[xid]`, not `getPlayer(xid, name)`.
+`getPlayer` bumps `lastSeen` on every call, and the departure panel calls
+`departedList()` on every render tick while it's open. Going through
+`getPlayer` would have turned *viewing* the panel into a write — a
+long-departed player would keep reading as "recently seen" purely because
+someone left the panel open, which is exactly backwards for a feature whose
+whole point is tracking who's no longer around.
+
+### Rendering
+
+Shows as `$41.2M chips` beside the existing `lvl 42`, through `fmtMoney`
+like every other money figure in this file. No stack ever recorded — the
+seat's stack selector never matched this player before they left — renders
+nothing rather than `$0 chips`, so an unknown reads as absent, not as
+"they had nothing."
+
+9 new assertions in `test/departure-watch.test.js`, including one that pins
+the `getPlayer`/`STORE.players[xid]` distinction directly: reading the list
+must not move `lastSeen`.
+
 ## 1.45.0
 
 Villains' revealed hands going missing from History. One gap closed, and the
