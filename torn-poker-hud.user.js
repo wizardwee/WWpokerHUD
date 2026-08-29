@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.42.0
+// @version      1.43.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,60 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.43.0 - Departure watch: the seat vanishes, the target doesn't. Asked for
+ *          directly — "if I see a player who is not in hospital suddenly leave
+ *          table, this is a trigger for me to attack ... when the player leaves
+ *          his info is gone and I can't click into him".
+ *            - That last clause IS the problem: the seat is the only handle on
+ *              a player and it disappears at exactly the moment they become
+ *              worth attacking. Everything needed to keep it was already here —
+ *              the seat sweep knows who WAS seated, targetCache whether they
+ *              were attackable, STORE.players their name, and attackUrl needs
+ *              only an xid. The work is noticing, and holding on.
+ *            - THE GUARDS ARE THE FEATURE. Departures are a diff of successive
+ *              seat sweeps, so every false positive comes from a sweep reading
+ *              empty or short. A HUD announcing "eight players left, attack
+ *              them" because a re-render blinked is worse than one that says
+ *              nothing. (1) An empty sweep is NEVER "everyone left", and must
+ *              not become the baseline either or the next sweep diffs against
+ *              nothing and loses the real departures. (2) A player must be
+ *              missing from TWO consecutive sweeps. Both proven by deleting
+ *              them and watching the right assertions fail.
+ *            - Same asymmetry attackReadiness enforces: only someone POSITIVELY
+ *              known attackable when they left raises the alarm. In hospital,
+ *              or never checked, is still LISTED but does not buzz, flash or
+ *              count toward the pill. Unknown is never "go".
+ *            - A "🎯 N left" pill opens a panel with name, level, LIVE status,
+ *              attack link and per-row dismiss. Amber screen-edge flash, opt-in
+ *              buzz and chime. The chime FALLS where the turn chime rises, so
+ *              it cannot be mistaken for "it's your turn" mid-decision, and the
+ *              flash is pointer-events: none like every overlay here — absolute
+ *              rule, and this one can fire mid-hand. Alerts ONCE per departure,
+ *              latched, never per tick.
+ *            - Status keeps refreshing for the 5 minutes someone is watched, so
+ *              a player hospitalised AFTER leaving stops reading as a target.
+ *              Runtime only: a stale target list surviving a reload would
+ *              invite acting on cold information.
+ *            - TWO THINGS I GOT WRONG, the same lesson twice. (a) THE TEST WAS
+ *              VACUOUS: it stubbed the seam export to fake the sweep, which does
+ *              not rebind the module's own function — the exact trap CLAUDE.md
+ *              records as the reason STORE and heroXid need get/set accessors.
+ *              Against an inert DOM every assertion sailed through guard 1 and
+ *              tested nothing. Fifth instance here of a test agreeing with
+ *              itself. (b) AND IT WAS HIDING A REAL BUG: guard 2 counted misses
+ *              over `prev`, but a player missing from sweep N is also absent
+ *              from sweep N+1's `prev` — which IS sweep N — so the second miss
+ *              was unreachable and THE FEATURE WOULD NEVER HAVE FIRED ONCE.
+ *              Now counted over the pending set.
+ *            - The fix for both is the repo's existing shouldEscalateTurnCue
+ *              pattern: noteSeatDepartures TAKES the seated list rather than
+ *              reading it, so the diff is drivable with no DOM. Pulling the pure
+ *              decision out was not tidiness — it is what made the bug findable.
+ *            - Settings: departureWatch (default on, no-op without an API key)
+ *              plus separate departureCue / departureVibrate / departureSound,
+ *              so the alert can be softened without losing the list.
+ *            - 30 assertions in test/departure-watch.test.js.
  *
  * 1.42.0 - The field names were right. The bug was a day-long cache holding
  *          data from when the transport was broken.
@@ -114,60 +168,6 @@
  *            - No new tests: this is runDeepScan output, which the harness
  *              cannot drive (inert DOM, no network). Said rather than padded.
  *
- * 1.40.0 - Every seat was reported "attackable" without a single profile ever
- *          being read, and the diagnostic said everything was fine.
- *            - THE LINE THAT SOLVED IT. v1.39.0 added the response's top-level
- *              key names to the scan rather than guessing a field name twice.
- *              One scan later: "last response top-level keys: status,
- *              statusText,responseText,responseHeaders". That is not Torn's
- *              profile response — it is TORN PDA'S HTTP ENVELOPE. The HUD had
- *              never been reading Torn's reply, only the wrapper round it.
- *            - BUG ONE, THE TRANSPORT: normalizePdaResponse looked for
- *              result.body then result.text. PDA returns responseText. Neither
- *              checked field existed, so it fell through to its last resort,
- *              JSON.stringify(result), handing the ENTIRE ENVELOPE downstream
- *              as the body; pdaFetchJson parsed that back, so json.status was
- *              the HTTP 200 rather than Torn's status object. responseText is
- *              read first now, and THE JSON.stringify FALLBACK IS GONE:
- *              returning something response-shaped when the body cannot be
- *              found is how a transport failure becomes confident wrong data
- *              three layers up. An unlocatable body comes back empty, the JSON
- *              parse fails, and the caller reads it as unknown — which is true.
- *            - BUG TWO, MINE, and the one that did the damage:
- *              parseTargetStatus DEFAULTED state to 'Okay'. With json.status an
- *              HTTP number, .state was undefined on every response and that
- *              default manufactured a green light from nothing. Five seats read
- *              "Okay / ATTACKABLE", none ever checked.
- *            - It fails in the DANGEROUS direction, which is the entire point
- *              of v1.33.0's "unknown is never go" — but that rule was written
- *              for an UNRECOGNISED state and never covered a MISSING one.
- *              Absence of a state is the least evidence there is, so it must
- *              give the least conclusive answer, not the most reassuring. The
- *              parse now refuses when status.state is not a non-empty string:
- *              same path as a bad key — not cached, surfaced, read as unknown.
- *            - HOW BADLY IT PRESENTED, the real lesson: "started: 5 ·
- *              successful lookups: 5 · diagnostic: OK — working · watcher
- *              steps failing: none". Every health signal green, full cache, no
- *              errors, every answer fabricated. A FEATURE THAT REPORTS SUCCESS
- *              IS NOT A FEATURE THAT IS CORRECT — second time in three releases
- *              the Torn API looked fine and wasn't (first it hung silently,
- *              now it answered confidently with nothing behind it).
- *            - THE TEST AGREED WITH THE BUG: target-status asserted "missing
- *              status/level keys still parse (defaults to Okay/0)" — written
- *              from the implementation, not the requirement, so it agreed and
- *              stayed green. Third instance of the v1.0.1 pattern, after the
- *              4B/5B off-by-one in v1.35.0. Replaced with refusal assertions
- *              (no status, no state, non-string state, empty state, the real
- *              envelope) plus one proving a minimal valid profile still parses.
- *            - ALSO CONFIRMED: heroGhost is "none" — v1.39.0's cleanup worked.
- *              And communityCards matched 4 where every earlier scan showed 0
- *              and the code claimed it "matched ZERO on a live scan". Wrong
- *              conclusion: those scans were all preflop or between hands, with
- *              no board to match. "0 matches" was read as "selector broken"
- *              when it meant "no cards there". Corrected in both places.
- *            - STILL OPEN, untouched: pot dom=$10.5M vs log=$5M, cause already
- *              recorded in v1.39.0 (blind lines on screen at load).
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -229,7 +229,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.42.0';
+  const HUD_VERSION = '1.43.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -513,6 +513,14 @@
     showRoleBadges: true, // PFR/3B/DONK/RR chips for THIS hand — see handRoles
     turnCues: true,       // pulsing border + green gear when it's your turn
     nextToActCue: true,   // quieter amber border when you're one seat away
+    // Departure watch — see noteSeatDepartures. On by default because it is
+    // the whole point of the Torn API features, and it is a no-op without a
+    // key. The cue/buzz/sound are separate so the alert can be softened
+    // without losing the list.
+    departureWatch: true,
+    departureCue: true,
+    departureVibrate: false, // opt-in, same as the turn cue's
+    departureSound: false,   // opt-in
     turnVibrate: false, // opt-in: a short buzz on the rising edge only
     turnSound: false,   // opt-in: a synthesised two-note chime
     foldGuard: true,    // tap Fold twice to confirm — see foldGuardHandler
@@ -1660,6 +1668,197 @@
     }
     if (!targetLastFetchAt) return 'No lookup has run yet — sit at a table with other players.';
     return '';
+  }
+
+  // --- Departure watch (v1.43.0) -------------------------------------------
+  //
+  // "If I see a player who is not in hospital suddenly leave the table, this is
+  // a trigger for me to attack. When the player leaves his info is gone and I
+  // can't click into him."
+  //
+  // That last part is the whole problem: the seat is the only handle on a
+  // player, and it vanishes at the exact moment they become worth attacking.
+  // Everything needed to keep the handle alive is already here though — the
+  // seat sweep knows who WAS seated, targetCache knows whether they were
+  // attackable, STORE.players knows their name, and attackUrl needs nothing
+  // but the xid. So the fix is to notice the disappearance and hold onto what
+  // we already had.
+  //
+  // Runtime only, deliberately. A departure is worth acting on for minutes,
+  // and a list of stale targets surviving a page reload would invite acting on
+  // information that has since gone cold.
+  const DEPARTED_WATCH_MS = 5 * 60 * 1000;
+  const DEPARTED_MAX = 12;
+  let departedWatch = new Map(); // xid -> { xid, name, leftAt, wasReady, alerted, dismissed }
+  let lastSeatedSnapshot = null; // null = never populated; [] is a REAL empty table
+
+  // Departures are computed by diffing successive seat sweeps, which means
+  // every false positive comes from the sweep momentarily reading empty or
+  // short. Two guards, and they matter more than the feature:
+  //
+  //   1. A sweep that returns NOTHING is never treated as everyone leaving.
+  //      The table re-renders, the SPA swaps nodes, the page is backgrounded —
+  //      all of which briefly match no seats. Reporting eight departures at
+  //      once because a render blinked would be worse than reporting none.
+  //   2. A player must be missing from TWO consecutive sweeps before counting.
+  //      One frame of absence is a re-render; two three seconds apart is
+  //      somebody who left.
+  let pendingDepartures = new Map(); // xid -> first tick they went missing
+
+  // Takes the seated list rather than reading it, so the diff — which is all
+  // the logic here — is drivable without a DOM. Same split shouldEscalateTurnCue
+  // already uses, and it was not optional: the first version read seatedXids()
+  // itself, and the test that "covered" it stubbed the seam export. That does
+  // not rebind the module's own function (CLAUDE.md records the same trap for
+  // STORE and heroXid), so every assertion passed against an inert DOM
+  // returning no seats and Guard 1 swallowing the lot. Vacuous, and green.
+  function noteSeatDepartures(seatedList) {
+    const seatedNow = Array.from(seatedList || seatedXids({ includeSittingOut: true }));
+
+    // Guard 1. An empty sweep says nothing about who left; it says the table
+    // is not readable right now. Do not diff against it, and do not let it
+    // become the baseline either.
+    if (!seatedNow.length) return [];
+
+    const prev = lastSeatedSnapshot;
+    lastSeatedSnapshot = seatedNow;
+    if (!prev) return []; // first readable sweep: nothing to compare against
+
+    const nowSet = new Set(seatedNow.map(String));
+    const fired = [];
+
+    // Anyone previously seated and no longer there becomes a CANDIDATE.
+    prev.forEach((xid) => {
+      const key = String(xid);
+      if (nowSet.has(key) || isHeroRecord(xid) || departedWatch.has(key)) return;
+      if (!pendingDepartures.has(key)) pendingDepartures.set(key, 0);
+    });
+
+    // Guard 2 is counted over the PENDING set, not over `prev`. That
+    // distinction is the whole guard: a player missing from sweep N is also
+    // absent from sweep N+1's `prev` — which IS sweep N — so a version that
+    // looked for them there again could never reach a second miss and would
+    // never fire at all. Found by a test, after an earlier version of that
+    // test stubbed the seam and passed vacuously against an inert DOM.
+    Array.from(pendingDepartures.keys()).forEach((key) => {
+      if (nowSet.has(key)) { pendingDepartures.delete(key); return; } // came back
+      const misses = pendingDepartures.get(key) + 1;
+      pendingDepartures.set(key, misses);
+      if (misses < 2) return;
+      pendingDepartures.delete(key);
+      if (departedWatch.has(key)) return;
+
+      const xid = key;
+      const status = targetStatusFor(xid);
+      const readiness = attackReadiness(status);
+      departedWatch.set(key, {
+        xid: key,
+        name: playerDisplayName(xid),
+        leftAt: Date.now(),
+        // Snapshot of what we knew AS THEY LEFT. The live status keeps being
+        // refreshed afterwards (see refreshDepartedTargetStatus), so the panel
+        // shows current truth — this only decides whether to raise the alarm.
+        wasReady: readiness.ready,
+        alerted: false,
+        dismissed: false,
+      });
+      fired.push(key);
+    });
+
+    // Oldest first, so a busy table cannot grow this without bound.
+    while (departedWatch.size > DEPARTED_MAX) {
+      departedWatch.delete(departedWatch.keys().next().value);
+    }
+    return fired;
+  }
+
+  // Live entries: not expired, not dismissed. Expiry is by wall clock rather
+  // than a timer so it is correct after the phone sleeps.
+  function departedList() {
+    const out = [];
+    departedWatch.forEach((e) => {
+      if (e.dismissed) return;
+      if (Date.now() - e.leftAt > DEPARTED_WATCH_MS) return;
+      const status = targetStatusFor(e.xid);
+      out.push(Object.assign({}, e, {
+        readiness: attackReadiness(status),
+        level: status && status.level > 0 ? status.level : 0,
+        agoMs: Date.now() - e.leftAt,
+      }));
+    });
+    return out.sort((a, b) => b.leftAt - a.leftAt);
+  }
+
+  // Only entries that should raise the alarm: someone we positively knew was
+  // attackable when they left. A player who was in hospital, or who was never
+  // checked, still appears in the list — but does not buzz, flash or count
+  // toward the pill. Same asymmetry as attackReadiness: unknown is never "go".
+  function departedAlertable() {
+    return departedList().filter((e) => e.wasReady && !e.readiness.blocked);
+  }
+
+  // A distinct chime from the turn cue: FALLING rather than rising, so it can
+  // never be mistaken for "it's your turn" while you are mid-decision. Same
+  // reasoning the escalation chime follows — reuse the shape, change the
+  // meaning audibly.
+  function playDepartureChime() {
+    return playChimeNotes([[1320, 0], [880, 0.11]]);
+  }
+
+  // The screen cue for a departure. Amber, brief, and — like every overlay in
+  // this file — pointer-events: none. That rule is absolute: one tap swallowed
+  // on Fold or Call is worse than any cue is good, and this one fires while
+  // you may well be mid-hand.
+  const DEPARTURE_FLASH_MS = 2600;
+  function flashDepartureCue() {
+    if (!STORE.settings.departureCue) return;
+    document.querySelectorAll('.tph-depart-glow').forEach((el) => el.remove());
+    const el = document.createElement('div');
+    el.className = 'tph-depart-glow';
+    document.body.appendChild(el);
+    setTimeout(() => el.remove(), DEPARTURE_FLASH_MS);
+  }
+
+  // Fired once per departure, never per tick — `alerted` is the latch. A cue
+  // that repeats every 3s until dismissed would be the exact thing CLAUDE.md
+  // warns about: something competing with the table for your attention.
+  function alertDepartures(firedXids) {
+    if (!STORE.settings.departureWatch) return;
+    let any = false;
+    firedXids.forEach((xid) => {
+      const e = departedWatch.get(String(xid));
+      if (!e || e.alerted || !e.wasReady) return;
+      e.alerted = true;
+      any = true;
+    });
+    if (!any) return;
+    flashDepartureCue();
+    if (STORE.settings.departureVibrate && navigator.vibrate) {
+      try { navigator.vibrate([90, 60, 90]); } catch (e) { /* not supported here */ }
+    }
+    if (STORE.settings.departureSound) playDepartureChime();
+    renderDepartedPill();
+    renderDepartedPanel();
+  }
+
+  function dismissDeparture(xid) {
+    const e = departedWatch.get(String(xid));
+    if (e) e.dismissed = true;
+    renderDepartedPanel();
+    renderDepartedPill();
+  }
+
+  function clearDepartures() {
+    departedWatch.forEach((e) => { e.dismissed = true; });
+    renderDepartedPanel();
+    renderDepartedPill();
+  }
+
+  // Keep checking the ones we are watching. A player who left attackable and
+  // has since been hospitalised by somebody else must stop reading as a target
+  // — that is the difference between a live list and a stale one.
+  function refreshDepartedTargetStatus() {
+    departedList().forEach((e) => requestTargetStatus(e.xid));
   }
 
   // A `name:<username>` record for HERO, left over from before hero was bound
@@ -4418,6 +4617,16 @@
       // Early-returns the moment there is nothing to drop, which is every tick
       // after the first one that finds a ghost.
       tickStep('hero ghost', dropStaleHeroGhost);
+      // Departure watch. Diffing the seat sweep has to come AFTER the status
+      // refresh above, so a player who leaves this tick already has a fresh
+      // reading to be judged on rather than one up to 30s old.
+      tickStep('departures', () => {
+        if (!STORE.settings.departureWatch) return;
+        alertDepartures(noteSeatDepartures(Array.from(seatedXids({ includeSittingOut: true }))));
+        refreshDepartedTargetStatus();
+        renderDepartedPill();
+        if (departedPanelOpen) renderDepartedPanel();
+      });
     }, 3000);
     harvestSeatNames();
 
@@ -7959,6 +8168,30 @@
       font-size: 11px; margin: -2px 0 9px; padding: 4px 6px; border-radius: 4px;
       background: rgba(255,255,255,.04); color: #cfd6dd !important; }
     .tph-target-txt { color: inherit !important; }
+    /* Departure watch. The glow is pointer-events: none like every overlay
+       here — that rule is absolute, and this one can fire mid-hand. */
+    .tph-depart-glow { position: fixed; inset: 0; z-index: 99997; pointer-events: none;
+      box-shadow: inset 0 0 0 3px rgba(255,157,138,.85); animation: tphDepart 1.3s ease-out 2; }
+    @keyframes tphDepart { 0% { opacity: 0; } 30% { opacity: 1; } 100% { opacity: 0; } }
+    .tph-depart-pill { position: fixed; z-index: 99998; bottom: 96px; right: 12px;
+      background: #ff9d8a !important; color: #14100f !important; font-weight: 700;
+      font: 700 12px/1 -apple-system, sans-serif !important; padding: 7px 11px;
+      border-radius: 13px; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,.45); }
+    .tph-depart-note { color: #8d959c !important; font-size: 10.5px; margin: 0 0 8px; }
+    .tph-depart-row { display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+      padding: 6px; margin-bottom: 6px; border-radius: 4px;
+      background: rgba(255,255,255,.04); color: #cfd6dd !important; font-size: 11.5px;
+      border-left: 3px solid #3d3d48; }
+    .tph-depart-ready { border-left-color: #7ee0a6; }
+    .tph-depart-blocked { border-left-color: #ffb3a0; }
+    .tph-depart-unknown { border-left-color: #f0c674; }
+    .tph-depart-who { color: #f2f4f6 !important; }
+    .tph-depart-meta { color: #8d959c !important; font-size: 10px; margin-left: 5px; }
+    .tph-depart-state { color: #cfd6dd !important; font-size: 11px; }
+    .tph-depart-ready .tph-depart-state { color: #7ee0a6 !important; }
+    .tph-depart-blocked .tph-depart-state { color: #ffb3a0 !important; }
+    .tph-depart-unknown .tph-depart-state { color: #f0c674 !important; }
+    .tph-depart-x { margin-left: auto; color: #8d959c !important; cursor: pointer; padding: 0 4px; }
     /* History filter chips. Own colours throughout — pinTextColor skips tph-
        elements, so anything here declaring none renders dark-on-dark. */
     .tph-hf-bar { display: flex; gap: 5px; margin: 0 0 8px; flex-wrap: wrap; }
@@ -9753,6 +9986,79 @@
     });
   }
 
+  // The pill: a count you can see without it covering anything, and a tap
+  // target to open the list. Rendered from the same 3s tick, so it appears and
+  // disappears with the watch window rather than needing its own timer.
+  let departedPanelOpen = false;
+
+  function renderDepartedPill() {
+    const existing = document.querySelector('.tph-depart-pill');
+    const live = STORE.settings.departureWatch ? departedAlertable() : [];
+    if (!live.length || departedPanelOpen) {
+      if (existing) existing.remove();
+      return;
+    }
+    const label = `🎯 ${live.length} left`;
+    if (existing) {
+      if (existing.textContent !== label) existing.textContent = label;
+      return;
+    }
+    const pill = document.createElement('div');
+    pill.className = 'tph-depart-pill';
+    pill.textContent = label;
+    pill.title = 'Players who left the table while attackable. Tap to open.';
+    pill.addEventListener('click', () => {
+      departedPanelOpen = true;
+      renderDepartedPill();
+      renderDepartedPanel();
+    });
+    document.body.appendChild(pill);
+  }
+
+  function renderDepartedPanel() {
+    const rows = departedList();
+    renderPanel({
+      marker: 'tph-depart-panel',
+      open: departedPanelOpen,
+      scrollKey: 'tph-depart-panel',
+      onClose: () => { departedPanelOpen = false; renderDepartedPanel(); renderDepartedPill(); },
+      html: `
+      <span class="tph-close">✕</span>
+      <h3>Left the table</h3>
+      <div class="tph-depart-note">Tracked for ${DEPARTED_WATCH_MS / 60000} minutes after they leave, or until you
+        dismiss them. Status keeps refreshing, so someone hospitalised after leaving stops reading as a target.</div>
+      ${rows.length ? '' : '<i>Nobody has left recently.</i>'}
+      ${rows.map((e) => {
+        const r = e.readiness;
+        const cls = r.blocked ? 'tph-depart-blocked' : r.ready ? 'tph-depart-ready' : 'tph-depart-unknown';
+        const state = r.blocked
+          ? `${r.emoji} ${escapeHtml(r.label)}${r.until ? ', ' + escapeHtml(fmtStatusRemaining(r.until)) + ' left' : ''}`
+          : r.ready ? '🎯 attackable' : `❔ ${escapeHtml(r.label)}`;
+        const mins = Math.max(1, Math.round(e.agoMs / 60000));
+        return `<div class="tph-depart-row ${cls}" data-xid="${escapeHtml(e.xid)}">
+          <div class="tph-depart-who"><b>${escapeHtml(e.name)}</b>${e.level ? ` <span class="tph-depart-meta">lvl ${e.level}</span>` : ''}
+            <span class="tph-depart-meta">left ${mins}m ago</span></div>
+          <div class="tph-depart-state">${state}</div>
+          <a class="tph-attack-link" href="${attackUrl(e.xid)}" target="_blank" rel="noopener">Attack ↗</a>
+          <span class="tph-depart-x" title="Dismiss">✕</span>
+        </div>`;
+      }).join('')}
+      ${rows.length ? '<button class="tph-depart-clear">Dismiss all</button>' : ''}
+    `,
+      wire: (panel) => {
+        panel.querySelectorAll('.tph-depart-x').forEach((x) => {
+          x.addEventListener('click', (ev) => {
+            ev.stopPropagation();
+            const row = x.closest ? x.closest('.tph-depart-row') : null;
+            if (row) dismissDeparture(row.dataset.xid);
+          });
+        });
+        const clear = panel.querySelector('.tph-depart-clear');
+        if (clear) clear.addEventListener('click', clearDepartures);
+      },
+    });
+  }
+
   function renderPlayersList() {
     const all = !playersListOpen ? [] : Object.keys(STORE.players)
       .map((xid) => ({ xid, p: STORE.players[xid] }))
@@ -9989,6 +10295,16 @@
       <div style="opacity:.7;margin:2px 0 10px">Drag the ◢ corner to resize the coach panel — it stays where you put
         it, at the size you set, and now stays on screen between hands instead of disappearing.</div>
       <label><input type="checkbox" class="tph-calib-toggle" ${STORE.settings.calibrationMode ? 'checked' : ''}> Calibration mode</label><br><br>
+      <h4>Departure watch</h4>
+      <label><input type="checkbox" class="tph-depart-toggle" ${STORE.settings.departureWatch ? 'checked' : ''}> Alert when an attackable player leaves</label><br>
+      <label><input type="checkbox" class="tph-departcue-toggle" ${STORE.settings.departureCue ? 'checked' : ''}> Flash the screen edge</label><br>
+      <label><input type="checkbox" class="tph-departvib-toggle" ${STORE.settings.departureVibrate ? 'checked' : ''}> Also buzz</label><br>
+      <label><input type="checkbox" class="tph-departsound-toggle" ${STORE.settings.departureSound ? 'checked' : ''}> Also play a chime</label>
+      <div style="opacity:.7;margin:2px 0 10px">A seat vanishing is the moment they stop being reachable from the
+        table, so the HUD keeps their name, level and attack link for ${DEPARTED_WATCH_MS / 60000} minutes and
+        carries on checking their status — someone hospitalised after leaving stops reading as a target. Only
+        players known to be attackable when they left raise the alert; anyone in hospital, or never checked, is
+        listed without one. Needs a Torn API key, and the flash never intercepts a tap.</div>
       <h4>Torn API features</h4>
       <label>Torn API key: <input type="text" class="tph-torn-api-key" value="${escapeHtml(STORE.settings.tornApiKey)}" placeholder="optional, public access is enough" style="width:60%"></label>
       <div class="tph-target-diag ${targetDiagnostic() ? 'tph-target-diag-bad' : 'tph-target-diag-ok'}">${
@@ -10203,6 +10519,23 @@
       if (coach) coach.remove(); // rebuilt at the default anchor on the next tick
       const pill = document.querySelector('.tph-coach-pill');
       if (pill) pill.remove();
+    });
+    [['.tph-depart-toggle', 'departureWatch'], ['.tph-departcue-toggle', 'departureCue'],
+      ['.tph-departvib-toggle', 'departureVibrate'], ['.tph-departsound-toggle', 'departureSound'],
+    ].forEach(([sel, key]) => {
+      const el = panel.querySelector(sel);
+      if (!el) return;
+      el.addEventListener('change', (e) => {
+        STORE.settings[key] = e.target.checked;
+        saveStore();
+        // Turning the watch off must take the pill and panel with it, not
+        // leave them until the next tick.
+        if (key === 'departureWatch' && !e.target.checked) {
+          departedPanelOpen = false;
+          renderDepartedPanel();
+        }
+        renderDepartedPill();
+      });
     });
     panel.querySelector('.tph-calib-toggle').addEventListener('change', (e) => {
       STORE.settings.calibrationMode = e.target.checked;
@@ -10963,6 +11296,16 @@
       refreshSeatedTargetStatus,
       requestTargetStatus,
       dropStaleHeroGhost,
+      noteSeatDepartures,
+      departedList,
+      departedAlertable,
+      dismissDeparture,
+      clearDepartures,
+      departedWatch,
+      DEPARTED_WATCH_MS,
+      DEPARTED_MAX,
+      get lastSeatedSnapshot() { return lastSeatedSnapshot; },
+      set lastSeatedSnapshot(v) { lastSeatedSnapshot = v; },
       pdaCall,
       PDA_CALL_TIMEOUT_MS,
       seedBlindFromVisibleLog,

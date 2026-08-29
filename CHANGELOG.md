@@ -9,6 +9,102 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.43.0
+
+Departure watch: the seat vanishes, the target doesn't.
+
+Asked for directly: *"If I see a player who is not in hospital, suddenly
+leave table, this is a trigger for me to attack. How can we make this here
+since when the player leaves his info is gone and I can't click into him to
+attack."*
+
+That last clause is the whole problem. The seat is the only handle on a
+player, and it disappears at exactly the moment they become worth attacking.
+
+Everything needed to keep that handle was already here: the seat sweep knows
+who *was* seated, `targetCache` knows whether they were attackable,
+`STORE.players` knows their name, and `attackUrl` needs nothing but an xid.
+So the work is noticing the disappearance and holding on to what was already
+in hand.
+
+### The guards are the feature
+
+Departures are a diff of successive seat sweeps, which means every false
+positive comes from a sweep reading empty or short for a moment. A HUD that
+announces *"eight players left, go attack them"* because a re-render blinked
+is worse than one that says nothing at all.
+
+**An empty sweep is never "everyone left."** The table re-renders, the SPA
+swaps nodes, the page backgrounds — all of which briefly match no seats. And
+it must not become the baseline either, or the next sweep would diff against
+nothing and lose the real departures.
+
+**A player must be missing from two consecutive sweeps.** One frame of
+absence is a re-render; two, three seconds apart, is somebody who left.
+
+All three variants were proven by deleting them and watching the right
+assertions fail.
+
+**And the same asymmetry `attackReadiness` enforces:** only someone
+*positively known* attackable when they left raises the alarm. Anyone in
+hospital, or never checked, is still listed — you may want to see them — but
+does not buzz, flash, or count toward the pill. Unknown is never "go".
+
+### What you get
+
+A `🎯 N left` pill bottom-right, tapping into a panel with each player's
+name, level, live status, an attack link, and per-row dismiss. An amber
+screen-edge flash, and opt-in buzz and chime.
+
+The chime **falls** where the turn chime rises, so it can't be mistaken for
+"it's your turn" while you're mid-decision. The flash is `pointer-events:
+none` like every overlay here — an absolute rule, and this one can fire
+mid-hand.
+
+It alerts **once** per departure, latched, never per tick. A cue repeating
+every three seconds until dismissed is precisely what the
+never-come-between-you-and-the-table rule exists to prevent.
+
+Status keeps refreshing for the five minutes someone is watched, so a player
+hospitalised *after* leaving stops reading as a target — the difference
+between a live list and a stale one. Runtime only, deliberately: a stale
+target list surviving a page reload would invite acting on cold information.
+
+### Two things I got wrong, and they're the same lesson twice
+
+**The test was vacuous.** It stubbed the seam export (`T.seatedXids = ...`)
+to fake the sweep — which does not rebind the module's own function. That is
+exactly the trap already recorded in CLAUDE.md, the reason `STORE` and
+`heroXid` are exposed as get/set accessors rather than plain references. With
+an inert DOM returning no seats, every assertion sailed through the
+empty-sweep guard and tested nothing. Green, and worthless. Fifth instance in
+this project of a test agreeing with itself.
+
+**And the vacuous test was hiding a real bug.** The second-miss guard counted
+by iterating `prev` — but a player missing from sweep N is also absent from
+sweep N+1's `prev`, which *is* sweep N. The second miss could never be
+reached. **The feature would never have fired once in production.** Fixed by
+counting over the pending set instead.
+
+The fix for both is the same, and it is the pattern this repo already uses
+for `shouldEscalateTurnCue`: `noteSeatDepartures` now *takes* the seated list
+rather than reading it, so the diff — which is all the logic — is drivable
+with no DOM. Worth stating plainly that pulling the pure decision out was not
+a tidiness choice. It is what made the bug findable at all.
+
+### Settings
+
+`departureWatch` (on by default, a no-op without an API key), plus separate
+`departureCue`, `departureVibrate` and `departureSound` so the alert can be
+softened without losing the list. Switching the watch off takes the pill and
+panel down immediately rather than at the next tick.
+
+30 assertions in `test/departure-watch.test.js`, covering both guards, the
+re-render cancel, hero never counting as a target, the first sweep having no
+baseline, alertable-versus-merely-listed, the live demotion, wall-clock
+expiry (correct after the phone sleeps), dismissal idempotence, the cap, and
+dismiss-all.
+
 ## 1.42.0
 
 The field names were right. The bug was a day-long cache holding data from
