@@ -9,6 +9,88 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.47.0
+
+Estimated battle stats on the departure panel, via TornStats.
+
+Asked directly, right after the chips fix: whether battle stats could be
+added the same way.
+
+### The answer first
+
+Torn's own API refuses this outright. `selections=battlestats` only ever
+returns the **key owner's own stats**, never a third party's, at any access
+level. There is no way to read someone else's strength, defense, speed or
+dexterity from Torn directly — that's a platform limit, not a missing
+feature this file could add.
+
+### What shipped instead
+
+A **crowdsourced estimate** from TornStats: other players' own in-game "spy"
+results on a target, pooled and served back through TornStats' v2 API.
+
+This is **off by default** — unlike departure watch and the affiliation
+badges, which default on. It pulls a third party's numbers through a service
+this project has no relationship with, and (see below) the integration
+itself is unverified. Needs its own TornStats API key, kept entirely
+separate from the Torn API key already in Settings, and stripped from
+Backup/Gist exports the same way that one is.
+
+### More unverified than anything else in this file
+
+Every other "unconfirmed" API integration here — the faction/marriage
+badges, target status — was at least checked against Torn's own published
+API documentation before shipping. This one couldn't be: this project's
+environment blocks network egress to both `tornstats.com` and `yata.yt`
+outright, so `parseSpyStats`' field names
+(`spy.strength`/`defense`/`speed`/`dexterity`/`total`/`timestamp`) are
+written from memory of TornStats' documented v2 shape, not a fetched doc and
+not a live response.
+
+`parseSpyStats` fails defensively to `null` on anything it doesn't
+recognise — same discipline as `parseAffiliationProfile` and
+`parseTargetStatus` — so a wrong guess costs a missing read, not a crash.
+But this needs a report from someone holding a real TornStats key before it
+can be trusted even as far as those two integrations currently are. Two
+specific defensive choices worth flagging for whoever does that check:
+
+- An **empty-array `spy`** is read as "never spied", not a malformed
+  response — several community spy tools use `[]` rather than `{}` for
+  "nothing here" wherever a same-shaped object would otherwise appear.
+- A **zero `total`** is refused rather than reported. A real spied player's
+  battle stats are essentially never all-zero past the first few levels, so
+  reading a malformed 0 as a genuine figure would be the exact
+  confidently-wrong-is-worse-than-none trap this project keeps naming.
+
+### Cached differently from affiliation, on purpose
+
+`spyCache` is in-memory only — never written to `STORE.players`, never
+persisted. That's a deliberate departure from how faction/marriage are
+cached: those are facts read from Torn's own API, worth keeping for a day.
+This is a third party's *estimate*, and letting a stale one survive a
+reload, or ride along inside a Backup/Gist export, risked it being read back
+later as more solid than it actually is. A fresh session just re-fetches.
+
+### Rendering
+
+Shows as `≈3.4M BS` beside chips and level on the departure panel row,
+through the same `fmtMoney` k/M/B ladder (a new `fmtStatNum` — same tiering,
+no `$` prefix, since a battle-stat total isn't currency). The tooltip breaks
+down all four stats individually, says how long ago the underlying spy was
+actually taken, and states plainly that this is "not Torn's own data" — the
+UI has to keep saying that, the same rule CLAUDE.md holds for every other
+estimate in this file.
+
+### Diagnostics
+
+Full `spyDiagnostic()` + deep-scan block, same shape as target status:
+feature off, no key, key set but nothing fetched yet, and the last error are
+all distinguishable messages rather than one undifferentiated silence —
+because an integration this unverified has to be able to explain why it's
+showing nothing, the same reasoning `targetDiagnostic()` was built on.
+
+37 assertions in `test/spy-stats.test.js`.
+
 ## 1.46.0
 
 Departure panel: show the stack ("chips") they left with, not just level.

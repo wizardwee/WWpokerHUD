@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.46.0
+// @version      1.47.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,51 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.47.0 - Estimated battle stats on the departure panel, via TornStats. Asked
+ *          directly, right after the chips fix: whether battle stats could be
+ *          added the same way.
+ *            - THE ANSWER FIRST: Torn's own API refuses this outright.
+ *              `selections=battlestats` only ever returns the KEY OWNER'S OWN
+ *              stats, never a third party's, at any access level. There is no
+ *              way to read someone else's strength/defense/speed/dexterity
+ *              from Torn directly — a platform limit, not a missing feature.
+ *            - WHAT SHIPPED INSTEAD: a CROWDSOURCED ESTIMATE from TornStats —
+ *              other players' own in-game "spy" results on a target, pooled
+ *              and served back through TornStats' v2 API. OFF by default
+ *              (unlike departureWatch/affiliation, which default on): a third
+ *              party's numbers through a service this project has no
+ *              relationship with. Needs its own TornStats key, separate from
+ *              the Torn API key above it, stripped from Backup/Gist exports
+ *              the same way.
+ *            - MORE UNVERIFIED THAN ANYTHING ELSE HERE. Affiliation and target
+ *              status were at least checked against Torn's PUBLISHED API docs
+ *              before shipping. This could not be: this environment's network
+ *              egress is blocked to both tornstats.com and yata.yt outright,
+ *              so parseSpyStats' field names (spy.strength/defense/speed/
+ *              dexterity/total/timestamp) are written from memory of
+ *              TornStats' documented v2 shape, not a fetched doc and not a
+ *              live response. Fails defensively to null on anything
+ *              unrecognised, same discipline as the other two parsers —
+ *              a wrong guess costs a missing read, not a crash — but this
+ *              needs a report from someone holding a real TornStats key
+ *              before it can be trusted even as far as those two currently
+ *              are.
+ *            - Cached in-memory only (spyCache), never in STORE.players and
+ *              never persisted — deliberately unlike affiliation. This is a
+ *              third party's ESTIMATE, not a fact from Torn's own API, and
+ *              letting it survive a reload or ride along in an export risked
+ *              it being read back later as more solid than it is.
+ *            - Renders as "≈3.4M BS" beside chips and level on the departure
+ *              panel row, through the same fmtMoney k/M/B ladder (fmtStatNum,
+ *              no $ prefix). Tooltip breaks down all four stats plus how long
+ *              ago the underlying spy was taken, and says plainly it is "not
+ *              Torn's own data".
+ *            - Full diagnostic + deep-scan block, same shape as target status:
+ *              feature off / no key / no lookup yet / last error are all
+ *              distinguishable, because a guess this unverified has to be
+ *              able to explain its own silence.
+ *            - 37 assertions in test/spy-stats.test.js.
  *
  * 1.46.0 - Departure panel: show the stack ("chips") they left with, not just
  *          level. Asked directly: "current departure panel pill does not show
@@ -87,45 +132,6 @@
  *              "raise" with nothing to raise, and the illegal preflop raise
  *              sequence hinting at missed street headers.
  *
- * 1.44.0 - Two rendering bugs from one History screenshot, both the same class:
- *          one fact written or shown twice, differently.
- *            - TWO FORMATS FOR THE SAME CARDS, one line apart in a single hand:
- *              "showdown: JonnySince shows [7♥, J♦]" directly above "showdown:
- *              Jaywattsdj shows KH KS". hand.shown has TWO writers and they
- *              disagreed — harvestShownCards built its own string from parsed
- *              cards, the log's reveal handler stored the raw log text. Neither
- *              wrong alone; together they made one hand look like two different
- *              programs wrote it. Both now go through cardsGlyphText, the same
- *              renderer the board uses, so they cannot diverge. Raw log text
- *              survives only when the cards fail to parse, where it is the only
- *              evidence there is.
- *            - A BARE "shows" MID-STREET. logAction records 'shows' as an
- *              action, so the street list rendered "JonnySince shows" inline —
- *              no amount, reading as truncated — and the showdown line then said
- *              it again two lines below, that time with the cards. In the
- *              screenshot twice: trailing the river of the big hand, and as an
- *              ENTIRE street ("RIVER  HaVoC_HeLL shows") in the hand below.
- *              A reveal is not a betting action: filtered from the street list,
- *              and a street left with no betting action is dropped rather than
- *              rendered empty.
- *            - Applied to formatHand AND formatHandHtml. The clipboard and the
- *              screen must not describe the same hand differently — the entire
- *              reason those two exist as a pair, and exactly where a fix lands
- *              in one and not the other.
- *            - STILL OPEN, recorded rather than guessed at: the same screenshot
- *              has a river reading "Jaywattsdj raise $165.8M" when the turn was
- *              check/check — A RAISE WITH NOTHING TO RAISE. Either an opening
- *              river BET by the other player was missed (the missed-log-line
- *              family from 1.36.0) or Torn words some opening bets as "raised",
- *              and a rendered hand cannot tell those apart. The hand below shows
- *              a related oddity: "HaVoC_HeLL raise $56.5M" recorded AFTER
- *              "Wilkee_ raise $67.4M" on one preflop line, not a legal raise
- *              sequence, hinting the flop/turn headers were missed and their
- *              actions filed under preflop. What settles it: the raw log wording
- *              of such a river, which the scan's "raised" probe prints verbatim.
- *            - 16 assertions in test/hand-render.test.js, each checking both
- *              renderers.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -187,7 +193,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.46.0';
+  const HUD_VERSION = '1.47.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -510,6 +516,15 @@
     // faction/marriage on currently seated players (see refreshSeatedAffiliations).
     // Empty = the feature does nothing, no error, no nag. LOCAL_ONLY_SETTINGS below.
     tornApiKey: '',
+    // Estimated battle stats (see the "Estimated battle stats" section below).
+    // OFF by default, unlike departureWatch/affiliation above — this pulls a
+    // third party's crowdsourced numbers through a third service this project
+    // has no relationship with, and the integration itself is unverified.
+    // Opt in deliberately; tornStatsApiKey is a SEPARATE credential from
+    // tornApiKey (TornStats issues its own key) and is also
+    // LOCAL_ONLY_SETTINGS below.
+    battleStatsEstimate: false,
+    tornStatsApiKey: '',
   };
 
   function emptyStore(settings) {
@@ -1004,7 +1019,7 @@
   // user-facing Copy button and the Gist upload, so anything left in here would
   // be written into the gist and into any exported JSON that gets pasted
   // somewhere public. Strip secrets at the single choke point.
-  const LOCAL_ONLY_SETTINGS = ['githubToken', 'tornApiKey'];
+  const LOCAL_ONLY_SETTINGS = ['githubToken', 'tornApiKey', 'tornStatsApiKey'];
 
   function sanitizedStore() {
     const settings = { ...STORE.settings };
@@ -1826,7 +1841,7 @@
   // has since been hospitalised by somebody else must stop reading as a target
   // — that is the difference between a live list and a stale one.
   function refreshDepartedTargetStatus() {
-    departedList().forEach((e) => requestTargetStatus(e.xid));
+    departedList().forEach((e) => { requestTargetStatus(e.xid); requestSpyStats(e.xid); });
   }
 
   // A `name:<username>` record for HERO, left over from before hero was bound
@@ -1952,6 +1967,179 @@
   function refreshSeatedTargetStatus() {
     if (!(STORE.settings.tornApiKey || '').trim()) return;
     seatedXids({ includeSittingOut: true }).forEach(requestTargetStatus);
+  }
+
+  // --- Estimated battle stats (v1.47.0) -------------------------------------
+  //
+  // Torn's own API refuses this outright: `selections=battlestats` only ever
+  // returns the KEY OWNER'S OWN stats, never a third party's, at any access
+  // level. There is no way to read another player's strength/defense/speed/
+  // dexterity from Torn directly — a platform limit, not something fixable
+  // here. Asked for directly right after the departure panel's chips landed,
+  // as the natural next question: could battle stats be added the same way.
+  //
+  // What third-party spy sites (TornStats, YATA) provide instead is a
+  // CROWDSOURCED ESTIMATE — other players' own in-game "spy" results on a
+  // target, pooled and served back. This wires in TornStats specifically:
+  // one TornStats-issued API key, versus YATA's linked Torn+YATA key pair —
+  // simpler to authenticate, and neither is more "correct" than the other,
+  // since both are reading the same underlying spy reports.
+  //
+  // UNCONFIRMED, more so than anything else in this file. Every other
+  // "unverified" integration here (Torn's own affiliation/target-status
+  // calls) was at least checked against Torn's PUBLISHED documentation
+  // before shipping. This one could not be: this environment's network
+  // egress is blocked to both tornstats.com and yata.yt outright, so the
+  // field names below (spy.strength/defense/speed/dexterity/total/timestamp)
+  // are written from memory of TornStats' documented v2 shape, not a
+  // fetched doc and not a live response. parseSpyStats fails defensively to
+  // null on anything it doesn't recognise — same discipline as
+  // parseAffiliationProfile and parseTargetStatus — so a wrong guess costs a
+  // missing read, not a crash. This needs a report from someone holding a
+  // real TornStats key before it can be trusted even as far as those two
+  // currently are.
+  //
+  // OFF by default, unlike departureWatch/affiliation which default on: this
+  // pulls a third party's crowdsourced numbers through a service this
+  // project has no relationship with, and the integration is unverified.
+  // Opt in deliberately.
+  function parseSpyStats(json) {
+    if (!json || json.error) return null;
+    if (json.status === false) return null; // TornStats' own "no" for this call
+    const spy = json.spy;
+    // TornStats reports "never spied" as an EMPTY spy — several community
+    // tools use `[]` rather than `{}` for "nothing here" wherever a
+    // same-shaped object is otherwise expected. Read as "no data", not as a
+    // malformed response: the request worked, there's just nothing to show.
+    // Distinguishing that from a genuinely wrong field-name guess is exactly
+    // what a live-key report needs to settle.
+    if (Array.isArray(spy) || !spy || typeof spy !== 'object') return null;
+    const total = Number(spy.total);
+    // No positive total reads the same as "no data". A real spied player's
+    // battle stats are essentially never all-zero past the first few levels,
+    // and treating a malformed 0 as a genuine figure is the exact
+    // confidently-wrong-is-worse-than-none trap this project keeps naming.
+    if (!(total > 0)) return null;
+    return {
+      strength: Number(spy.strength) || 0,
+      defense: Number(spy.defense) || 0,
+      speed: Number(spy.speed) || 0,
+      dexterity: Number(spy.dexterity) || 0,
+      total,
+      // Seconds since epoch, matching Torn's own convention (parseTargetStatus's
+      // `until`) — TornStats mirrors it throughout its documented API.
+      spiedAt: Number(spy.timestamp) || 0,
+    };
+  }
+
+  const spyCache = new Map(); // xid (string) -> {...stats, fetchedAt}
+  // A crowdsourced spy report doesn't change hand to hand — someone's battle
+  // stats are stable for days at a stretch, same reasoning as
+  // AFFIL_REFRESH_MS. Kept OUT of STORE.players and never persisted, unlike
+  // affiliation: this is a third party's ESTIMATE rather than a fact read
+  // from Torn's own API, and letting it survive a reload or ride along in a
+  // Backup/Gist export risks it being read back later as more solid than it
+  // is. A fresh session simply re-fetches.
+  const SPY_REFRESH_MS = 24 * 60 * 60 * 1000;
+
+  // Diagnostics, same shape as the target-status block above and for the
+  // same reason: nobody working on this can see the screen it runs on, and
+  // this integration is even less verified than that one.
+  let spyLastError = '';
+  let spyLastFetchAt = 0;
+  let spyOkCount = 0;
+  let spyFetchStarted = 0;
+  let spyLastKeys = ''; // top-level key NAMES only, never values — scan safety
+
+  async function fetchSpyStats(xid) {
+    const key = (STORE.settings.tornStatsApiKey || '').trim();
+    if (!key) return; // no key configured — the whole feature is a no-op
+    spyFetchStarted++;
+    try {
+      const { json } = await pdaFetchJson('GET',
+        `https://www.tornstats.com/api/v2/${encodeURIComponent(key)}/spy/user/${xid}`);
+      spyLastFetchAt = Date.now();
+      if (json && json.status === false) {
+        spyLastError = 'TornStats: ' + (json.message || 'request refused');
+        return;
+      }
+      const parsed = parseSpyStats(json);
+      if (!parsed) { spyLastError = 'unrecognised API response shape'; return; }
+      spyLastError = '';
+      spyOkCount++;
+      try { spyLastKeys = json ? Object.keys(json).join(',') : '(empty)'; } catch (e) { spyLastKeys = '(unreadable)'; }
+      spyCache.set(String(xid), Object.assign({}, parsed, { fetchedAt: Date.now() }));
+    } catch (e) {
+      spyLastError = 'could not reach tornstats.com';
+    }
+  }
+
+  function spyStatsFor(xid) {
+    return spyCache.get(String(xid)) || null;
+  }
+
+  // Mirrors requestTargetStatus: one player, fetched only if nothing fresh
+  // is cached, gated on the feature being switched on at all (unlike target
+  // status and affiliation, this one has an explicit opt-in toggle on top of
+  // the key check).
+  function requestSpyStats(xid) {
+    if (!STORE.settings.battleStatsEstimate) return;
+    if (!(STORE.settings.tornStatsApiKey || '').trim()) return;
+    if (!xid || isHeroRecord(xid)) return; // hero's own stats aren't the question
+    const cached = spyCache.get(String(xid));
+    if (cached && (Date.now() - cached.fetchedAt) <= SPY_REFRESH_MS) return;
+    fetchSpyStats(xid);
+  }
+
+  function refreshSeatedSpyStats() {
+    if (!STORE.settings.battleStatsEstimate) return;
+    if (!(STORE.settings.tornStatsApiKey || '').trim()) return;
+    seatedXids({ includeSittingOut: true }).forEach(requestSpyStats);
+  }
+
+  // Why the feature is showing nothing — '' when it's actually working. Same
+  // reasoning as targetDiagnostic: a field-name guess this unverified has to
+  // be able to explain its own silence.
+  function spyDiagnostic() {
+    if (!STORE.settings.battleStatsEstimate) {
+      return 'Estimated battle stats is off — Settings → Estimated battle stats.';
+    }
+    if (!(STORE.settings.tornStatsApiKey || '').trim()) {
+      return 'No TornStats API key set — Settings → Estimated battle stats. Without one this does nothing.';
+    }
+    if (spyLastError) return spyLastError;
+    if (spyFetchStarted && !spyLastFetchAt) {
+      return `${spyFetchStarted} lookup(s) started but none have come back yet — `
+        + 'if this persists, the request is hanging rather than failing.';
+    }
+    if (!spyLastFetchAt) return 'No lookup has run yet — sit at a table with other players.';
+    return '';
+  }
+
+  // One compact line for a badge/panel — "≈3.4M BS" — or '' when there's
+  // nothing to show. Same width discipline as the seat badges: the breakdown
+  // and the spied-on date belong in a tooltip (spyStatsDetail), not inline.
+  function spyStatsLabel(xid) {
+    const s = spyStatsFor(xid);
+    return s ? `≈${fmtStatNum(s.total)} BS` : '';
+  }
+
+  function fmtSpyAge(unixSecs) {
+    if (!unixSecs) return '';
+    const mins = Math.floor((Date.now() - unixSecs * 1000) / 60000);
+    if (mins < 1) return 'just now';
+    if (mins < 60) return `${mins}m ago`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return `${hrs}h ago`;
+    return `${Math.floor(hrs / 24)}d ago`;
+  }
+
+  function spyStatsDetail(xid) {
+    const s = spyStatsFor(xid);
+    if (!s) return '';
+    const age = s.spiedAt ? `, spied ${fmtSpyAge(s.spiedAt)}` : '';
+    return `S ${fmtStatNum(s.strength)} / D ${fmtStatNum(s.defense)} / Sp ${fmtStatNum(s.speed)} / `
+      + `Dx ${fmtStatNum(s.dexterity)}${age} — estimate from TornStats, not Torn's own data`;
   }
 
   // ===========================================================================
@@ -4611,6 +4799,10 @@
       // instead of a day, and for every seated opponent — see the function for
       // why it is no longer scoped to sitting-out seats only.
       tickStep('target status', refreshSeatedTargetStatus);
+      // No-op unless BOTH battleStatsEstimate is on AND a TornStats key is
+      // set — this one has an explicit opt-in on top of the key check, since
+      // it's a third party's estimate rather than Torn's own data.
+      tickStep('battle stats', refreshSeatedSpyStats);
       // Early-returns the moment there is nothing to drop, which is every tick
       // after the first one that finds a ghost.
       tickStep('hero ghost', dropStaleHeroGhost);
@@ -4762,6 +4954,13 @@
   function fmtSignedMoney(n) {
     const v = Math.round(Number(n) || 0);
     return (v > 0 ? '+' : '') + fmtMoney(v);
+  }
+
+  // Same k/M/B tiering as fmtMoney, without the $ — battle stat totals are a
+  // raw count, not currency, but the abbreviation rule is identical and
+  // reusing it beats a second implementation of the same ladder.
+  function fmtStatNum(n) {
+    return fmtMoney(n).replace(/^([+-]?)\$/, '$1');
   }
 
   const POSTFLOP_STREETS = ['flop', 'turn', 'river'];
@@ -10044,8 +10243,12 @@
           ? `${r.emoji} ${escapeHtml(r.label)}${r.until ? ', ' + escapeHtml(fmtStatusRemaining(r.until)) + ' left' : ''}`
           : r.ready ? '🎯 attackable' : `❔ ${escapeHtml(r.label)}`;
         const mins = Math.max(1, Math.round(e.agoMs / 60000));
+        // '' with the feature off or unconfigured — spyStatsLabel already
+        // returns '' whenever spyStatsFor has nothing cached, so this row
+        // never has to know WHY, only whether there's something to show.
+        const spyLbl = spyStatsLabel(e.xid);
         return `<div class="tph-depart-row ${cls}" data-xid="${escapeHtml(e.xid)}">
-          <div class="tph-depart-who"><b>${escapeHtml(e.name)}</b>${e.level ? ` <span class="tph-depart-meta">lvl ${e.level}</span>` : ''}${e.stack ? ` <span class="tph-depart-meta">${fmtMoney(e.stack)} chips</span>` : ''}
+          <div class="tph-depart-who"><b>${escapeHtml(e.name)}</b>${e.level ? ` <span class="tph-depart-meta">lvl ${e.level}</span>` : ''}${e.stack ? ` <span class="tph-depart-meta">${fmtMoney(e.stack)} chips</span>` : ''}${spyLbl ? ` <span class="tph-depart-meta" title="${escapeHtml(spyStatsDetail(e.xid))}">${spyLbl}</span>` : ''}
             <span class="tph-depart-meta">left ${mins}m ago</span></div>
           <div class="tph-depart-state">${state}</div>
           <a class="tph-attack-link" href="${attackUrl(e.xid)}" target="_blank" rel="noopener">Attack ↗</a>
@@ -10329,6 +10532,22 @@
         there links to their Torn profile, and there's a direct attack link beside their status and level.
         Leave the key blank and none of this does anything; a public-only key is enough, and it never leaves this
         device (stripped from Backup/Gist exports, same as the GitHub token).</div>
+      <h4>Estimated battle stats</h4>
+      <label><input type="checkbox" class="tph-spy-toggle" ${STORE.settings.battleStatsEstimate ? 'checked' : ''}> Show estimated battle stats on departed players</label><br>
+      <label>TornStats API key: <input type="text" class="tph-spy-api-key" value="${escapeHtml(STORE.settings.tornStatsApiKey)}" placeholder="from tornstats.com — a separate key from the one above" style="width:60%"></label>
+      <div class="tph-target-diag ${spyDiagnostic() ? 'tph-target-diag-bad' : 'tph-target-diag-ok'}">${
+        spyDiagnostic()
+          ? '⚠ ' + escapeHtml(spyDiagnostic())
+          : `✓ TornStats working — ${spyOkCount} lookup${spyOkCount === 1 ? '' : 's'} so far.`
+      }</div>
+      <div style="opacity:.7;margin:2px 0 10px">Off by default, and a separate key from the Torn API one above. Torn's
+        own API only ever returns the KEY OWNER'S OWN battle stats — there is no way to read a third party's
+        strength, defense, speed or dexterity from Torn directly, at any access level. What shows here instead is a
+        CROWDSOURCED ESTIMATE from TornStats: other players' own in-game "spy" results on that target, pooled and
+        served back — never Torn's own data, and only as fresh as the last time somebody actually spied them.
+        <b>This integration is unverified</b> — nobody working on this holds a TornStats key to confirm it against a
+        live response, so treat a number here as a rough guide, not a fact. Needs its own key from tornstats.com,
+        never the same as your Torn API key, and never leaves this device (stripped from Backup/Gist exports too).</div>
       <h4>GitHub Gist sync</h4>
       <label>OAuth App Client ID: <input type="text" class="tph-client-id" value="${escapeHtml(STORE.settings.githubClientId)}" style="width:70%"></label><br>
       <button class="tph-connect">${GistSync.status === 'connected' ? 'Re-sync now' : 'Connect'}</button>
@@ -10558,6 +10777,14 @@
     });
     panel.querySelector('.tph-torn-api-key').addEventListener('change', (e) => {
       STORE.settings.tornApiKey = e.target.value.trim();
+      saveStore();
+    });
+    panel.querySelector('.tph-spy-toggle').addEventListener('change', (e) => {
+      STORE.settings.battleStatsEstimate = e.target.checked;
+      saveStore();
+    });
+    panel.querySelector('.tph-spy-api-key').addEventListener('change', (e) => {
+      STORE.settings.tornStatsApiKey = e.target.value.trim();
       saveStore();
     });
     panel.querySelector('.tph-connect').addEventListener('click', () => {
@@ -10827,6 +11054,27 @@
       });
     L.push('affiliation cache (' + affilRows.length + '):');
     affilRows.forEach((r) => L.push('  ' + r));
+
+    // Estimated battle stats — the least verified integration in this file
+    // (see the section header above parseSpyStats). No values, same rule as
+    // every other credential/estimate dump here — a TornStats total is not a
+    // secret, but the point of these blocks is to check FIELD NAMES, and
+    // keeping the habit absolute is what makes it trustworthy elsewhere.
+    L.push('--- ESTIMATED BATTLE STATS (TornStats, UNVERIFIED) ---');
+    L.push('battleStatsEstimate: ' + !!STORE.settings.battleStatsEstimate
+      + '   tornStatsApiKey set: ' + (!!(STORE.settings.tornStatsApiKey || '').trim())
+      + '   started: ' + spyFetchStarted
+      + '   successful lookups: ' + spyOkCount
+      + '   last fetch: ' + (spyLastFetchAt ? Math.round((Date.now() - spyLastFetchAt) / 1000) + 's ago' : 'never'));
+    L.push('diagnostic: ' + (spyDiagnostic() || 'OK — working'));
+    L.push('last response top-level keys: ' + (spyLastKeys || '(none captured)'));
+    const spyEntries = Array.from(spyCache.keys());
+    L.push('spy cache: ' + spyEntries.length + ' entr' + (spyEntries.length === 1 ? 'y' : 'ies'));
+    spyEntries.forEach((k) => {
+      const s = spyCache.get(k);
+      L.push('  ' + k + ' -> total=' + s.total + ' spiedAt=' + (s.spiedAt ? fmtSpyAge(s.spiedAt) : 'ABSENT'));
+    });
+
     const tickBad = Object.keys(tickErrors);
     L.push('watcher steps failing: ' + (tickBad.length
       ? tickBad.map((k) => k + ' -> ' + tickErrors[k]).join(' | ')
@@ -11340,6 +11588,17 @@
       BOARD_COUNT_FOR,
       targetDiagnostic,
       targetCache,
+      parseSpyStats,
+      spyCache,
+      spyStatsFor,
+      requestSpyStats,
+      refreshSeatedSpyStats,
+      spyDiagnostic,
+      spyStatsLabel,
+      spyStatsDetail,
+      fmtStatNum,
+      fmtSpyAge,
+      SPY_REFRESH_MS,
       attackUrl,
       profileUrl,
       numericHandShorthand,
