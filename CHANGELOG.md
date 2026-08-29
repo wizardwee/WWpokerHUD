@@ -9,6 +9,85 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.45.0
+
+Villains' revealed hands going missing from History. One gap closed, and the
+diagnostic to find the rest.
+
+Reported: *"I want it to show other villains hands who revealed too."*
+
+**Be clear about the shape of this release.** It fixes one gap I could
+positively identify. It does *not* claim to have solved "reveals are missing"
+outright, because a rendered hand cannot tell me which reveals were lost or
+why — and guessing at that is exactly what this project keeps paying for.
+
+### The gap I could identify: a timing race
+
+Reveals reach `hand.shown` by two independent paths — `harvestShownCards`
+polling the seats, and the log's `reveals` line. The seat poll ran once a
+second.
+
+A reveal is visible for a short and **uncontrolled** window. Torn deals the
+next hand as soon as everyone is ready, and it is the *next* hand's blinds
+that settle the previous one. On a fast table the cards could be cleared
+between two polls, and the reveal was then gone for good.
+
+The settlement re-read added in v1.36.0 doesn't rescue it either: by the time
+settlement fires, the new deal has already wiped the seats.
+
+The poll is now 400ms. That costs a handful of seat queries three times a
+second — nothing beside the per-frame layout thrash removed in v1.31.0 — and
+it does no work at all once a hand's reveals are already recorded.
+
+### The diagnostic, because a count isn't actionable
+
+The two paths fail *independently*: the seat poll can miss a fast deal, the
+log can omit a reveals line entirely. So knowing that a hand banked one
+reveal instead of two says nothing about which source to fix.
+
+`hand.shownVia` now records **which path caught each player's reveal** —
+`seat` or `log` — is persisted with the hand, and the deep scan prints the
+last six recorded hands:
+
+```
+reveals banked, last 6 hand(s):
+  20:21:14  reached river  reveals=2 via[log,seat]  players=4
+  20:19:02  reached river  reveals=1 via[log]       players=5
+```
+
+A hand reading `reached river, reveals=1, players=5` quantifies the gap. The
+`via` split says where it is.
+
+This is the same diagnostic-first move that found the `pdaCall` hang
+(v1.38.0), the PDA envelope (v1.40.0) and the poisoned affiliation cache
+(v1.42.0). Each of those times a guess would have been wrong and the
+diagnostic was right.
+
+**What would settle the rest:** a scan taken shortly after a multi-way
+showdown where you *saw* two or more villains reveal. The block above will
+say how many were captured, and by which path.
+
+### On the tests
+
+27 assertions in `test/hand-render.test.js` — `freshHandState` declaring both
+maps (so the writers can't create them ad hoc on some paths and not others),
+both reveals surviving the round trip into stored history with their paths
+intact, both rendering, and a pre-v1.45.0 hand with no `shownVia` still
+rendering rather than throwing.
+
+Verified non-vacuous by dropping `shownVia` from `recordHandHistory` — at
+which point the check **crashed the file** rather than failing cleanly. That
+is worth a line: a crash names a line number and nothing else, where a failed
+assertion names what was expected and what arrived. Readable failure output
+is most of what a test is for, so the assertion now reads defensively and
+reports properly.
+
+### Still open
+
+Carried forward from v1.44.0 unchanged and not re-investigated: the river
+"raise" with nothing to raise, and the illegal preflop raise sequence that
+hints at missed street headers.
+
 ## 1.44.0
 
 Two rendering bugs from one History tab screenshot, both the same class: one

@@ -116,4 +116,68 @@ function hand(o) {
     text.indexOf(viaLog) !== -1 && text.indexOf(viaSeat) !== -1);
 }
 
+// --- reveals survive the round trip into stored history ------------------
+//
+// Reported: villains' revealed hands missing from History. Two independent
+// sources write them (the seat poll and the log's reveals line) and they fail
+// differently — the poll can miss a fast deal, the log can omit the line —
+// so `shownVia` records which one caught each, and recordHandHistory has to
+// carry it through or a scan cannot say where the gap is.
+
+{
+  const T = load();
+  T.STORE = T.emptyStore();
+  T.STORE.players.V = T.emptyPlayer('V', 'JonnySince');
+  T.STORE.players.W = T.emptyPlayer('W', 'Jaywattsdj');
+
+  // freshHandState must declare both fields, or the writers create them ad hoc
+  // on some paths and not others.
+  const fresh = T.freshHandState();
+  t.ok('a fresh hand has a shown map', !!fresh.shown && typeof fresh.shown === 'object');
+  t.ok('and a shownVia map', !!fresh.shownVia && typeof fresh.shownVia === 'object');
+
+  fresh.actions.push({ x: 'V', a: 'call', s: 'river', amt: 100 });
+  fresh.shown.V = '7♥ J♦';
+  fresh.shownVia.V = 'log';
+  fresh.shown.W = 'K♥ K♠';
+  fresh.shownVia.W = 'seat';
+  fresh.winners.push({ xid: 'W', amount: 1000 });
+
+  T.recordHandHistory(fresh);
+  const rec = T.STORE.hands[0];
+  t.ok('the hand was recorded', !!rec);
+  t.eq('BOTH reveals are stored, not just one', Object.keys(rec.shown).length, 2);
+  t.eq('the log-caught one survives', rec.shown.V, '7♥ J♦');
+  t.eq('the seat-caught one survives', rec.shown.W, 'K♥ K♠');
+  // The path is what makes a missing reveal diagnosable rather than just
+  // absent — without it a scan can only say "one reveal", not which source
+  // failed to produce the other.
+  // Read defensively so a MISSING shownVia fails this assertion cleanly
+  // rather than crashing the file — a crash reports nothing useful about
+  // which assertion caught it.
+  t.eq('and so does which path caught each', (rec.shownVia || {}).V, 'log');
+  t.eq('for both of them', (rec.shownVia || {}).W, 'seat');
+
+  // And both render.
+  const text = T.formatHand(rec, null);
+  t.ok('both villains appear in the rendered hand',
+    text.indexOf('7♥ J♦') !== -1 && text.indexOf('K♥ K♠') !== -1);
+}
+
+// --- an older hand with no shownVia must not throw ------------------------
+
+{
+  const T = load();
+  T.STORE = T.emptyStore();
+  T.STORE.players.V = T.emptyPlayer('V', 'Someone');
+  // Every hand recorded before v1.45.0 has shown but no shownVia. The scan and
+  // the renderer both have to treat that as unknown, not as an error.
+  const old = { t: Date.now(), pot: 1, street: 'river', players: ['V'], actions: [],
+    winners: [], board: [], shown: { V: 'A♠ K♦' } };
+  let threw = false;
+  try { T.formatHand(old, null); T.formatHandHtml(old, null); } catch (e) { threw = true; }
+  t.eq('a pre-shownVia hand still renders', threw, false);
+  t.ok('and still shows its reveal', T.formatHand(old, null).indexOf('A♠ K♦') !== -1);
+}
+
 process.exit(t.report());

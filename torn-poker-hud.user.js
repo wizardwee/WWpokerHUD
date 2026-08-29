@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.44.0
+// @version      1.45.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,49 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.45.0 - Villains' revealed hands going missing from History. ONE gap closed,
+ *          and the diagnostic to find the rest. Reported: "I want it to show
+ *          other villains hands who revealed too."
+ *            - BE CLEAR ABOUT THE SHAPE: this fixes one gap I could positively
+ *              identify. It does NOT claim to have solved "reveals are missing"
+ *              outright — a rendered hand cannot say which reveals were lost or
+ *              why, and guessing at that is what this project keeps paying for.
+ *            - THE GAP: a timing race. Reveals reach hand.shown by two
+ *              independent paths — harvestShownCards polling the seats, and the
+ *              log's "reveals" line — and the seat poll ran once a SECOND. A
+ *              reveal is visible for a short and UNCONTROLLED window: Torn
+ *              deals the next hand as soon as everyone is ready, and it is the
+ *              NEXT hand's blinds that settle the previous one. On a fast table
+ *              the cards could be cleared between two polls and the reveal was
+ *              gone for good. The settlement re-read from v1.36.0 does not
+ *              rescue it: by then the new deal has wiped the seats.
+ *            - Poll is now 400ms (SHOWDOWN_POLL_MS). A handful of seat queries
+ *              three times a second, nothing beside the per-frame layout thrash
+ *              removed in v1.31.0, and no work at all once a hand's reveals are
+ *              already recorded.
+ *            - THE DIAGNOSTIC, because a COUNT is not actionable: the two paths
+ *              fail INDEPENDENTLY (the poll can miss a fast deal, the log can
+ *              omit the line), so "banked 1 of 2" says nothing about which to
+ *              fix. New hand.shownVia records WHICH path caught each reveal,
+ *              is persisted with the hand, and the scan prints the last six as
+ *              "reached <street>  reveals=N via[log,seat]  players=M". The
+ *              count quantifies the gap; the via split says where it is.
+ *            - Same diagnostic-first move that found the pdaCall hang (1.38.0),
+ *              the PDA envelope (1.40.0) and the poisoned affiliation cache
+ *              (1.42.0). Each time a guess would have been wrong.
+ *            - WHAT SETTLES THE REST: a scan taken shortly after a multi-way
+ *              showdown where two or more villains were SEEN to reveal.
+ *            - 27 assertions in test/hand-render.test.js. Verified non-vacuous
+ *              by dropping shownVia from recordHandHistory — at which point the
+ *              check CRASHED rather than failing cleanly. Worth recording: a
+ *              crash names a line number and nothing else, where a failed
+ *              assertion names what was expected and what arrived. Readable
+ *              failure output is most of what a test is for, so it now reads
+ *              defensively and reports properly.
+ *            - STILL OPEN, carried forward unchanged from 1.44.0: the river
+ *              "raise" with nothing to raise, and the illegal preflop raise
+ *              sequence hinting at missed street headers.
  *
  * 1.44.0 - Two rendering bugs from one History screenshot, both the same class:
  *          one fact written or shown twice, differently.
@@ -111,59 +154,6 @@
  *              so the alert can be softened without losing the list.
  *            - 30 assertions in test/departure-watch.test.js.
  *
- * 1.42.0 - The field names were right. The bug was a day-long cache holding
- *          data from when the transport was broken.
- *            - THE DIAGNOSTIC DID ITS JOB. v1.41.0 added the nested key names
- *              rather than guessing again, and one scan later:
- *              faction{position,faction_id,days_in_faction,faction_name,
- *              faction_tag,faction_tag_image} married{spouse_id,spouse_name,
- *              duration} — all present, exactly as parseAffiliationProfile
- *              expects. The v1.8.0 guesses were correct all along. Yet all five
- *              seated players read factionId=ABSENT, and that line only prints
- *              when affilFetchedAt IS set: the fetch completed and stored
- *              nothing.
- *            - THE SAME DANGEROUS DEFAULT AS v1.40.0, ONE FUNCTION OVER, and it
- *              survived that release because only parseTargetStatus was looked
- *              at. parseAffiliationProfile read `json.faction || {}` and
- *              manufactured {factionId: 0, factionName: '', spouseXid: 0} from
- *              a response it never understood. During the broken-envelope era
- *              that ran on EVERY call, and a non-null return makes
- *              fetchAffiliation stamp affilFetchedAt — so the fabricated "no
- *              faction, no spouse" was cached for AFFIL_REFRESH_MS, 24 HOURS.
- *              The badges were dead because of a day-long cache of invented
- *              data, not because the field names were wrong.
- *            - FIX ONE: the parse refuses a response carrying none of faction /
- *              married / player_id. The discriminator matters — Torn returns
- *              `faction` WITH faction_id: 0 for a genuinely factionless player,
- *              so the key is present either way, which is exactly what
- *              separates "read a profile, no faction" from "never read one".
- *            - FIX TWO: repairAffiliationCache() clears every affilFetchedAt
- *              stamp once at init(). The parse fix alone was NOT enough — the
- *              badges would stay dead up to a day afterwards and read as the
- *              fix having failed. Clears the TIMESTAMP only, never the records:
- *              a cache repair, not a data purge. From init(), not migrateStore
- *              (the documented TDZ hazard), made safe by a STORE flag rather
- *              than by idempotence, same as backfillBoardTexture.
- *            - FOUR TIMES NOW a test here asserted the implementation instead
- *              of the requirement, so it agreed with the bug and stayed green:
- *              v1.0.1 (asserted against its own copy of the regex), v1.35.0
- *              (the 4th raise called "4B" when it is a 5-bet), v1.40.0
- *              ("defaults to Okay/0"), and this ("fields just read 0/empty").
- *              THE TELL IS THE TEST NAME describing an implementation detail —
- *              "defaults to", "still parses", "fields just read" — rather than
- *              stating a requirement. All four read that way.
- *            - Also fixed a flaky test of my own: equity-slicing ran its
- *              DIRECTIONAL assertion at EQUITY_ITERS_MIN (100), where two
- *              independent runs carry ~±5pp each — enough to invert the
- *              comparison, and it failed once this session. Raised to 3000 for
- *              that block, matching equity-ranges' existing precedent.
- *            - ALSO CONFIRMED: TWO hospitalised opponents at once with
- *              different countdowns (18m, 44m) and matching descriptions — a
- *              stronger varied-data proof than last release. pot dom=log for
- *              the second scan running. communityCards matched 3 with a flop up
- *              (v1.40.0's correction holding). heroGhost none, watcher steps
- *              none, three reveal rows parsed. srOnly confirmed a FOURTH time.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -225,7 +215,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.44.0';
+  const HUD_VERSION = '1.45.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -2366,6 +2356,7 @@
       winners: [],             // {xid, amount}[] — supports split pots, applied at hand end
       actions: [],             // {x,a,amt,s}[] — replayable action log for the History tab
       shown: {},               // xid -> cards revealed at showdown, as display text
+      shownVia: {},            // xid -> 'seat' | 'log', which path caught the reveal
       shownCards: {},          // xid -> parsed [{rank,suit},{rank,suit}] for range tracking
       sbXid: null,
       bbXid: null,
@@ -2557,6 +2548,10 @@
     return out.slice(0, 2);
   }
 
+  // Fast enough to catch a reveal before the next deal clears it — see the
+  // interval that uses it for why one second was not.
+  const SHOWDOWN_POLL_MS = 400;
+
   // Watch the seats for revealed hands and record them on the live hand.
   //
   // Runs on the poll rather than at settlement: by the time the next hand's
@@ -2582,6 +2577,11 @@
       // reported screenshot showed both styles inside a single hand, one line
       // apart. Two writers, one field, one format.
       if (!currentHand.shown[xid]) currentHand.shown[xid] = cardsGlyphText(cards);
+      // Which path caught it. Two independent sources feed this field and they
+      // fail in different ways — the seat poll can miss a fast deal, the log
+      // can omit a reveals line entirely — so a count of reveals is not enough
+      // to tell which one to fix. Recorded per player, surfaced in the scan.
+      currentHand.shownVia[xid] = currentHand.shownVia[xid] || 'seat';
       // WTSD is otherwise only counted off the log's reveal line, so a table
       // that never writes one recorded nobody as having gone to showdown.
       if (!currentHand.countedShowdown.has(xid)) {
@@ -3119,6 +3119,7 @@
       // text is kept only when the cards did NOT parse, where it is the only
       // evidence there is and a wrong-looking string beats no string.
       hand.shown[xid] = revealed.length === 2 ? cardsGlyphText(revealed) : squish(m[2], 40);
+      hand.shownVia[xid] = hand.shownVia[xid] || 'log';
       logAction(hand, xid, 'shows', 0);
       saveStore();
       return;
@@ -3754,6 +3755,7 @@
       actions: hand.actions,
       winners: hand.winners,
       shown: hand.shown,
+      shownVia: hand.shownVia || {},
       heroCards: hand.heroCards || null,
       // Community cards as they stood at the end of the hand — was tracked
       // live on hand.board (see the flop/turn/river log handler) but never
@@ -4651,8 +4653,20 @@
 
     // Showdown cards live on the table for only a few seconds before the next
     // deal clears them, so this has to poll rather than read at settlement.
-    // Same 1s cadence as the log scan, and idempotent — first sighting wins.
-    setInterval(harvestShownCards, 1000);
+    // Idempotent — first sighting wins.
+    //
+    // 400ms, not the log scan's 1000ms. A reveal is visible for a short and
+    // UNCONTROLLED window: Torn deals the next hand as soon as everyone is
+    // ready, and the next hand's blinds are what settle the previous one. At
+    // one second a fast table could clear the cards between two polls, and the
+    // reveal was then gone for good — the settlement re-read added in v1.36.0
+    // does not save it, because by then the deal has already wiped the seats.
+    // Reported as villains' revealed hands missing from History.
+    //
+    // The cost is a handful of seat queries three times a second, which is
+    // nothing beside the per-frame layout thrash removed in v1.31.0, and it
+    // does no work at all once a hand's reveals are already recorded.
+    setInterval(harvestShownCards, SHOWDOWN_POLL_MS);
 
     // Same cadence, same reason: the board can be short when the log's flop
     // line was already on screen as the snapshot primed. Repairing it LIVE
@@ -10883,6 +10897,20 @@
     L.push('seats showing face-up cards: ' + (faceUp.join(' ') || 'none right now'));
     L.push('shownCards captured this hand: '
       + (currentHand ? Object.keys(currentHand.shownCards).join(',') || 'none' : 'no live hand'));
+    // Reveals actually BANKED, by path, over the last few recorded hands.
+    // Counting reveals alone cannot say which source to fix: the seat poll can
+    // miss a fast deal, the log can omit a reveals line entirely, and they fail
+    // independently. A hand showing "2 at showdown, 1 revealed" quantifies the
+    // gap; the seat/log split says where it is.
+    const recentHands = (STORE.hands || []).slice(0, 6);
+    L.push('reveals banked, last ' + recentHands.length + ' hand(s):');
+    recentHands.forEach((h) => {
+      const keys = Object.keys(h.shown || {});
+      const via = keys.map((k) => (h.shownVia || {})[k] || '?').join(',');
+      L.push('  ' + new Date(h.t).toLocaleTimeString() + '  reached ' + (h.street || '?')
+        + '  reveals=' + keys.length + (keys.length ? ' via[' + via + ']' : '')
+        + '  players=' + ((h.players || []).length));
+    });
     L.push('reveal rows in log: ' + revealRows.length);
     revealRows.slice(0, 4).forEach((r) => {
       const line = cleanLogLine(r);
