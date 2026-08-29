@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.43.0
+// @version      1.44.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,45 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.44.0 - Two rendering bugs from one History screenshot, both the same class:
+ *          one fact written or shown twice, differently.
+ *            - TWO FORMATS FOR THE SAME CARDS, one line apart in a single hand:
+ *              "showdown: JonnySince shows [7♥, J♦]" directly above "showdown:
+ *              Jaywattsdj shows KH KS". hand.shown has TWO writers and they
+ *              disagreed — harvestShownCards built its own string from parsed
+ *              cards, the log's reveal handler stored the raw log text. Neither
+ *              wrong alone; together they made one hand look like two different
+ *              programs wrote it. Both now go through cardsGlyphText, the same
+ *              renderer the board uses, so they cannot diverge. Raw log text
+ *              survives only when the cards fail to parse, where it is the only
+ *              evidence there is.
+ *            - A BARE "shows" MID-STREET. logAction records 'shows' as an
+ *              action, so the street list rendered "JonnySince shows" inline —
+ *              no amount, reading as truncated — and the showdown line then said
+ *              it again two lines below, that time with the cards. In the
+ *              screenshot twice: trailing the river of the big hand, and as an
+ *              ENTIRE street ("RIVER  HaVoC_HeLL shows") in the hand below.
+ *              A reveal is not a betting action: filtered from the street list,
+ *              and a street left with no betting action is dropped rather than
+ *              rendered empty.
+ *            - Applied to formatHand AND formatHandHtml. The clipboard and the
+ *              screen must not describe the same hand differently — the entire
+ *              reason those two exist as a pair, and exactly where a fix lands
+ *              in one and not the other.
+ *            - STILL OPEN, recorded rather than guessed at: the same screenshot
+ *              has a river reading "Jaywattsdj raise $165.8M" when the turn was
+ *              check/check — A RAISE WITH NOTHING TO RAISE. Either an opening
+ *              river BET by the other player was missed (the missed-log-line
+ *              family from 1.36.0) or Torn words some opening bets as "raised",
+ *              and a rendered hand cannot tell those apart. The hand below shows
+ *              a related oddity: "HaVoC_HeLL raise $56.5M" recorded AFTER
+ *              "Wilkee_ raise $67.4M" on one preflop line, not a legal raise
+ *              sequence, hinting the flop/turn headers were missed and their
+ *              actions filed under preflop. What settles it: the raw log wording
+ *              of such a river, which the scan's "raised" probe prints verbatim.
+ *            - 16 assertions in test/hand-render.test.js, each checking both
+ *              renderers.
  *
  * 1.43.0 - Departure watch: the seat vanishes, the target doesn't. Asked for
  *          directly — "if I see a player who is not in hospital suddenly leave
@@ -125,49 +164,6 @@
  *              (v1.40.0's correction holding). heroGhost none, watcher steps
  *              none, three reveal rows parsed. srOnly confirmed a FOURTH time.
  *
- * 1.41.0 - A clean scan. A confirmation release, not a fix.
- *            - THE TORN API RETURNS REAL DATA, first time since v1.8.0. Top-
- *              level keys are Torn's actual profile shape (rank,level,honor,
- *              ...,status,job,faction,married,last_action,...), and `level` IS
- *              at top level — json.level was right all along and only read 0
- *              because the envelope was being parsed instead of the body.
- *            - The proof it stopped fabricating is not that it succeeds, it is
- *              that the answers now VARY: state="Hospital" level=43 BLOCKED
- *              (in hospital, 23m) desc="In hospital for 22 mins", beside four
- *              genuinely-Okay players at levels 85/79/45/89. Against v1.39.0's
- *              uniform wall of five invented "Okay"s. 10 started, 10 succeeded.
- *            - POT MISMATCH DIAGNOSED BY ITS ABSENCE: "pot: dom=$1.8M
- *              log=$1.8M". Nothing was changed to achieve that, which is the
- *              point. v1.39.0 reasoned the gap was the blinds, whose log lines
- *              were on screen at load and never counted; this scan was taken on
- *              a hand watched from the start and the two agree exactly. That
- *              turns a hypothesis into a confirmed diagnosis and reclassifies
- *              the mismatch as a joined-mid-hand condition, not a defect.
- *            - Also holding: heroGhost none, watcher steps failing none, table
- *              named. And communityCards 0 again — CORRECT this time, the scan
- *              being preflop with no board up. The v1.40.0 correction behaving
- *              as corrected.
- *            - THE ONE CHANGE, a diagnostic not a fix. The 🔗/💍 affiliation
- *              badges (v1.8.0) are the last unverified feature, and were broken
- *              by the same envelope bug for their whole life, so their field
- *              names have never been checked against a real reply. The scan
- *              proves `faction` and `married` exist at TOP level but says
- *              nothing about what is inside them, which is what
- *              parseAffiliationProfile reads. The scan now records the NESTED
- *              key names under both, plus an affiliation-cache block showing
- *              what was actually stored per seated player (or ABSENT / never
- *              fetched). Needed because the badge only lights when two SEATED
- *              players match — with no faction-mate at the table an absent
- *              badge proves nothing, and this separates "read fine, nobody
- *              matches" from "never read". Names only, never values.
- *            - srOnly confirmed a THIRD time ("Donut called $500,000" — actor,
- *              verb and amount in one element). Still not acted on: needs dedup
- *              by (actor, action, street) against the visual log, which the
- *              snapshot scanner does not solve — it dedups a source against its
- *              own history, not two sources against each other.
- *            - No new tests: this is runDeepScan output, which the harness
- *              cannot drive (inert DOM, no network). Said rather than padded.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -229,7 +225,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.43.0';
+  const HUD_VERSION = '1.44.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -2579,9 +2575,13 @@
       currentHand.shownCards[xid] = cards;
       // Mirror into `shown` so the History tab shows it too — that path only
       // ever had log text, which is why History was blank as well.
-      if (!currentHand.shown[xid]) {
-        currentHand.shown[xid] = cards.map((c) => c.rank + c.suit.toUpperCase()).join(' ');
-      }
+      //
+      // cardsGlyphText, the SAME renderer the board uses, because this and the
+      // log path below both write this field and were formatting it
+      // differently: one produced "KH KS" and the other "[7♥, J♦]", and a
+      // reported screenshot showed both styles inside a single hand, one line
+      // apart. Two writers, one field, one format.
+      if (!currentHand.shown[xid]) currentHand.shown[xid] = cardsGlyphText(cards);
       // WTSD is otherwise only counted off the log's reveal line, so a table
       // that never writes one recorded nobody as having gone to showdown.
       if (!currentHand.countedShowdown.has(xid)) {
@@ -3109,12 +3109,16 @@
         hand.countedShowdown.add(xid);
         getPlayer(xid).wtsd += 1;
       }
-      hand.shown[xid] = squish(m[2], 40);
       // Parsed cards kept separately and banked at SETTLEMENT, not here: at this
       // point hand.winners is still empty (the "wins" lines come after the
       // reveals), so recording now would score every showdown as a loss.
       const revealed = parseCardsFromText(m[2]).slice(0, 2);
       if (revealed.length === 2) hand.shownCards[xid] = revealed;
+      // Rendered through cardsGlyphText when the cards parsed, so this matches
+      // what the seat-harvest path writes — see the note there. The raw log
+      // text is kept only when the cards did NOT parse, where it is the only
+      // evidence there is and a wrong-looking string beats no string.
+      hand.shown[xid] = revealed.length === 2 ? cardsGlyphText(revealed) : squish(m[2], 40);
       logAction(hand, xid, 'shows', 0);
       saveStore();
       return;
@@ -3847,13 +3851,17 @@
     (h.actions || []).forEach((a) => { (byStreet[a.s] = byStreet[a.s] || []).push(a); });
     ['preflop', 'flop', 'turn', 'river'].forEach((street) => {
       if (!byStreet[street]) return;
-      const acts = byStreet[street].map((a) => {
+      // 'shows' is a reveal, not a betting action, and the showdown lines below
+      // already report it WITH the cards. Left in, it rendered a bare
+      // "JonnySince shows" mid-street — an action with no amount that reads as
+      // truncated — and then said the same thing again two lines down.
+      const acts = byStreet[street].filter((a) => a.a !== 'shows').map((a) => {
         const nm = playerDisplayName(a.x);
         const mark = (focusXid && a.x === focusXid) ? '*' : '';
         const amt = a.amt ? ` ${fmtMoney(a.amt)}` : '';
         return `${mark}${nm} ${a.a}${amt}`;
       }).join(', ');
-      lines.push(`  ${street}: ${acts}`);
+      if (acts) lines.push(`  ${street}: ${acts}`);
     });
     Object.keys(h.shown || {}).forEach((xid) => {
       lines.push(`  showdown: ${playerDisplayName(xid)} shows ${h.shown[xid]}`);
@@ -3913,14 +3921,19 @@
     (h.actions || []).forEach((a) => { (byStreet[a.s] = byStreet[a.s] || []).push(a); });
     ['preflop', 'flop', 'turn', 'river'].forEach((street) => {
       if (!byStreet[street]) return;
-      const acts = byStreet[street].map((a) => {
+      // See formatHand: 'shows' is filtered here too, and a street left with no
+      // betting action is dropped rather than rendered empty. The tab and the
+      // clipboard must not describe the same hand differently.
+      const acts = byStreet[street].filter((a) => a.a !== 'shows').map((a) => {
         const amt = a.amt ? ` ${fmtMoney(a.amt)}` : '';
         const txt = `${escapeHtml(playerDisplayName(a.x))} ${escapeHtml(a.a)}${amt}`;
         return (focusXid && a.x === focusXid)
           ? `<span class="tph-hh-me" style="${HH.me}">${txt}</span>` : txt;
       }).join(', ');
-      parts.push(`<div class="tph-hh-row" style="${HH.row}">`
-        + `<span class="tph-hh-st" style="${HH.street}">${street}</span>${acts}</div>`);
+      if (acts) {
+        parts.push(`<div class="tph-hh-row" style="${HH.row}">`
+          + `<span class="tph-hh-st" style="${HH.street}">${street}</span>${acts}</div>`);
+      }
     });
 
     Object.keys(h.shown || {}).forEach((xid) => {

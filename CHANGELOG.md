@@ -9,6 +9,77 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.44.0
+
+Two rendering bugs from one History tab screenshot, both the same class: one
+fact written or shown twice, differently.
+
+### Two formats for the same cards, one line apart
+
+The screenshot had this, inside a single hand:
+
+```
+showdown: JonnySince shows [7♥, J♦]
+showdown: Jaywattsdj shows KH KS
+```
+
+`hand.shown` has **two writers**, and they disagreed. `harvestShownCards`
+built its own string from parsed cards — `KH KS`. The log's reveal handler
+stored the raw log text instead — `[7♥, J♦]`. Neither was wrong on its own;
+together they made one hand look like two different programs had written it.
+
+Both now go through `cardsGlyphText`, the same renderer the board already
+uses, so the two writers cannot diverge. The raw log text survives only when
+the cards fail to parse — there it is the only evidence there is, and a
+odd-looking string beats no string.
+
+### A bare "shows" mid-street
+
+`logAction` records `shows` as an action, so the street list rendered
+`JonnySince shows` inline — an action with no amount, reading as truncated —
+and then the showdown line said the same thing two lines below, that time
+with the cards.
+
+Visible twice in the screenshot: once trailing the river line of the big
+hand, and once as an entire street in the hand beneath it
+(`RIVER   HaVoC_HeLL shows`).
+
+A reveal is not a betting action. It is now filtered out of the street list,
+and a street left with no betting action at all is dropped rather than
+rendered empty.
+
+Applied to `formatHand` **and** `formatHandHtml`. The clipboard and the
+screen must not describe the same hand differently — which is the entire
+reason those two exist as a pair, and exactly where a fix lands in one and
+not the other.
+
+Verified against the hand from the screenshot: the river now reads
+`Jaywattsdj raise $165.8M, JonnySince call $165.8M` with nothing trailing,
+and the two showdowns read `7♥ J♦` and `K♥ K♠` in one style.
+
+### Still open, and not claimed as fixed
+
+The same screenshot shows something I could not root-cause, so it is recorded
+rather than guessed at.
+
+The river reads `Jaywattsdj raise $165.8M` — but the turn was check/check, so
+nobody had bet. **A raise with nothing to raise.** Two candidate
+explanations, and a rendered hand cannot tell them apart: either an opening
+river *bet* by the other player was missed (the same missed-log-line family
+as the lost flop in v1.36.0), or Torn words some opening bets as "raised".
+
+The hand below it shows a related oddity — `HaVoC_HeLL raise $56.5M` recorded
+*after* `Wilkee_ raise $67.4M` on the same preflop line, which is not a legal
+raise sequence. That hints the flop and turn street headers were missed and
+their actions filed under preflop, which would be the same cause again.
+
+What would settle it: the raw log wording of a river where this happens. The
+deep scan's `raised` probe prints it verbatim.
+
+16 assertions in `test/hand-render.test.js`, every one checking both
+renderers. Both fixes proven non-vacuous by reverting each and watching the
+right assertions fail.
+
 ## 1.43.0
 
 Departure watch: the seat vanishes, the target doesn't.
