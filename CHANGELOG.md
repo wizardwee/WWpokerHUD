@@ -9,6 +9,75 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.48.0
+
+Refactor, no behaviour change: one API probe instead of three copies of the
+same one.
+
+Asked directly: *"refactor and compact?"*
+
+### The big one is off the table, and stays off
+
+Splitting into modules needs a bundler, and the install model is "Torn PDA
+fetches one file whole" — that's the constraint the single file exists to
+satisfy, not neglect. Unchanged from what CLAUDE.md already says.
+
+### What was actually wrong
+
+v1.34.0 built the "explain your own silence" apparatus for target status,
+after a live report of exactly that failure (*"I don't see anything"*).
+v1.47.0 then copied the whole thing **verbatim** for the spy lookup: ten
+parallel module-level `let`s in two identical sets, two identical
+diagnostics, two identical fetch bodies. Both of those are mine, one commit
+apart — this is cleaning up after myself, not inherited debt.
+
+`apiProbe()` now owns the five counters and the diagnostic state machine;
+`probeFetch()` owns the fetch/parse/cache body. The wording is the part that
+must never drift between two features: a diagnostic that reads differently
+for two lookups failing the same way is worse than no diagnostic, because it
+implies a distinction that isn't there.
+
+### It did not compact anything
+
+**+5 net code lines.** Saying otherwise would be false. The parameter surface
+of a shared helper costs about what the duplication did; the file grew 48
+total lines, and all of it is the comment explaining why the shared thing
+exists.
+
+The win is not size. It's that a *third* copy is now cheap, and the two
+existing ones can no longer drift apart.
+
+### Where it deliberately stopped
+
+- `requestTargetStatus` / `refreshSeatedTargetStatus` and their spy
+  equivalents are four short, obvious functions differing only by gate,
+  cache, refresh window and fetcher. Folding them would trade six readable
+  lines for a four-parameter factory you have to go read first. The +5 result
+  above is the warning that at this granularity the abstraction costs what it
+  saves.
+- `fetchAffiliation` stays out entirely: no counters, and it writes to
+  `STORE.players` rather than a Map. Forcing it through would mean inventing
+  state it doesn't have.
+
+### A real hole, found while checking the refactor was covered
+
+Deleting `probe.fetchStarted++` failed **nothing** in the entire suite.
+
+That counter is what separates "the request is hanging" from "no request was
+ever made" — the exact distinction that made the v1.38.0 `pdaCall` hang take
+a live deep scan to find, and it is now shared by two features, so a break
+there costs both.
+
+`test/api-probe.test.js` covers it: 31 assertions driving the real
+`probeFetch` against a replaced `fetch` on the sandbox global — the
+**dependency**, not a seam stub. That distinction is this repo's most
+repeated lesson: reassigning a seam export does not rebind the module's own
+function, so a test written that way passes against code it never called.
+
+Verified non-vacuous against two sabotages before committing: removing
+`fetchStarted++` fails 3 assertions, removing the clear-on-success fails 2,
+both with messages naming what was expected.
+
 ## 1.47.0
 
 Estimated battle stats on the departure panel, via TornStats.

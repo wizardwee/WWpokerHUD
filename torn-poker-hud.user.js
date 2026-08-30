@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.47.0
+// @version      1.48.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,41 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.48.0 - Refactor, no behaviour change: one API probe instead of three
+ *          copies of the same one. Asked directly ("refactor and compact?").
+ *            - WHAT WAS ACTUALLY WRONG. v1.34.0 built the "explain your own
+ *              silence" apparatus for target status after a live report of
+ *              exactly that failure. v1.47.0 then copied the whole thing
+ *              VERBATIM for the spy lookup: ten parallel module-level `let`s
+ *              in two identical sets, two identical diagnostics, two
+ *              identical fetch bodies. Both mine, one commit apart.
+ *            - Now apiProbe() owns the five counters and the diagnostic
+ *              state machine; probeFetch() owns the fetch/parse/cache body.
+ *              The wording is the part that must never drift between two
+ *              features: a diagnostic that reads differently for two lookups
+ *              failing the same way implies a distinction that isn't there.
+ *            - IT DID NOT COMPACT ANYTHING, and saying otherwise would be
+ *              false: +5 net code lines. The parameter surface of a shared
+ *              helper costs about what the duplication did. The win is that
+ *              a THIRD copy is now cheap and the two existing ones cannot
+ *              drift — not size.
+ *            - STOPPED SHORT on purpose: the request/refreshSeated pairs are four
+ *              short obvious functions differing by gate/cache/window, and
+ *              folding them would trade six readable lines for a
+ *              four-parameter factory you have to go read. fetchAffiliation
+ *              is out too — no counters, writes to STORE.players not a Map,
+ *              so it would need state invented for it.
+ *            - FOUND A REAL HOLE while checking the refactor was covered:
+ *              deleting `probe.fetchStarted++` failed NOTHING in the whole
+ *              suite. That is the counter separating "the request is
+ *              hanging" from "no request was ever made" — the exact
+ *              distinction that made the v1.38.0 pdaCall hang take a live
+ *              deep scan to find, now shared by two features.
+ *              test/api-probe.test.js drives the real probeFetch against a
+ *              replaced `fetch` on the sandbox global — the DEPENDENCY, not
+ *              a seam stub, which does not rebind the module's own function.
+ *              31 assertions, verified non-vacuous against two sabotages.
  *
  * 1.47.0 - Estimated battle stats on the departure panel, via TornStats. Asked
  *          directly, right after the chips fix: whether battle stats could be
@@ -89,49 +124,6 @@
  *              that pins the getPlayer/STORE.players[xid] distinction
  *              directly: reading the list must not move lastSeen.
  *
- * 1.45.0 - Villains' revealed hands going missing from History. ONE gap closed,
- *          and the diagnostic to find the rest. Reported: "I want it to show
- *          other villains hands who revealed too."
- *            - BE CLEAR ABOUT THE SHAPE: this fixes one gap I could positively
- *              identify. It does NOT claim to have solved "reveals are missing"
- *              outright — a rendered hand cannot say which reveals were lost or
- *              why, and guessing at that is what this project keeps paying for.
- *            - THE GAP: a timing race. Reveals reach hand.shown by two
- *              independent paths — harvestShownCards polling the seats, and the
- *              log's "reveals" line — and the seat poll ran once a SECOND. A
- *              reveal is visible for a short and UNCONTROLLED window: Torn
- *              deals the next hand as soon as everyone is ready, and it is the
- *              NEXT hand's blinds that settle the previous one. On a fast table
- *              the cards could be cleared between two polls and the reveal was
- *              gone for good. The settlement re-read from v1.36.0 does not
- *              rescue it: by then the new deal has wiped the seats.
- *            - Poll is now 400ms (SHOWDOWN_POLL_MS). A handful of seat queries
- *              three times a second, nothing beside the per-frame layout thrash
- *              removed in v1.31.0, and no work at all once a hand's reveals are
- *              already recorded.
- *            - THE DIAGNOSTIC, because a COUNT is not actionable: the two paths
- *              fail INDEPENDENTLY (the poll can miss a fast deal, the log can
- *              omit the line), so "banked 1 of 2" says nothing about which to
- *              fix. New hand.shownVia records WHICH path caught each reveal,
- *              is persisted with the hand, and the scan prints the last six as
- *              "reached <street>  reveals=N via[log,seat]  players=M". The
- *              count quantifies the gap; the via split says where it is.
- *            - Same diagnostic-first move that found the pdaCall hang (1.38.0),
- *              the PDA envelope (1.40.0) and the poisoned affiliation cache
- *              (1.42.0). Each time a guess would have been wrong.
- *            - WHAT SETTLES THE REST: a scan taken shortly after a multi-way
- *              showdown where two or more villains were SEEN to reveal.
- *            - 27 assertions in test/hand-render.test.js. Verified non-vacuous
- *              by dropping shownVia from recordHandHistory — at which point the
- *              check CRASHED rather than failing cleanly. Worth recording: a
- *              crash names a line number and nothing else, where a failed
- *              assertion names what was expected and what arrived. Readable
- *              failure output is most of what a test is for, so it now reads
- *              defensively and reports properly.
- *            - STILL OPEN, carried forward unchanged from 1.44.0: the river
- *              "raise" with nothing to raise, and the illegal preflop raise
- *              sequence hinting at missed street headers.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -193,7 +185,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.47.0';
+  const HUD_VERSION = '1.48.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -1561,26 +1553,96 @@
     return `${Math.floor(hrs / 24)}d ${hrs % 24}h`;
   }
 
+  // --- API probes: one shape for every keyed lookup (v1.48.0) --------------
+  //
+  // Every API-backed feature here needs the same five counters and the same
+  // "explain your own silence" diagnostic, for the same reason: nobody
+  // working on this can see the screen it runs on, so a feature that shows
+  // nothing has to be able to say WHY. v1.34.0 built that for target status
+  // after a live report of exactly that failure ("I don't see anything"),
+  // and v1.47.0 copied the whole apparatus verbatim for the spy lookup —
+  // ten parallel module-level `let`s in two identical sets, two identical
+  // diagnostics, two identical fetch bodies.
+  //
+  // Copying it a THIRD time is what this exists to stop. The counters and
+  // the diagnostic wording are the part that must never drift between
+  // features: a diagnostic that reads differently for two lookups failing
+  // the same way is worse than no diagnostic, because it implies a
+  // distinction that isn't there.
+  //
+  // Deliberately NOT folded in: fetchAffiliation. It carries no counters at
+  // all, and writes to STORE.players rather than to a Map — forcing it
+  // through this would mean inventing state it doesn't have, which is the
+  // "one abstraction too far" that makes a shared helper worse than the
+  // duplication it replaced.
+  function apiProbe(noLookupHint) {
+    return {
+      lastError: '',
+      lastFetchAt: 0,
+      okCount: 0,
+      // Counted BEFORE the await, where lastFetchAt is only set after it.
+      // The gap between the two is the diagnosis: "started 3, completed 0"
+      // is a request that is hanging, "started 0" is one that was never
+      // made. Not being able to tell those apart is what made the pdaCall
+      // hang (v1.38.0) take a live deep scan to find.
+      fetchStarted: 0,
+      // TOP-LEVEL KEY NAMES from the last successful response — names only,
+      // never values, because the deep scan gets pasted into chats.
+      // Recorded because the v1.38.0 scan showed every cached entry with
+      // level=0 while status.state parsed correctly: the response IS the
+      // profile shape and `level` simply is not where parseTargetStatus
+      // looks. Guessing a second field name blind is what produced the
+      // first wrong guess; this makes the next scan answer it.
+      lastKeys: '',
+      // `gate` is whatever must be true before a lookup is even attempted
+      // (a key, a toggle) — returns its own message, or '' to carry on.
+      // Passed in rather than baked here because each feature is switched
+      // off in a different way, and naming the exact Settings section is
+      // most of what makes the message actionable.
+      diagnostic(gate) {
+        const blocked = gate ? gate() : '';
+        if (blocked) return blocked;
+        if (this.lastError) return this.lastError;
+        if (this.fetchStarted && !this.lastFetchAt) {
+          return `${this.fetchStarted} lookup(s) started but none have come back yet — `
+            + 'if this persists, the request is hanging rather than failing.';
+        }
+        if (!this.lastFetchAt) return noLookupHint;
+        return '';
+      },
+    };
+  }
+
+  // Shared body for a keyed, cached, single-player lookup. The differences
+  // between two such fetches are all data: where to GET, how the service
+  // words a refusal, how to read the reply, and where the result lands.
+  //
+  // `apiError` matters more than it looks: both services answer an auth
+  // failure or a rate limit with HTTP 200 and an error BODY, so this is the
+  // only place either can be noticed. Recording the message is what turns
+  // "nothing is showing" into "Incorrect key".
+  async function probeFetch(probe, { url, apiError, parse, cache, xid, unreachable }) {
+    probe.fetchStarted++;
+    try {
+      const { json } = await pdaFetchJson('GET', url);
+      probe.lastFetchAt = Date.now();
+      const apiMsg = apiError ? apiError(json) : '';
+      if (apiMsg) { probe.lastError = apiMsg; return; }
+      const parsed = parse(json);
+      if (!parsed) { probe.lastError = 'unrecognised API response shape'; return; }
+      probe.lastError = '';
+      probe.okCount++;
+      try { probe.lastKeys = json ? Object.keys(json).join(',') : '(empty)'; } catch (e) { probe.lastKeys = '(unreadable)'; }
+      cache.set(String(xid), Object.assign({}, parsed, { fetchedAt: Date.now() }));
+      return json;
+    } catch (e) {
+      probe.lastError = unreachable;
+    }
+  }
+
   const targetCache = new Map(); // xid (string) -> { ...status, fetchedAt }
   const TARGET_REFRESH_MS = 30 * 1000;
-  // Diagnostics, so the feature can explain its own silence — see
-  // targetDiagnostic below. Runtime only, never persisted.
-  let targetLastError = '';
-  let targetLastFetchAt = 0;
-  let targetOkCount = 0;
-  // Counted BEFORE the await, where targetLastFetchAt is only set after it.
-  // The gap between the two is the diagnosis: "started 3, completed 0" is a
-  // request that is hanging, "started 0" is one that was never made. Not
-  // being able to tell those apart is what made the pdaCall hang take a live
-  // deep scan to find.
-  let targetFetchStarted = 0;
-  // TOP-LEVEL KEY NAMES from the last successful response — names only, never
-  // values, because the deep scan gets pasted into chats. Recorded because the
-  // v1.38.0 scan showed every cached entry with level=0 while status.state
-  // parsed correctly, so the response IS the profile shape and `level` simply
-  // is not where parseTargetStatus looks. Guessing a second field name blind
-  // is what produced the first wrong guess; this makes the next scan answer it.
-  let targetLastKeys = '';
+  const targetProbe = apiProbe('No lookup has run yet — sit at a table with other players.');
   // NESTED key names under faction/married, from the same response. The
   // affiliation badges (v1.8.0) read faction.faction_id / faction.faction_name
   // / married.spouse_id, and those names have never been checked against a
@@ -1588,37 +1650,36 @@
   // v1.40.0 scan proved `faction` and `married` EXIST at top level; this says
   // what is inside them. Names only, never values: a faction name is fine but
   // a scan gets pasted into chats, so the rule stays absolute.
+  //
+  // Not part of the probe: it is captured from the target-status response but
+  // describes a DIFFERENT feature's field names, and belongs to neither
+  // cleanly. Left as the one-off it is rather than given a home it doesn't fit.
   let affilLastKeys = '';
 
+  const tornApiKey = () => (STORE.settings.tornApiKey || '').trim();
+
   async function fetchTargetStatus(xid) {
-    const key = (STORE.settings.tornApiKey || '').trim();
+    const key = tornApiKey();
     if (!key) return; // no key configured — the whole feature is a no-op
-    targetFetchStarted++;
+    const json = await probeFetch(targetProbe, {
+      xid,
+      url: `https://api.torn.com/user/${xid}?selections=profile&key=${encodeURIComponent(key)}`,
+      apiError: (j) => (j && j.error ? 'Torn API: ' + (j.error.error || 'error code ' + j.error.code) : ''),
+      parse: parseTargetStatus,
+      cache: targetCache,
+      unreachable: 'could not reach api.torn.com',
+    });
+    // Affiliation sub-keys ride along on the same response — see affilLastKeys
+    // above for why they are captured here and kept out of the probe. Only on
+    // a successful parse: probeFetch returns the body only when it cached one,
+    // so a refused or unparseable reply can never overwrite good field names
+    // with '(absent)'.
+    if (!json) return;
     try {
-      const { json } = await pdaFetchJson('GET',
-        `https://api.torn.com/user/${xid}?selections=profile&key=${encodeURIComponent(key)}`);
-      targetLastFetchAt = Date.now();
-      // Torn answers an auth failure or a rate limit with HTTP 200 and an
-      // error BODY, so this is the only place either can be noticed. Recording
-      // the message is what turns "nothing is showing" into "Incorrect key".
-      if (json && json.error) {
-        targetLastError = 'Torn API: ' + (json.error.error || 'error code ' + json.error.code);
-        return;
-      }
-      const parsed = parseTargetStatus(json);
-      if (!parsed) { targetLastError = 'unrecognised API response shape'; return; }
-      targetLastError = '';
-      targetOkCount++;
-      try {
-        targetLastKeys = Object.keys(json).join(',');
-        const fk = json.faction && typeof json.faction === 'object' ? Object.keys(json.faction).join(',') : '(absent)';
-        const mk = json.married && typeof json.married === 'object' ? Object.keys(json.married).join(',') : '(absent)';
-        affilLastKeys = `faction{${fk}} married{${mk}}`;
-      } catch (e) { targetLastKeys = '(unreadable)'; }
-      targetCache.set(String(xid), Object.assign({}, parsed, { fetchedAt: Date.now() }));
-    } catch (e) {
-      targetLastError = 'could not reach api.torn.com';
-    }
+      const fk = json.faction && typeof json.faction === 'object' ? Object.keys(json.faction).join(',') : '(absent)';
+      const mk = json.married && typeof json.married === 'object' ? Object.keys(json.married).join(',') : '(absent)';
+      affilLastKeys = `faction{${fk}} married{${mk}}`;
+    } catch (e) { /* names are a diagnostic, never worth throwing over */ }
   }
 
   // Why the target feature is showing nothing — '' when it is actually working.
@@ -1631,16 +1692,8 @@
   // screen it runs on, so silence that has five possible causes is undebuggable
   // at a distance. Same reasoning as heroProblem(), for the same class of bug.
   function targetDiagnostic() {
-    if (!(STORE.settings.tornApiKey || '').trim()) {
-      return 'No Torn API key set — Settings → Torn API features. Without one this does nothing.';
-    }
-    if (targetLastError) return targetLastError;
-    if (targetFetchStarted && !targetLastFetchAt) {
-      return `${targetFetchStarted} lookup(s) started but none have come back yet — `
-        + 'if this persists, the request is hanging rather than failing.';
-    }
-    if (!targetLastFetchAt) return 'No lookup has run yet — sit at a table with other players.';
-    return '';
+    return targetProbe.diagnostic(() => (tornApiKey()
+      ? '' : 'No Torn API key set — Settings → Torn API features. Without one this does nothing.'));
   }
 
   // --- Departure watch (v1.43.0) -------------------------------------------
@@ -2042,36 +2095,23 @@
   // is. A fresh session simply re-fetches.
   const SPY_REFRESH_MS = 24 * 60 * 60 * 1000;
 
-  // Diagnostics, same shape as the target-status block above and for the
-  // same reason: nobody working on this can see the screen it runs on, and
-  // this integration is even less verified than that one.
-  let spyLastError = '';
-  let spyLastFetchAt = 0;
-  let spyOkCount = 0;
-  let spyFetchStarted = 0;
-  let spyLastKeys = ''; // top-level key NAMES only, never values — scan safety
+  // Same probe shape as target status — see apiProbe. Sharing it is what
+  // stops the two features' diagnostics drifting into wording that implies a
+  // distinction between them that doesn't exist.
+  const spyProbe = apiProbe('No lookup has run yet — sit at a table with other players.');
+  const tornStatsKey = () => (STORE.settings.tornStatsApiKey || '').trim();
 
   async function fetchSpyStats(xid) {
-    const key = (STORE.settings.tornStatsApiKey || '').trim();
+    const key = tornStatsKey();
     if (!key) return; // no key configured — the whole feature is a no-op
-    spyFetchStarted++;
-    try {
-      const { json } = await pdaFetchJson('GET',
-        `https://www.tornstats.com/api/v2/${encodeURIComponent(key)}/spy/user/${xid}`);
-      spyLastFetchAt = Date.now();
-      if (json && json.status === false) {
-        spyLastError = 'TornStats: ' + (json.message || 'request refused');
-        return;
-      }
-      const parsed = parseSpyStats(json);
-      if (!parsed) { spyLastError = 'unrecognised API response shape'; return; }
-      spyLastError = '';
-      spyOkCount++;
-      try { spyLastKeys = json ? Object.keys(json).join(',') : '(empty)'; } catch (e) { spyLastKeys = '(unreadable)'; }
-      spyCache.set(String(xid), Object.assign({}, parsed, { fetchedAt: Date.now() }));
-    } catch (e) {
-      spyLastError = 'could not reach tornstats.com';
-    }
+    await probeFetch(spyProbe, {
+      xid,
+      url: `https://www.tornstats.com/api/v2/${encodeURIComponent(key)}/spy/user/${xid}`,
+      apiError: (j) => (j && j.status === false ? 'TornStats: ' + (j.message || 'request refused') : ''),
+      parse: parseSpyStats,
+      cache: spyCache,
+      unreachable: 'could not reach tornstats.com',
+    });
   }
 
   function spyStatsFor(xid) {
@@ -2101,19 +2141,15 @@
   // reasoning as targetDiagnostic: a field-name guess this unverified has to
   // be able to explain its own silence.
   function spyDiagnostic() {
-    if (!STORE.settings.battleStatsEstimate) {
-      return 'Estimated battle stats is off — Settings → Estimated battle stats.';
-    }
-    if (!(STORE.settings.tornStatsApiKey || '').trim()) {
-      return 'No TornStats API key set — Settings → Estimated battle stats. Without one this does nothing.';
-    }
-    if (spyLastError) return spyLastError;
-    if (spyFetchStarted && !spyLastFetchAt) {
-      return `${spyFetchStarted} lookup(s) started but none have come back yet — `
-        + 'if this persists, the request is hanging rather than failing.';
-    }
-    if (!spyLastFetchAt) return 'No lookup has run yet — sit at a table with other players.';
-    return '';
+    return spyProbe.diagnostic(() => {
+      if (!STORE.settings.battleStatsEstimate) {
+        return 'Estimated battle stats is off — Settings → Estimated battle stats.';
+      }
+      if (!tornStatsKey()) {
+        return 'No TornStats API key set — Settings → Estimated battle stats. Without one this does nothing.';
+      }
+      return '';
+    });
   }
 
   // One compact line for a badge/panel — "≈3.4M BS" — or '' when there's
@@ -10522,7 +10558,7 @@
       <div class="tph-target-diag ${targetDiagnostic() ? 'tph-target-diag-bad' : 'tph-target-diag-ok'}">${
         targetDiagnostic()
           ? '⚠ ' + escapeHtml(targetDiagnostic())
-          : `✓ Torn API working — ${targetOkCount} lookup${targetOkCount === 1 ? '' : 's'} so far.`
+          : `✓ Torn API working — ${targetProbe.okCount} lookup${targetProbe.okCount === 1 ? '' : 's'} so far.`
       }</div>
       <div style="opacity:.7;margin:2px 0 10px">🔗 marks two seated players sharing a faction, 💍 marks two married
         to each other — both are facts from Torn's own profile data, checked only against whoever is CURRENTLY
@@ -10538,7 +10574,7 @@
       <div class="tph-target-diag ${spyDiagnostic() ? 'tph-target-diag-bad' : 'tph-target-diag-ok'}">${
         spyDiagnostic()
           ? '⚠ ' + escapeHtml(spyDiagnostic())
-          : `✓ TornStats working — ${spyOkCount} lookup${spyOkCount === 1 ? '' : 's'} so far.`
+          : `✓ TornStats working — ${spyProbe.okCount} lookup${spyProbe.okCount === 1 ? '' : 's'} so far.`
       }</div>
       <div style="opacity:.7;margin:2px 0 10px">Off by default, and a separate key from the Torn API one above. Torn's
         own API only ever returns the KEY OWNER'S OWN battle stats — there is no way to read a third party's
@@ -11030,13 +11066,13 @@
     // whether any lookup has succeeded, the last error, and the actual cache.
     L.push('--- TORN API / TARGET STATUS ---');
     L.push('apiKey set: ' + (!!(STORE.settings.tornApiKey || '').trim())
-      + '   started: ' + targetFetchStarted
-      + '   successful lookups: ' + targetOkCount
-      + '   last fetch: ' + (targetLastFetchAt ? Math.round((Date.now() - targetLastFetchAt) / 1000) + 's ago' : 'never'));
+      + '   started: ' + targetProbe.fetchStarted
+      + '   successful lookups: ' + targetProbe.okCount
+      + '   last fetch: ' + (targetProbe.lastFetchAt ? Math.round((Date.now() - targetProbe.lastFetchAt) / 1000) + 's ago' : 'never'));
     L.push('diagnostic: ' + (targetDiagnostic() || 'OK — working'));
     // Key NAMES only — no values. This is what identifies where `level` (and
     // anything else still reading as absent) actually lives in the response.
-    L.push('last response top-level keys: ' + (targetLastKeys || '(none captured)'));
+    L.push('last response top-level keys: ' + (targetProbe.lastKeys || '(none captured)'));
     L.push('affiliation sub-keys: ' + (affilLastKeys || '(none captured)'));
     // What parseAffiliationProfile actually stored for seated players. The
     // badge only lights when two SEATED players match, so with no faction-mate
@@ -11063,11 +11099,11 @@
     L.push('--- ESTIMATED BATTLE STATS (TornStats, UNVERIFIED) ---');
     L.push('battleStatsEstimate: ' + !!STORE.settings.battleStatsEstimate
       + '   tornStatsApiKey set: ' + (!!(STORE.settings.tornStatsApiKey || '').trim())
-      + '   started: ' + spyFetchStarted
-      + '   successful lookups: ' + spyOkCount
-      + '   last fetch: ' + (spyLastFetchAt ? Math.round((Date.now() - spyLastFetchAt) / 1000) + 's ago' : 'never'));
+      + '   started: ' + spyProbe.fetchStarted
+      + '   successful lookups: ' + spyProbe.okCount
+      + '   last fetch: ' + (spyProbe.lastFetchAt ? Math.round((Date.now() - spyProbe.lastFetchAt) / 1000) + 's ago' : 'never'));
     L.push('diagnostic: ' + (spyDiagnostic() || 'OK — working'));
-    L.push('last response top-level keys: ' + (spyLastKeys || '(none captured)'));
+    L.push('last response top-level keys: ' + (spyProbe.lastKeys || '(none captured)'));
     const spyEntries = Array.from(spyCache.keys());
     L.push('spy cache: ' + spyEntries.length + ' entr' + (spyEntries.length === 1 ? 'y' : 'ies'));
     spyEntries.forEach((k) => {
@@ -11588,6 +11624,10 @@
       BOARD_COUNT_FOR,
       targetDiagnostic,
       targetCache,
+      apiProbe,
+      probeFetch,
+      targetProbe,
+      spyProbe,
       parseSpyStats,
       spyCache,
       spyStatsFor,

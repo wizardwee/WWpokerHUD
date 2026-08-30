@@ -1244,6 +1244,14 @@ class selectors with `!important` and the later rule wins.
 The stylesheet is a template literal. **No backticks in CSS comments** — one in
 the word `td` terminated the string and broke the parse.
 
+Its sibling, hit in v1.48.0: the changelog at the top of the script is a `/* */`
+block, so **no `*/` inside it** — writing `request*/refreshSeated*` as a
+shorthand for two function names closed the comment and dumped the rest of the
+entry into the parser as code. Both are the same trap: prose written inside a
+delimiter that the prose is allowed to contain. `node test/run.js` syntax-checks
+the script first and catches it immediately, which is most of why it runs before
+every commit.
+
 ### Shrinkage replaced the hard sample gate
 
 `computeShrunkRates` pulls every rate toward `POOL_AVG` with a
