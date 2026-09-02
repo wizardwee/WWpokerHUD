@@ -9,6 +9,79 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.50.0
+
+Moving tables no longer reports the whole old table as departures.
+
+Reported directly: *"it should NOT mistakenly count players in when I move
+tables. currently all the players on the old table are shown as '8 left'."*
+
+### Why the existing guards could not catch it
+
+The departure watch already had two guards, and neither applies:
+
+1. An **empty** sweep is never treated as everyone leaving — but a table change
+   produces a perfectly readable sweep, just of different people.
+2. A player must be missing from **two consecutive** sweeps — but the old roster
+   stays missing on every sweep after the move, so this is satisfied
+   immediately.
+
+Both guards pass, and the entire old table fires.
+
+### There is no table identity to key off
+
+Nobody working on this can inspect the live DOM, so a table-id selector cannot
+be confirmed, and one that is merely assumed fails silently — the standing
+constraint on everything in this file. What *can* be relied on is the shape of
+the event: at a live table people leave one at a time, and several vanishing
+inside one 3-second sweep is a roster being replaced, not several decisions to
+stand up.
+
+### Guard 3 — a burst cap
+
+More than `DEPARTURE_BURST_MAX` (2) players missing between two readable sweeps
+is read as a table change. The batch is dropped **and** the pending set is
+cleared: a table swap frequently renders in two steps (a couple of seats blank,
+then the rest), and stragglers armed by the first step would otherwise fire on
+their own two sweeps later — the same bug, arriving late.
+
+The new roster still becomes the baseline. Dropping the batch must not also drop
+the sweep, or the next person to leave the *new* table would be missed.
+
+Deliberately asymmetric, the same principle `attackReadiness` follows. Being
+wrong here costs one missed alert on a table that genuinely broke up. *Not*
+having it costs eight false targets every time you sit down somewhere else,
+which is the complaint.
+
+### Guard 4 — a blind change
+
+`noteBlindLevel` already detects a stakes switch (it is what nulls
+`currentTableBB` so a $2.5M blind can't misprice a $1M table). It now also
+disarms the departure watch, via `noteTableChange()`.
+
+This one is *certain* rather than inferred, but it only fires on a **cross-stake**
+move — Torn runs more than one differently-named table at several blind levels —
+so it complements guard 3 rather than replacing it.
+
+### Already-watched departures survive both
+
+Somebody who left the old table a minute before you did is still sitting out
+there and still attackable; your moving tables does not make them less of a
+target. Only the *in-flight suspicion* — players "missing" because you are the
+one who left — is dropped.
+
+### Tests
+
+47 assertions in `test/departure-watch.test.js`, up from 33. Checked against the
+old behaviour first, which is the part that matters: with the cap lifted the
+roster-swap case reports exactly the **8** the report described, and the
+half-rendered-swap case reports 6. The new assertions are not vacuous.
+
+The existing multi-player tests had to be restaged through a `leaveOneAtATime`
+helper — they dropped three and eighteen players in a single sweep, which guard
+3 now (correctly) reads as a table change. Staging them one at a time is how a
+table actually empties anyway.
+
 ## 1.49.0
 
 The departure pill is movable now.

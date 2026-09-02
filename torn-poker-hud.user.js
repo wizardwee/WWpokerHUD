@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.49.0
+// @version      1.50.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,45 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.50.0 - Moving tables no longer reports the whole old table as departures.
+ *          Reported directly: "it should NOT mistakenly count players in when
+ *          I move tables. currently all the players on the old table are shown
+ *          as '8 left'."
+ *            - WHY THE EXISTING GUARDS COULD NOT CATCH IT. Guard 1 ignores an
+ *              unreadable (empty) sweep; guard 2 needs two consecutive misses.
+ *              A table change is neither: the sweep is perfectly readable, and
+ *              the old roster stays missing on every sweep after it. Both
+ *              guards pass and the entire old table fires.
+ *            - THERE IS NO TABLE IDENTITY TO KEY OFF. Nobody working on this
+ *              can inspect the live DOM, so a table-id selector cannot be
+ *              confirmed and one that is merely assumed fails silently. What
+ *              CAN be relied on is the shape of the event: at a live table
+ *              people leave one at a time, and several vanishing inside one 3s
+ *              sweep is a roster being replaced.
+ *            - GUARD 3, a burst cap. More than DEPARTURE_BURST_MAX (2) missing
+ *              between two readable sweeps is read as a table change: the
+ *              batch is dropped AND the pending set cleared, because a swap
+ *              often renders in two steps and stragglers armed by the first
+ *              would otherwise fire two sweeps later — the same bug, late.
+ *              The new roster still becomes the baseline, so the next real
+ *              departure from the new table is caught normally.
+ *            - Deliberately asymmetric, same principle as attackReadiness.
+ *              Being wrong costs one missed alert on a table that genuinely
+ *              broke up. NOT having it costs eight false targets every time
+ *              you sit down somewhere else.
+ *            - GUARD 4, a blind change. noteBlindLevel already detects a
+ *              stakes switch (it is what nulls currentTableBB); it now also
+ *              disarms the watch. Certain rather than inferred, but only fires
+ *              on a CROSS-STAKE move — Torn runs more than one table at
+ *              several blind levels — so it complements guard 3, not replaces.
+ *            - ALREADY-WATCHED DEPARTURES SURVIVE BOTH. Somebody who left the
+ *              old table a minute before you did is still out there and still
+ *              attackable; your move does not make them less of a target. Only
+ *              the in-flight suspicion is dropped.
+ *            - 47 assertions in test/departure-watch.test.js (was 33). Checked
+ *              against the OLD behaviour first: with the cap lifted, the
+ *              roster-swap case reports exactly the 8 the report described.
  *
  * 1.49.0 - The departure pill is movable now. Asked directly: "the pill
  *          attack/hospital counter should be moveable."
@@ -80,51 +119,6 @@
  *              a seam stub, which does not rebind the module's own function.
  *              31 assertions, verified non-vacuous against two sabotages.
  *
- * 1.47.0 - Estimated battle stats on the departure panel, via TornStats. Asked
- *          directly, right after the chips fix: whether battle stats could be
- *          added the same way.
- *            - THE ANSWER FIRST: Torn's own API refuses this outright.
- *              `selections=battlestats` only ever returns the KEY OWNER'S OWN
- *              stats, never a third party's, at any access level. There is no
- *              way to read someone else's strength/defense/speed/dexterity
- *              from Torn directly — a platform limit, not a missing feature.
- *            - WHAT SHIPPED INSTEAD: a CROWDSOURCED ESTIMATE from TornStats —
- *              other players' own in-game "spy" results on a target, pooled
- *              and served back through TornStats' v2 API. OFF by default
- *              (unlike departureWatch/affiliation, which default on): a third
- *              party's numbers through a service this project has no
- *              relationship with. Needs its own TornStats key, separate from
- *              the Torn API key above it, stripped from Backup/Gist exports
- *              the same way.
- *            - MORE UNVERIFIED THAN ANYTHING ELSE HERE. Affiliation and target
- *              status were at least checked against Torn's PUBLISHED API docs
- *              before shipping. This could not be: this environment's network
- *              egress is blocked to both tornstats.com and yata.yt outright,
- *              so parseSpyStats' field names (spy.strength/defense/speed/
- *              dexterity/total/timestamp) are written from memory of
- *              TornStats' documented v2 shape, not a fetched doc and not a
- *              live response. Fails defensively to null on anything
- *              unrecognised, same discipline as the other two parsers —
- *              a wrong guess costs a missing read, not a crash — but this
- *              needs a report from someone holding a real TornStats key
- *              before it can be trusted even as far as those two currently
- *              are.
- *            - Cached in-memory only (spyCache), never in STORE.players and
- *              never persisted — deliberately unlike affiliation. This is a
- *              third party's ESTIMATE, not a fact from Torn's own API, and
- *              letting it survive a reload or ride along in an export risked
- *              it being read back later as more solid than it is.
- *            - Renders as "≈3.4M BS" beside chips and level on the departure
- *              panel row, through the same fmtMoney k/M/B ladder (fmtStatNum,
- *              no $ prefix). Tooltip breaks down all four stats plus how long
- *              ago the underlying spy was taken, and says plainly it is "not
- *              Torn's own data".
- *            - Full diagnostic + deep-scan block, same shape as target status:
- *              feature off / no key / no lookup yet / last error are all
- *              distinguishable, because a guess this unverified has to be
- *              able to explain its own silence.
- *            - 37 assertions in test/spy-stats.test.js.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -186,7 +180,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.49.0';
+  const HUD_VERSION = '1.50.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -1736,6 +1730,44 @@
   //      somebody who left.
   let pendingDepartures = new Map(); // xid -> first tick they went missing
 
+  // Guard 3, and the reason for it: moving to another table is indistinguishable
+  // from the whole roster walking out. Reported directly — "it should NOT
+  // mistakenly count players in when I move tables. currently all the players
+  // on the old table are shown as '8 left'."
+  //
+  // Guards 1 and 2 do not catch it. A table change is not an unreadable sweep
+  // (guard 1) and the old roster stays missing for every sweep after (guard 2),
+  // so both are satisfied and the entire old table fires as departures.
+  //
+  // There is no table identity in this layout to key off — nobody working on
+  // this can inspect the DOM, so a marker cannot be confirmed and one that is
+  // merely assumed would fail silently. What CAN be relied on is the shape of
+  // the event: at a live table people leave one at a time, and three vanishing
+  // inside one 3s sweep is a roster being replaced, not three decisions to
+  // stand up. So the rule is a cap on how many departures one sweep may report.
+  //
+  // Deliberately asymmetric, same principle as attackReadiness: the cost of
+  // being wrong here is one missed alert on a table that genuinely broke up.
+  // The cost of not having it is eight false targets every time you sit down
+  // somewhere else, which is the complaint.
+  const DEPARTURE_BURST_MAX = 2;
+
+  // Guard 4. A stakes change is a table change with no ambiguity at all, so it
+  // does not have to be inferred from the roster — noteBlindLevel already
+  // notices it (that is what nulls currentTableBB). Complements guard 3 rather
+  // than replacing it: this one is certain but only fires on a CROSS-STAKE
+  // move, and Torn runs more than one table at several blind levels.
+  //
+  // Already-watched departures are deliberately NOT cleared. Somebody who left
+  // the old table a minute before you did is still sitting out there
+  // attackable; the move does not make them less of a target. What is dropped
+  // is only the in-flight suspicion about players who are "missing" because you
+  // are the one who left.
+  function noteTableChange() {
+    pendingDepartures.clear();
+    lastSeatedSnapshot = null; // the next readable sweep becomes a fresh baseline
+  }
+
   // Takes the seated list rather than reading it, so the diff — which is all
   // the logic here — is drivable without a DOM. Same split shouldEscalateTurnCue
   // already uses, and it was not optional: the first version read seatedXids()
@@ -1759,9 +1791,26 @@
     const fired = [];
 
     // Anyone previously seated and no longer there becomes a CANDIDATE.
-    prev.forEach((xid) => {
+    const gone = prev.filter((xid) => !nowSet.has(String(xid)) && !isHeroRecord(xid));
+
+    // Guard 3. Too many at once is a roster change, not a set of departures —
+    // see DEPARTURE_BURST_MAX. The pending set is cleared as well as the batch
+    // dropped, because a table swap frequently renders in two steps (a couple
+    // of seats blank, then the rest) and the stragglers armed by the first step
+    // would otherwise fire on their own two sweeps later, which is the same bug
+    // arriving late.
+    if (gone.length > DEPARTURE_BURST_MAX) {
+      // Only the pending set, not the snapshot — this sweep IS readable, and
+      // it is the new roster, so it stays the baseline the next one diffs
+      // against. (noteTableChange, which guard 4 uses, also nulls the snapshot;
+      // it has no sweep in hand to replace it with.)
+      pendingDepartures.clear();
+      return [];
+    }
+
+    gone.forEach((xid) => {
       const key = String(xid);
-      if (nowSet.has(key) || isHeroRecord(xid) || departedWatch.has(key)) return;
+      if (departedWatch.has(key)) return;
       if (!pendingDepartures.has(key)) pendingDepartures.set(key, 0);
     });
 
@@ -2478,7 +2527,13 @@
       return;
     }
     bbDisplayModeSuspected = false;
-    if (lastSeenBB && amt !== lastSeenBB) currentTableBB = null; // switched tables
+    if (lastSeenBB && amt !== lastSeenBB) {
+      currentTableBB = null; // switched tables
+      // Guard 4 on the departure watch. A different blind means a different
+      // table, so the old roster is "missing" because you left, not because
+      // they did. See noteTableChange.
+      noteTableChange();
+    }
     hand.bbAmount = amt;
     lastSeenBB = amt;
     currentTableBB = amt;
@@ -11633,6 +11688,8 @@
       requestTargetStatus,
       dropStaleHeroGhost,
       noteSeatDepartures,
+      noteTableChange,
+      DEPARTURE_BURST_MAX,
       departedList,
       departedAlertable,
       dismissDeparture,

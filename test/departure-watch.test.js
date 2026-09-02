@@ -37,6 +37,20 @@ function setup(opts) {
   return T;
 }
 
+// Walk a roster out one player per departure, two sweeps each (guard 2 needs
+// two consecutive misses). Since guard 3, a batch bigger than
+// DEPARTURE_BURST_MAX in ONE sweep is read as a table change, so any test that
+// wants several real departures has to stage them the way they really happen.
+function leaveOneAtATime(T, leaving, stay) {
+  const remaining = leaving.slice();
+  while (remaining.length) {
+    remaining.shift();
+    const seated = remaining.concat(stay);
+    T.noteSeatDepartures(seated);
+    T.noteSeatDepartures(seated);
+  }
+}
+
 const okay = () => ({ state: 'Okay', until: 0, level: 50, fetchedAt: Date.now() });
 const hosp = () => ({
   state: 'Hospital', until: Math.floor(Date.now() / 1000) + 600, level: 40, fetchedAt: Date.now(),
@@ -123,8 +137,10 @@ const hosp = () => ({
   // UNKNOWN deliberately has no cache entry.
   T.lastSeatedSnapshot = ['READY', 'HOSP', 'UNKNOWN', 'HERO'];
 
-  T.noteSeatDepartures(['HERO']);
-  T.noteSeatDepartures(['HERO']);
+  // One at a time, which is how a table actually empties — and, since guard 3,
+  // the only way it can. Three vanishing in one sweep is read as a table
+  // change, not three departures.
+  leaveOneAtATime(T, ['READY', 'HOSP', 'UNKNOWN'], ['HERO']);
 
   t.eq('all three are listed', T.departedList().length, 3);
   const alert = T.departedAlertable();
@@ -174,6 +190,126 @@ const hosp = () => ({
     (T.dismissDeparture('NOPE'), T.departedList().length), 0);
 }
 
+// --- GUARD 3: a whole roster vanishing is a TABLE CHANGE, not departures ---
+//
+// Reported directly: "it should NOT mistakenly count players in when I move
+// tables. currently all the players on the old table are shown as '8 left'."
+//
+// Guards 1 and 2 do not catch this and cannot. A table change is not an
+// unreadable sweep, and the old roster stays missing on every sweep after it,
+// so both guards are satisfied and the entire old table fires. There is no
+// table identity in this layout to key off — nobody working on this can
+// inspect the DOM — so the signal is the SHAPE of the event: people leave a
+// live table one at a time, and a batch is a roster being replaced.
+
+{
+  const T = setup({ players: ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'] });
+  ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'].forEach((x) => T.targetCache.set(x, okay()));
+  T.lastSeatedSnapshot = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'HERO'];
+
+  // You sit down at a different table. Hero is still seated; everyone else is
+  // somebody you have never seen.
+  const newTable = ['N1', 'N2', 'N3', 'HERO'];
+  t.eq('a whole-roster swap fires nothing', T.noteSeatDepartures(newTable).length, 0);
+  t.eq('and nothing is left armed for the next sweep', T.noteSeatDepartures(newTable).length, 0);
+  t.eq('so the old table is not being watched at all', T.departedList().length, 0);
+  t.eq('and the pill has nothing to count', T.departedAlertable().length, 0);
+}
+
+// The new roster still becomes the baseline. Dropping the batch must not also
+// drop the sweep — the next person who leaves the NEW table has to be caught.
+
+{
+  const T = setup({ players: ['A', 'B', 'C', 'D', 'N1', 'N2'] });
+  ['A', 'B', 'C', 'D', 'N1', 'N2'].forEach((x) => T.targetCache.set(x, okay()));
+  T.lastSeatedSnapshot = ['A', 'B', 'C', 'D', 'HERO'];
+  T.noteSeatDepartures(['N1', 'N2', 'HERO']); // the move: 4 gone at once, dropped
+
+  T.noteSeatDepartures(['N2', 'HERO']);
+  const fired = T.noteSeatDepartures(['N2', 'HERO']);
+  t.eq('a real departure from the NEW table still fires', fired.length, 1);
+  t.eq('and it is somebody from the new table', fired[0], 'N1');
+}
+
+// A table swap that renders in two steps — a couple of seats blank, then the
+// rest. The stragglers armed by the first step must be disarmed by the second,
+// or the same bug just arrives two sweeps later.
+
+{
+  const T = setup({ players: ['A', 'B', 'C', 'D', 'E', 'F'] });
+  ['A', 'B', 'C', 'D', 'E', 'F'].forEach((x) => T.targetCache.set(x, okay()));
+  T.lastSeatedSnapshot = ['A', 'B', 'C', 'D', 'E', 'F', 'HERO'];
+
+  T.noteSeatDepartures(['A', 'B', 'C', 'D', 'HERO']); // 2 blank — within the cap, armed
+  T.noteSeatDepartures(['N1', 'HERO']);               // the rest go — burst, disarms
+  T.noteSeatDepartures(['N1', 'HERO']);
+  T.noteSeatDepartures(['N1', 'HERO']);
+  t.eq('the stragglers from the half-rendered sweep never fire', T.departedList().length, 0);
+}
+
+// The cap is a cap, not a ban. Departures up to DEPARTURE_BURST_MAX are still
+// real — two players standing up in the same 3s window happens.
+
+{
+  const T = setup({ players: ['A', 'B', 'C'] });
+  ['A', 'B', 'C'].forEach((x) => T.targetCache.set(x, okay()));
+  T.lastSeatedSnapshot = ['A', 'B', 'C', 'HERO'];
+  T.noteSeatDepartures(['C', 'HERO']);
+  const fired = T.noteSeatDepartures(['C', 'HERO']);
+  t.eq(`${T.DEPARTURE_BURST_MAX} at once is still reported`, fired.length, T.DEPARTURE_BURST_MAX);
+}
+
+// Hero is excluded from the count, so a table change at a short table is not
+// waved through just because hero happens to be one of the seats that moved.
+
+{
+  const T = setup({ players: ['A', 'B', 'C'] });
+  ['A', 'B', 'C'].forEach((x) => T.targetCache.set(x, okay()));
+  T.lastSeatedSnapshot = ['A', 'B', 'C', 'HERO'];
+  T.noteSeatDepartures(['N1', 'HERO']);
+  T.noteSeatDepartures(['N1', 'HERO']);
+  t.eq('three gone at a four-handed table is still a roster change',
+    T.departedList().length, 0);
+}
+
+// --- GUARD 4: a blind change is a table change with no ambiguity -----------
+//
+// Guard 3 infers a table change from the roster; this one KNOWS. It only fires
+// on a cross-stake move (Torn runs more than one table at several blind
+// levels), so the two complement each other rather than one replacing the
+// other.
+
+{
+  const T = setup({ players: ['A', 'B'] });
+  T.targetCache.set('A', okay());
+  T.targetCache.set('B', okay());
+  T.lastSeatedSnapshot = ['A', 'B', 'HERO'];
+  T.noteSeatDepartures(['B', 'HERO']); // A goes missing — armed
+
+  T.noteTableChange();                 // ...because you moved tables
+
+  T.noteSeatDepartures(['N1', 'HERO']);
+  T.noteSeatDepartures(['N1', 'HERO']);
+  t.eq('a pending departure is disarmed by the table change', T.departedList().length, 0);
+  t.eq('and the snapshot is dropped so the next sweep is a fresh baseline',
+    T.lastSeatedSnapshot.length, 2);
+}
+
+// It must NOT clear what is already being watched. Somebody who left the old
+// table a minute before you did is still out there and still attackable — the
+// move does not make them less of a target.
+
+{
+  const T = setup({ players: ['A'] });
+  T.targetCache.set('A', okay());
+  T.lastSeatedSnapshot = ['A', 'HERO'];
+  T.noteSeatDepartures(['HERO']);
+  T.noteSeatDepartures(['HERO']);
+  t.eq('watched before the move', T.departedAlertable().length, 1);
+  T.noteTableChange();
+  t.eq('and still watched after it', T.departedAlertable().length, 1);
+}
+
 // --- the list is bounded -------------------------------------------------
 
 {
@@ -186,8 +322,8 @@ const hosp = () => ({
     T.targetCache.set(x, okay());
   }
   T.lastSeatedSnapshot = many.concat(['HERO']);
-  T.noteSeatDepartures(['HERO']);
-  T.noteSeatDepartures(['HERO']);
+  leaveOneAtATime(T, many, ['HERO']);
+  t.eq('every one of them was actually watched at some point', T.departedWatch.size > 0, true);
   t.ok(`the watch is capped at DEPARTED_MAX (${T.departedWatch.size})`,
     T.departedWatch.size <= T.DEPARTED_MAX);
 }
