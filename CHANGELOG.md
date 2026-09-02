@@ -9,6 +9,103 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.52.0
+
+Hand history: checked-down pots dropped, tag filters that AND, a ME filter, and
+the action word coloured by what it is.
+
+All three asked for directly.
+
+### No-aggression pots
+
+*"Remove histories with no action preflop and became a check down pot."*
+
+`handHadNoAggression(h)` tests for a `bet` or `raise` by **anyone** — not by the
+player being read. A pot with no bet in it never put anybody to a decision, so
+no fold, call or check in it carries information about anyone at the table. That
+is why it is one predicate over the whole hand rather than something folded into
+`handNotability`, which asks a per-player question.
+
+An **empty action list is unknown, not passive** — a hand joined mid-way, or one
+recorded before actions were persisted — and survives. Dropping those would
+silently delete history the HUD merely failed to capture, which is not the same
+thing as history not worth keeping.
+
+Applied to **Played** and **Notable**, not to **All**. "All" has to mean all, or
+the count line is lying and there is no way left to look at a hand the filter has
+an opinion about. It is the escape hatch, so it stays honest — its tooltip now
+names what it alone keeps.
+
+### Tag chips, ANDed
+
+A second chip row — `3B` `4B` `XR` `RR` `BIG` `SD` `WON` — multi-select, with
+every selected tag required.
+
+**AND rather than OR**, because the question these answer is "show me the spot I
+am thinking of". 3-bet *or* showdown is most of the list, which is what the mode
+chips already do; 3-bet *and* showdown is a handful worth reading. Nothing
+selected means no tag constraint at all, and tags stack with the mode rather than
+replacing it.
+
+The chip **is** the marker it selects for — same class, same colour, dimmed when
+off. One vocabulary for one idea, and no per-key chip colour to maintain beside
+the marker colours it would inevitably drift from.
+
+### ME
+
+Hands hero played too, reusing `handNotability`'s own `voluntary` against
+`heroXid` rather than writing a second definition of "involved". A blind you had
+no choice about, or a check, is not tangling with this villain — and two answers
+to that question living in one file is how they drift apart.
+
+The chip is **hidden entirely** when hero is unresolved. A control that silently
+matches nothing is worse than no control at all; that is the exact failure
+`heroProblem()` exists to stop being silent, and `name:<username>` counts as
+unresolved here like everywhere else.
+
+### Action colours
+
+*"Highlight any betting action in the font color too."*
+
+A street reads as a run of near-identical text — "Name call $2M, Name check, Name
+raise $8M" — and the one thing you are scanning for is where the money went in.
+Colour carries that without adding a single character, on an element already
+short of width.
+
+Aggression is warm and split by degree (a raise is louder than a bet), continuing
+is cool, declining is grey. **Not red/green** — the same rule the deviation
+indicators follow: a raise is not "bad" and a fold is not "good", they are
+different actions, and a good/bad palette would assert a judgement this file is
+in no position to make. An unrecognised verb renders plain rather than being
+forced into a bucket; the log has surprised this file before, and a wrong colour
+is a confident wrong answer where no colour is merely plain.
+
+The **name** carries the focus highlight and the **verb** carries the action
+colour, in separate spans so neither overrides the other — the focus span used to
+wrap the whole "Name verb amount" string, and a colour inside it is only correct
+because the outer reaches the inner by inheritance alone. Getting that backwards
+renders one gold blob and looks like the feature did not land, so a test pins the
+nesting.
+
+Inline and `!important` like the rest of `HH`, because two class-based attempts
+at History styling were reported unreadable on the live page.
+
+`formatHand` (clipboard and export) is unchanged. Colour is presentation, and the
+tab, the clipboard and the file describing one hand three ways is exactly the
+drift that split exists to prevent — also pinned by a test.
+
+### Tests
+
+120 assertions in `test/hand-notability.test.js` (was 74) and 38 in
+`test/hand-render.test.js`. Checked against the old behaviour first: swapping
+`every()` for `some()` in the tag filter, or `voluntary` for `acted` in the ME
+predicate, or neutering the aggression check, fails eight of them.
+
+One existing fixture had to change — a hand where the villain merely called
+preflop is now dropped from Played as a no-aggression pot, which is the new rule
+working. It gained a raise by another player so it stays the "played but
+untagged" case the block was written to cover.
+
 ## 1.51.0
 
 Coaching advice: a stale-target bug, a ranking that ignored how far a player

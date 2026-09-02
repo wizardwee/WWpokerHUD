@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.51.0
+// @version      1.52.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,57 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.52.0 - Hand history: checked-down pots dropped, tag filters that AND, a ME
+ *          filter, and the action word coloured by what it is. All three asked
+ *          for directly.
+ *            - NO-AGGRESSION POTS. "Remove histories with no action preflop and
+ *              became a check down pot." handHadNoAggression(h) tests for a bet
+ *              or raise by ANYONE — not by the player being read. A pot with no
+ *              bet in it never put anybody to a decision, so no fold, call or
+ *              check in it carries information about anyone at the table. That
+ *              is why it is one predicate over the hand rather than something
+ *              folded into handNotability, which asks a per-player question.
+ *            - An EMPTY action list is unknown, not passive (a hand joined
+ *              mid-way, or recorded before actions were persisted), and
+ *              survives. Dropping it would silently delete history the HUD
+ *              merely failed to capture.
+ *            - Applied to Played and Notable, NOT to All. "All" has to mean
+ *              all, or the count line lies and there is no way left to look at
+ *              a hand the filter has an opinion about. It is the escape hatch,
+ *              so it stays honest — its tooltip now says what it alone keeps.
+ *            - TAG CHIPS, ANDed. A second chip row (3B/4B/XR/RR/BIG/SD/WON),
+ *              multi-select, every selected tag required. AND rather than OR
+ *              because the question is "show me the spot I am thinking of" —
+ *              3-bet OR showdown is most of the list, which is what the mode
+ *              chips already do. Nothing selected = unconstrained. The chip IS
+ *              the marker it selects for, dimmed when off, so the thing you tap
+ *              and the thing it matches are one vocabulary and no per-key chip
+ *              colour has to be maintained beside the marker colours.
+ *            - ME. Hands hero played too, reusing handNotability's own
+ *              `voluntary` against heroXid rather than a second definition of
+ *              "involved" — a blind you had no choice about is not tangling
+ *              with this villain, and two answers to that question in one file
+ *              is how they drift. The chip is HIDDEN entirely when hero is
+ *              unresolved: a control that silently matches nothing is worse
+ *              than no control, which is the whole point of heroProblem().
+ *            - ACTION COLOURS. "Highlight any betting action in the font color
+ *              too." Aggression warm and split by degree (raise louder than
+ *              bet), continuing cool, declining grey. NOT red/green — the same
+ *              rule the deviation indicators follow: a raise is not "bad" and a
+ *              fold is not "good". An unrecognised verb renders plain rather
+ *              than being forced into a bucket.
+ *            - The NAME carries the focus highlight and the VERB carries the
+ *              action colour, in separate spans so neither overrides the other.
+ *              Inline !important like the rest of HH, because two class-based
+ *              attempts were reported unreadable on the live page.
+ *            - formatHand (clipboard/export) is unchanged: colour is
+ *              presentation, and the tab, the clipboard and the file must not
+ *              drift into three descriptions of one hand. Pinned by a test.
+ *            - 120 assertions in test/hand-notability.test.js (was 74) and 38
+ *              in test/hand-render.test.js, checked against the old behaviour
+ *              first — swapping every() for some(), or `voluntary` for `acted`,
+ *              fails eight of them.
  *
  * 1.51.0 - Coaching advice: a stale-target bug, a ranking that ignored how far
  *          a player actually deviates, no memory of what it had already said,
@@ -112,33 +163,6 @@
  *              against the OLD behaviour first: with the cap lifted, the
  *              roster-swap case reports exactly the 8 the report described.
  *
- * 1.49.0 - The departure pill is movable now. Asked directly: "the pill
- *          attack/hospital counter should be moveable."
- *            - IT FLOATS OVER THE FELT AT A FIXED ANCHOR (bottom 96px, right
- *              12px), so whatever it landed on is whatever it covered, for
- *              good. The coach pill hit exactly this and was made draggable in
- *              v1.42.0; this one still had a bare click handler and no way off.
- *            - Nothing new was built. makeDraggable / applyStoredPos /
- *              setFixedPos already do all of it, including the
- *              DRAG_THRESHOLD_PX that keeps a slightly imprecise tap opening
- *              the panel instead of nudging the pill and doing nothing.
- *            - Its own settings key (departPillPos), NOT shared with
- *              coachPillPos. Both pills can be on screen at once, so one
- *              shared position would stack them on top of each other — worse
- *              than the fixed anchor it replaces.
- *            - touch-action: none on the CSS rule, same as .tph-coach-pill.
- *              Without it a drag scrolls the page underneath instead of moving
- *              the element, which is "draggable" that does not drag.
- *            - Both pills are now re-clamped on rotate, and the Settings
- *              escape hatch (relabelled "Reset panel positions & size")
- *              recovers both. An escape hatch with a gap is not one.
- *            - 14 assertions in test/depart-pill-drag.test.js: tap opens and
- *              persists nothing, drag persists and does not open, the stored
- *              position is re-applied on the next mount (the pill is torn down
- *              and rebuilt every time the watch list empties and refills, so a
- *              position living only on the element is lost within minutes),
- *              and the coach pill's key is not read for it.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -200,7 +224,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.51.0';
+  const HUD_VERSION = '1.52.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -4184,6 +4208,37 @@
     win: 'color:#8ce89a !important;font-size:12.5px;margin-top:4px;',
   };
 
+  // The ACTION word, coloured by what it is. Asked for directly: "highlight any
+  // betting action in the font color too."
+  //
+  // A street reads as a run of near-identical text — "Name call $2M, Name
+  // check, Name raise $8M" — and the one thing you are scanning for is where
+  // the money went in. Colour carries that without adding a single character,
+  // which matters on an element already width-starved.
+  //
+  // Aggression is warm and separated by degree (a raise is louder than a bet),
+  // continuing is cool, and declining is grey. NOT red/green: the same rule the
+  // deviation indicators follow — a raise is not "bad" and a fold is not
+  // "good", they are different actions, and a good/bad palette would assert a
+  // judgement this file is in no position to make.
+  //
+  // Inline and !important like the rest of HH, and for the same reason: two
+  // class-based attempts were reported unreadable because Torn's own stylesheet
+  // beat ours on specificity.
+  const HH_ACT = {
+    raise: 'color:#ff7b5c !important;font-weight:700;',
+    bet: 'color:#ffa04d !important;font-weight:700;',
+    call: 'color:#7fb3e0 !important;',
+    check: 'color:#98a2ac !important;',
+    fold: 'color:#6e767e !important;',
+    post: 'color:#6e767e !important;',
+  };
+
+  // Unknown verbs render unstyled rather than being forced into a bucket. The
+  // log has surprised this file before, and a wrong colour is a confident wrong
+  // answer where no colour is merely plain.
+  function actionStyle(a) { return HH_ACT[a] || ''; }
+
   // Same hand as formatHand, rendered as markup instead of a line of text.
   // formatHand is kept for the Copy button — clipboard output should stay plain
   // text — so the two must be changed together if the content changes.
@@ -4214,9 +4269,20 @@
       // clipboard must not describe the same hand differently.
       const acts = byStreet[street].filter((a) => a.a !== 'shows').map((a) => {
         const amt = a.amt ? ` ${fmtMoney(a.amt)}` : '';
-        const txt = `${escapeHtml(playerDisplayName(a.x))} ${escapeHtml(a.a)}${amt}`;
+        // The NAME carries the focus highlight, the VERB carries the action
+        // colour, and they are separate spans so neither overrides the other.
+        // An inline colour on the inner span wins over the outer one whatever
+        // !important either carries, because the outer only ever reaches the
+        // inner by inheritance — which is exactly the layering wanted here:
+        // gold name, coloured verb, on the same line.
+        const st = actionStyle(a.a);
+        const verb = st
+          ? `<span class="tph-hh-act" style="${st}">${escapeHtml(a.a)}${amt}</span>`
+          : `${escapeHtml(a.a)}${amt}`;
+        const name = escapeHtml(playerDisplayName(a.x));
         return (focusXid && a.x === focusXid)
-          ? `<span class="tph-hh-me" style="${HH.me}">${txt}</span>` : txt;
+          ? `<span class="tph-hh-me" style="${HH.me}">${name}</span> ${verb}`
+          : `${name} ${verb}`;
       }).join(', ');
       if (acts) {
         parts.push(`<div class="tph-hh-row" style="${HH.row}">`
@@ -4361,20 +4427,89 @@
     return { voluntary, acted: mine.length > 0, score, tags, notable: score >= NOTABLE_SCORE_MIN };
   }
 
+  // A hand nobody ever bet or raised in: limped or checked round preflop, then
+  // checked down. Reported directly — "remove histories with no action preflop
+  // and became a check down pot."
+  //
+  // The test is aggression by ANYONE, not by the player being read. A pot with
+  // no bet in it teaches you nothing about anybody: nobody was ever put to a
+  // decision, so no fold, call or raise in it carries information. That is why
+  // it is one predicate over the whole hand rather than something folded into
+  // handNotability, which asks a per-player question.
+  //
+  // An EMPTY action list is not passive, it is unknown — a hand joined mid-way,
+  // or recorded before actions were persisted. Dropping those would quietly
+  // delete history this HUD simply failed to capture, so they survive.
+  function handHadNoAggression(h) {
+    const acts = (h && h.actions) || [];
+    if (!acts.length) return false;
+    return !acts.some((a) => a.a === 'bet' || a.a === 'raise');
+  }
+
   // The three History filters. 'played' is the default because a list where
   // most rows are "folded preflop, did nothing" buries the hands that carry a
   // read — which is what was reported.
+  //
+  // Played and Notable both drop no-aggression hands; All does not, and that
+  // asymmetry is deliberate. "All" has to mean all, or the count line is
+  // lying and there is no way left to see a hand the filter has an opinion
+  // about. It is the escape hatch, so it stays honest.
   const HISTORY_FILTERS = {
-    played: { label: 'Played', title: 'Hands where they called, bet or raised at least once. Blinds and checks alone do not count.' },
+    played: { label: 'Played', title: 'Hands where they called, bet or raised at least once. Blinds and checks alone do not count, and pots nobody ever bet in are dropped.' },
     notable: { label: 'Notable', title: 'Only hands carrying a marker — 3-bet, check-raise, postflop raise, big pot or showdown.' },
-    all: { label: 'All', title: 'Every hand they were dealt into, including ones they folded without acting.' },
+    all: { label: 'All', title: 'Every hand they were dealt into — folds, and pots that were checked down with no bet in them.' },
   };
 
-  function filterHandsFor(hands, xid, mode, ctx) {
+  // The tag chips, ANDed. Every selected one must be present on the hand.
+  //
+  // AND rather than OR because the question these answer is "show me the spot
+  // I am thinking of" — 3-bet AND showdown is a handful of hands worth reading;
+  // 3-bet OR showdown is most of the list, which is what the mode chips
+  // already do. Nothing selected means no tag constraint at all.
+  //
+  // ME is not one of handNotability's tags — it is about HERO, not about the
+  // player whose panel this is — so it is defined here and applied separately.
+  const HISTORY_TAG_ME = 'ME';
+
+  // Chip tooltips. Kept beside the keys rather than derived from the tag
+  // titles handNotability emits, because those are per-firing sentences
+  // ("Pot reached 62 big blinds") and a filter chip has to describe the whole
+  // class it selects.
+  const HISTORY_TAG_TITLES = {
+    '3B': 'Hands where they 3-bet preflop.',
+    '4B': 'Hands where they 4-bet or more preflop.',
+    XR: 'Hands where they check-raised — checked, then raised the same street.',
+    RR: 'Hands where they raised postflop.',
+    BIG: 'Hands where the pot got big for the stake.',
+    SD: 'Hands they showed down — the only direct evidence of their range.',
+    WON: 'Hands they won.',
+    ME: 'Hands you played too — called, bet or raised. Blinds and checks do not count.',
+  };
+
+  // Hero played this hand voluntarily. Deliberately reuses handNotability's own
+  // `voluntary` rather than a second definition of "involved": a blind you had
+  // no choice about, or a check, is not tangling with this villain, and having
+  // two answers to that question in one file is how they drift apart.
+  function heroPlayedHand(h, ctx) {
+    if (heroUnresolved()) return false;
+    return handNotability(h, heroXid, ctx).voluntary;
+  }
+
+  // `tags` is a Set/array of tag keys (HAND_TAG_KEYS plus HISTORY_TAG_ME), all
+  // required. Absent or empty means unconstrained.
+  function filterHandsFor(hands, xid, mode, ctx, tags) {
+    const want = Array.from(tags || []);
     return hands.filter((h) => {
-      if (mode === 'all') return true;
+      // Applied to Played and Notable, not All — see HISTORY_FILTERS.
+      if (mode !== 'all' && handHadNoAggression(h)) return false;
       const n = handNotability(h, xid, ctx);
-      return mode === 'notable' ? n.notable : n.voluntary;
+      // Anything that is not 'all' or 'notable' is treated as Played, so an
+      // unrecognised mode falls back to the useful default rather than showing
+      // nothing at all.
+      if (mode === 'notable') { if (!n.notable) return false; } else if (mode !== 'all' && !n.voluntary) return false;
+      if (!want.length) return true;
+      const have = new Set(n.tags.map((t) => t.key));
+      return want.every((k) => (k === HISTORY_TAG_ME ? heroPlayedHand(h, ctx) : have.has(k)));
     });
   }
 
@@ -8762,6 +8897,15 @@
       color: #a8b2bd !important; white-space: nowrap; }
     .tph-hf-on { background: #6b8cae !important; border-color: #6b8cae;
       color: #0d1117 !important; font-weight: 700; }
+    /* The tag row. The chip is the marker itself, dimmed when off — so the
+       thing you tap and the thing it matches are visibly one idea, and no
+       per-key chip colour has to be maintained alongside the marker colours.
+       Padding is the tap target: the marker alone is 9.5px text. */
+    .tph-hf-tagbar { margin-top: -4px; }
+    .tph-hft { display: inline-flex; align-items: center; padding: 4px 3px;
+      border-radius: 5px; cursor: pointer; opacity: .42; }
+    .tph-hft-on { opacity: 1; background: rgba(255,255,255,.10); }
+    .tph-hf-clear { font-size: 10px; padding: 2px 7px; align-self: center; }
     /* Per-hand markers. Colour groups them by kind rather than decorating:
        gold = preflop aggression, blue = postflop aggression, red = a big pot,
        violet = cards seen, green = won. Matches the badge role-chip palette so
@@ -8775,6 +8919,11 @@
     .tph-hh-tag-BIG { background: #ff9d8a; }
     .tph-hh-tag-SD { background: #d4b3f0; }
     .tph-hh-tag-WON { background: #8ce89a; }
+    /* Not a handNotability tag — a filter-only chip for "hero played this hand
+       too" (HISTORY_TAG_ME). Grey rather than joining the colour scheme above,
+       because those colours mean "the player you are reading did this" and
+       this one is about you. */
+    .tph-hh-tag-ME { background: #cfd6dd; }
     /* The notable hands are what the whole filter exists to surface, so they
        get a visible edge rather than only a chip. */
     .tph-hh-notable { border-left: 3px solid #ffc94d; padding-left: 6px;
@@ -9889,6 +10038,11 @@
   // Session state, not a setting: it is a way of looking at one player right
   // now, not a preference worth persisting.
   let historyFilter = 'notable';
+  // Tag chips, ANDed with each other and with the mode above. Session state for
+  // the same reason, and NOT reset when the open player changes: "show me the
+  // 3-bets" is a question you carry from one seat to the next, and having to
+  // re-select it on every panel open is the friction that stops it being used.
+  const historyTags = new Set();
   // Survives the panel closing (openPlayerXid itself goes null on close, so
   // it can't answer "is this the same player as before"). Reopening the same
   // player you just closed on — the close-to-act-then-reopen cycle this is
@@ -10300,7 +10454,7 @@
         // already-big pots and immediately stop calling any of them big.
         const pots = hands.map((h) => h.pot || 0).filter((p) => p > 0);
         const ctx = { medianPot: pots.length ? median(pots) : 0 };
-        const filtered = filterHandsFor(hands, openPlayerXid, historyFilter, ctx);
+        const filtered = filterHandsFor(hands, openPlayerXid, historyFilter, ctx, historyTags);
         const shown = filtered.slice(0, 40);
         const hiddenByFilter = hands.length - filtered.length;
         // Clipboard stays plain text; only the on-screen rendering is markup.
@@ -10308,19 +10462,43 @@
         const chips = Object.keys(HISTORY_FILTERS).map((k) => `<span class="tph-hf${
           historyFilter === k ? ' tph-hf-on' : ''}" data-hf="${k}" title="${
           escapeHtml(HISTORY_FILTERS[k].title)}">${HISTORY_FILTERS[k].label}</span>`).join('');
+        // Second row: the tag chips, ANDed. Styled as the tags they select for,
+        // so the chip you tap and the marker it matches are recognisably the
+        // same thing rather than two vocabularies for one idea.
+        //
+        // ME is hidden entirely when hero is unresolved. A chip that silently
+        // matches nothing is worse than no chip — that is the exact failure
+        // heroProblem() exists to stop being silent.
+        const tagKeys = HAND_TAG_KEYS.concat(heroUnresolved() ? [] : [HISTORY_TAG_ME]);
+        // The chip IS the marker it selects for — same class, same colour —
+        // wrapped in a tap target that carries the on/off state. One vocabulary
+        // rather than two for the same idea, and it needs no per-key chip CSS.
+        const tagChips = tagKeys.map((k) => `<span class="tph-hft${
+          historyTags.has(k) ? ' tph-hft-on' : ''}" data-hft="${k}" title="${
+          escapeHtml(HISTORY_TAG_TITLES[k] || k)}">`
+          + `<span class="tph-hh-tag tph-hh-tag-${k}">${k}</span></span>`).join('');
         // Copy takes what is on screen; Export takes everything. The two buttons
         // say which is which, because "Copy history" quietly giving you 40 of
         // 300 hands is the kind of thing you only notice much later. The count
         // now has a second way to mislead — the filter — so it is stated too.
         body.innerHTML = `<div class="tph-hf-bar">${chips}</div>`
+          + `<div class="tph-hf-bar tph-hf-tagbar">${tagChips}`
+          + `${historyTags.size ? '<span class="tph-hf tph-hf-clear" data-hft="">clear</span>' : ''}</div>`
           + `<div style="color:#c9d1d9 !important;margin-bottom:8px">${filtered.length} of ${hands.length} hand(s)`
           + `${filtered.length > shown.length ? `, showing ${shown.length}` : ''}`
           + `${hiddenByFilter > 0 ? ` · ${hiddenByFilter} hidden by filter` : ''} — `
-          + `<span style="${HH.me}">their actions highlighted</span></div>`
+          + `<span style="${HH.me}">their name highlighted</span>, `
+          + `<span style="${HH_ACT.raise}">raise</span> `
+          + `<span style="${HH_ACT.bet}">bet</span> `
+          + `<span style="${HH_ACT.call}">call</span> `
+          + `<span style="${HH_ACT.check}">check</span> `
+          + `<span style="${HH_ACT.fold}">fold</span></div>`
           + (shown.length ? '' : `<i>No hands match this filter. ${
-            historyFilter === 'notable'
-              ? 'Nothing they did here cleared the notable bar yet — try Played or All.'
-              : 'They folded every recorded hand without calling or raising — try All.'}</i>`)
+            historyTags.size
+              ? 'Every tag has to be present at once — clear one, or drop back to All.'
+              : historyFilter === 'notable'
+                ? 'Nothing they did here cleared the notable bar yet — try Played or All.'
+                : 'They folded or checked down every recorded hand — try All.'}</i>`)
           + shown.map((h, i) => {
             const n = handNotability(h, openPlayerXid, ctx);
             const tagHtml = n.tags.map((t) => `<span class="tph-hh-tag tph-hh-tag-${t.key}" title="${
@@ -10333,9 +10511,20 @@
           + (shown.length ? `<button class="tph-copy-hist">Copy shown (${shown.length})</button>` : '')
           + `<button class="tph-export-hist">${isPDA() ? 'Save / share all' : 'Download all'}`
           + ` (${hands.length})</button>`;
-        body.querySelectorAll('.tph-hf').forEach((chip) => {
+        body.querySelectorAll('[data-hf]').forEach((chip) => {
           chip.addEventListener('click', () => {
             historyFilter = chip.dataset.hf;
+            renderPlayerPanel();
+          });
+        });
+        // Multi-select, so a tap TOGGLES rather than replacing the selection —
+        // the whole point of the row. The empty data-hft is the clear chip.
+        body.querySelectorAll('[data-hft]').forEach((chip) => {
+          chip.addEventListener('click', () => {
+            const k = chip.dataset.hft;
+            if (!k) historyTags.clear();
+            else if (historyTags.has(k)) historyTags.delete(k);
+            else historyTags.add(k);
             renderPlayerPanel();
           });
         });
@@ -12015,6 +12204,12 @@
       parseAffiliationProfile,
       repairAffiliationCache,
       handNotability,
+      handHadNoAggression,
+      heroPlayedHand,
+      HISTORY_TAG_ME,
+      HISTORY_TAG_TITLES,
+      HH_ACT,
+      actionStyle,
       filterHandsFor,
       HISTORY_FILTERS,
       HAND_TAG_KEYS,

@@ -198,7 +198,10 @@ const act = (x, a, s, amt) => ({ x, a, s, amt: amt || 0 });
   const hands = [
     hand({ actions: [act('V', 'fold', 'preflop')] }),                                  // not played
     hand({ actions: [act('V', 'post', 'preflop', 50), act('V', 'fold', 'preflop')] }), // not played
-    hand({ actions: [act('V', 'call', 'preflop', 100)] }),                             // played, not notable
+    // Played but untagged. X's raise is what keeps it out of the no-aggression
+    // exclusion below — a pot V merely limped into and checked down is dropped
+    // from Played now, which the next block covers directly.
+    hand({ actions: [act('X', 'raise', 'preflop', 300), act('V', 'call', 'preflop', 300)] }),
     hand({ actions: [act('X', 'raise', 'preflop', 300), act('V', 'raise', 'preflop', 900)] }), // 3B
   ];
 
@@ -218,6 +221,191 @@ const act = (x, a, s, amt) => ({ x, a, s, amt: amt || 0 });
     T.filterHandsFor(hands, 'V', 'nonsense', {}).length, 2);
 }
 
+// --- no-aggression pots: nobody ever bet, so nobody learned anything -------
+//
+// Reported directly: "remove histories with no action preflop and became a
+// check down pot."
+//
+// The test is aggression by ANYONE, not by the player being read, and that is
+// the point. A pot with no bet in it never put anybody to a decision, so no
+// fold, call or check in it carries information about anyone at the table.
+// That is why it is one predicate over the whole hand rather than something
+// folded into handNotability, which asks a per-player question.
+
+{
+  const T = load();
+  T.STORE = T.emptyStore();
+
+  const limpedDown = hand({
+    street: 'river',
+    actions: [
+      act('V', 'post', 'preflop', 50), act('V', 'call', 'preflop', 100),
+      act('X', 'check', 'preflop'),
+      act('V', 'check', 'flop'), act('X', 'check', 'flop'),
+      act('V', 'check', 'turn'), act('X', 'check', 'turn'),
+      act('V', 'check', 'river'), act('X', 'check', 'river'),
+    ],
+  });
+  t.ok('a limped, checked-down pot has no aggression', T.handHadNoAggression(limpedDown));
+
+  ['bet', 'raise'].forEach((a) => {
+    const h = hand({ actions: [act('X', a, 'flop', 500), act('V', 'fold', 'flop')] });
+    t.ok(`one ${a} by ANYONE is enough to keep it`, !T.handHadNoAggression(h));
+  });
+
+  // A call is not aggression — it is the thing that happens when somebody else
+  // was aggressive, and on its own it means the pot was limped.
+  const limpOnly = hand({ actions: [act('V', 'call', 'preflop', 100), act('X', 'call', 'preflop', 100)] });
+  t.ok('calls alone are not aggression', T.handHadNoAggression(limpOnly));
+
+  // The important guard. An empty action list is UNKNOWN, not passive — a hand
+  // joined mid-way, or one recorded before actions were persisted. Reading it
+  // as a checkdown would silently delete history the HUD merely failed to
+  // capture, which is not the same thing as history not worth keeping.
+  t.ok('a hand with no recorded actions is not called passive',
+    !T.handHadNoAggression(hand({ actions: [] })));
+  t.ok('and neither is one with no actions key at all',
+    !T.handHadNoAggression(hand({ actions: undefined })));
+}
+
+{
+  const T = load();
+  T.STORE = T.emptyStore();
+  const checkdown = hand({
+    actions: [act('V', 'call', 'preflop', 100), act('V', 'check', 'flop'), act('X', 'check', 'flop')],
+  });
+  const real = hand({ actions: [act('X', 'raise', 'preflop', 300), act('V', 'call', 'preflop', 300)] });
+  const hands = [checkdown, real];
+
+  t.eq('Played drops the checked-down pot', T.filterHandsFor(hands, 'V', 'played', {}).length, 1);
+  t.eq('Notable drops it too', T.filterHandsFor(hands, 'V', 'notable', {}).length, 0);
+  // All has to mean all, or the count line lies and there is no way left to
+  // see a hand the filter has an opinion about. It is the escape hatch.
+  t.eq('but All still shows it', T.filterHandsFor(hands, 'V', 'all', {}).length, 2);
+}
+
+// --- tag filters, ANDed ---------------------------------------------------
+//
+// AND rather than OR because the question is "show me the spot I am thinking
+// of". 3-bet OR showdown is most of the list, which is what the mode chips
+// already do; 3-bet AND showdown is a handful worth reading.
+
+{
+  const T = load();
+  T.STORE = T.emptyStore();
+
+  const threeBet = hand({
+    actions: [act('X', 'raise', 'preflop', 300), act('V', 'raise', 'preflop', 900)],
+  });
+  const threeBetShown = hand({
+    actions: [act('X', 'raise', 'preflop', 300), act('V', 'raise', 'preflop', 900)],
+    shown: { V: 'A♠ K♠' },
+  });
+  const shownOnly = hand({
+    actions: [act('X', 'raise', 'preflop', 300), act('V', 'call', 'preflop', 300)],
+    shown: { V: '7♦ 2♣' },
+  });
+  const hands = [threeBet, threeBetShown, shownOnly];
+
+  t.eq('no tags selected is unconstrained',
+    T.filterHandsFor(hands, 'V', 'all', {}, []).length, 3);
+  t.eq('one tag filters to the hands carrying it',
+    T.filterHandsFor(hands, 'V', 'all', {}, ['3B']).length, 2);
+  t.eq('and a Set works as well as an array',
+    T.filterHandsFor(hands, 'V', 'all', {}, new Set(['SD'])).length, 2);
+  // The whole point: two tags is an intersection, not a union. Under OR this
+  // would be 3.
+  t.eq('two tags require BOTH, not either',
+    T.filterHandsFor(hands, 'V', 'all', {}, ['3B', 'SD']).length, 1);
+  t.eq('and the survivor is the right one',
+    T.filterHandsFor(hands, 'V', 'all', {}, ['3B', 'SD'])[0], threeBetShown);
+  t.eq('a tag nothing carries returns nothing rather than everything',
+    T.filterHandsFor(hands, 'V', 'all', {}, ['XR']).length, 0);
+
+  // Tags stack with the mode rather than replacing it.
+  const foldedButShown = hand({
+    actions: [act('X', 'raise', 'preflop', 300), act('V', 'fold', 'preflop')],
+    shown: { V: '7♦ 2♣' },
+  });
+  t.eq('All + SD sees the hand V folded', T.filterHandsFor([foldedButShown], 'V', 'all', {}, ['SD']).length, 1);
+  t.eq('Played + SD does not — V never put money in',
+    T.filterHandsFor([foldedButShown], 'V', 'played', {}, ['SD']).length, 0);
+}
+
+// --- the ME tag: hands hero played too ------------------------------------
+
+{
+  const T = load();
+  T.STORE = T.emptyStore();
+  T.heroXid = 'HERO';
+
+  const together = hand({
+    actions: [act('V', 'raise', 'preflop', 300), act('HERO', 'call', 'preflop', 300)],
+  });
+  const heroFolded = hand({
+    actions: [act('V', 'raise', 'preflop', 300), act('HERO', 'fold', 'preflop')],
+  });
+  const heroBlindOnly = hand({
+    actions: [act('V', 'raise', 'preflop', 300), act('HERO', 'post', 'preflop', 50),
+      act('HERO', 'fold', 'preflop')],
+  });
+  const hands = [together, heroFolded, heroBlindOnly];
+
+  t.eq('ME keeps only the hand hero actually played',
+    T.filterHandsFor(hands, 'V', 'all', {}, ['ME']).length, 1);
+  t.eq('and it is the right one', T.filterHandsFor(hands, 'V', 'all', {}, ['ME'])[0], together);
+  // Reuses handNotability's own `voluntary`, so a blind you had no choice
+  // about is not "involved" — the same answer the Played chip gives for a
+  // villain. Two definitions of involvement in one file is how they drift.
+  t.eq('posting a blind and folding is not being involved',
+    T.heroPlayedHand(heroBlindOnly, {}), false);
+  t.eq('calling is', T.heroPlayedHand(together, {}), true);
+
+  // ME ANDs with the other tags like any of them.
+  t.eq('ME + a tag requires both',
+    T.filterHandsFor(hands, 'V', 'all', {}, ['ME', 'SD']).length, 0);
+}
+
+// With hero unresolved, ME can only ever match nothing. The chip is hidden in
+// that state (see renderPlayerPanel), and the predicate says so honestly here
+// rather than quietly returning an empty list from a control that looks live.
+
+{
+  const T = load();
+  T.STORE = T.emptyStore();
+  T.heroXid = null;
+  const h = hand({ actions: [act('HERO', 'call', 'preflop', 300)] });
+  t.eq('an unresolved hero is never "involved"', T.heroPlayedHand(h, {}), false);
+  T.heroXid = 'name:Wonkawee'; // the pseudo-id, which is truthy and NOT resolved
+  t.eq('and neither is the name: pseudo-id', T.heroPlayedHand(h, {}), false);
+}
+
+// --- action colours -------------------------------------------------------
+//
+// Asked for directly: "highlight any betting action in the font color too."
+
+{
+  const T = load();
+  t.ok('a raise is styled', T.actionStyle('raise').length > 0);
+  t.ok('a bet is styled', T.actionStyle('bet').length > 0);
+  t.ok('raise and bet are not the same colour — a raise is the louder action',
+    T.actionStyle('raise') !== T.actionStyle('bet'));
+  t.ok('call is styled differently from both',
+    T.actionStyle('call') !== T.actionStyle('raise') && T.actionStyle('call') !== T.actionStyle('bet'));
+  t.ok('check and fold are styled', T.actionStyle('check').length > 0 && T.actionStyle('fold').length > 0);
+  // An unknown verb renders plain rather than being forced into a bucket. The
+  // log has surprised this file before, and a wrong colour is a confident wrong
+  // answer where no colour is merely plain.
+  t.eq('an unrecognised action gets no colour', T.actionStyle('teleports'), '');
+  t.eq('and neither does an undefined one', T.actionStyle(undefined), '');
+  // Inline !important, like the rest of HH — two class-based attempts were
+  // reported unreadable because Torn's stylesheet beat ours on specificity.
+  Object.keys(T.HH_ACT).forEach((k) => {
+    t.ok(`${k} is declared !important so no page rule can beat it`,
+      /!important/.test(T.HH_ACT[k]));
+  });
+}
+
 // --- the tag keys all have CSS, and nothing emits an undeclared one --------
 //
 // This is the assertion that earns test/no-orphans.test.js's exemption for the
@@ -231,6 +419,17 @@ const act = (x, a, s, amt) => ({ x, a, s, amt: amt || 0 });
   const src = fs.readFileSync(require('./harness').SCRIPT_PATH, 'utf8');
 
   t.ok('there are tag keys to check at all', T.HAND_TAG_KEYS.length >= 5);
+  // ME is not a handNotability tag — it is a filter-only chip — but it is
+  // rendered with the same tph-hh-tag-<key> class, so it hits the same silent
+  // failure mode and needs the same check.
+  t.ok(`.tph-hh-tag-${T.HISTORY_TAG_ME} has a CSS rule`,
+    src.indexOf(`.tph-hh-tag-${T.HISTORY_TAG_ME}`) !== -1);
+  // Every chip needs a tooltip, or it is two letters with no way to find out
+  // what it selects.
+  T.HAND_TAG_KEYS.concat([T.HISTORY_TAG_ME]).forEach((key) => {
+    t.ok(`${key} has a filter-chip tooltip`,
+      typeof T.HISTORY_TAG_TITLES[key] === 'string' && T.HISTORY_TAG_TITLES[key].length > 10);
+  });
   T.HAND_TAG_KEYS.forEach((key) => {
     t.ok(`.tph-hh-tag-${key} has a CSS rule`,
       new RegExp(`\\.tph-hh-tag-${key}\\b`).test(src));

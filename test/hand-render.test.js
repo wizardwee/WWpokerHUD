@@ -180,4 +180,61 @@ function hand(o) {
   t.ok('and still shows its reveal', T.formatHand(old, null).indexOf('A♠ K♦') !== -1);
 }
 
+// --- the action verb carries a colour, the name carries the focus ---------
+//
+// Asked for directly: "highlight any betting action in the font color too."
+// A street reads as a run of near-identical text, and the one thing you are
+// scanning for is where the money went in.
+//
+// The two highlights have to LAYER rather than fight. The focus wrap used to
+// cover the whole "Name verb amount" string, so a colour on the verb inside it
+// is only correct if the inner span wins — which it does, because the outer
+// only ever reaches the inner by inheritance. Pinned here because getting it
+// backwards renders one gold blob and looks like the feature simply did not
+// land.
+
+{
+  const T = load();
+  T.STORE = T.emptyStore();
+  const h = hand({
+    street: 'flop',
+    actions: [act('V', 'raise', 'preflop', 900), act('W', 'call', 'preflop', 900),
+      act('V', 'bet', 'flop', 1200), act('W', 'fold', 'flop')],
+  });
+  const html = T.formatHandHtml(h, 'V');
+
+  t.ok('the focused player\'s NAME is wrapped', html.indexOf('class="tph-hh-me"') !== -1);
+  t.ok('and the verb is wrapped separately', html.indexOf('class="tph-hh-act"') !== -1);
+  // The layering, stated as the thing that actually has to be true: the focus
+  // span closes before the action span opens, so neither contains the other.
+  const meAt = html.indexOf('class="tph-hh-me"');
+  const closeAt = html.indexOf('</span>', meAt);
+  const actAt = html.indexOf('class="tph-hh-act"', meAt);
+  t.ok('the name span closes before the action span opens', closeAt < actAt);
+
+  t.ok('a raise carries the raise colour', html.indexOf(T.HH_ACT.raise) !== -1);
+  t.ok('a bet carries the bet colour', html.indexOf(T.HH_ACT.bet) !== -1);
+  t.ok('a call carries the call colour', html.indexOf(T.HH_ACT.call) !== -1);
+  t.ok('a fold carries the fold colour', html.indexOf(T.HH_ACT.fold) !== -1);
+
+  // The amount rides inside the verb span, so the figure is coloured with the
+  // action that produced it rather than floating loose between two colours.
+  t.ok('the amount is inside the action span',
+    /class="tph-hh-act"[^>]*>raise [^<]*<\/span>/.test(html));
+}
+
+// Colour is presentation, so the CLIPBOARD text must be unchanged by it — the
+// tab, the clipboard and the file describing one hand three ways is the exact
+// drift this file exists to catch.
+
+{
+  const T = load();
+  T.STORE = T.emptyStore();
+  const h = hand({ actions: [act('V', 'raise', 'preflop', 900)] });
+  const text = T.formatHand(h, 'V');
+  t.ok('the plain text still marks the focused player with *', text.indexOf('*') !== -1);
+  t.ok('and still names the action', text.indexOf('raise') !== -1);
+  t.ok('with no markup in it', text.indexOf('<span') === -1);
+}
+
 process.exit(t.report());

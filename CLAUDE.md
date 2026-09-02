@@ -678,6 +678,59 @@ read, and the numbers are one tap away in Stats.
 make it findable, not the size. It floats over the table permanently, so it is
 also the one element that always costs screen.
 
+## The History tab's filters (v1.52.0)
+
+Three layers, and they compose: the **mode** chips (Played / Notable / All,
+single-select), the **tag** chips (`HAND_TAG_KEYS` plus `ME`, multi-select and
+**ANDed**), and a standing exclusion for pots nobody ever bet in.
+
+**`handHadNoAggression(h)` asks about the HAND, not the player.** A pot with no
+bet or raise in it from anyone never put anybody to a decision, so no fold, call
+or check in it is evidence about anyone at the table. That is why it is not
+folded into `handNotability`, which answers a per-player question.
+
+- **An empty `actions` list is unknown, not passive**, and survives. A hand
+  joined mid-way, or one recorded before actions were persisted, is history the
+  HUD failed to capture — not history not worth keeping.
+- **It applies to Played and Notable, never to All.** "All" has to mean all, or
+  the count line lies and there is no way left to see a hand the filter has an
+  opinion about. Don't extend the exclusion to it "for consistency".
+
+**Tags AND, they do not OR.** 3-bet *or* showdown is most of the list, which is
+what the mode chips already do; 3-bet *and* showdown is the handful you were
+looking for. Nothing selected means unconstrained.
+
+**`ME` is not a `handNotability` tag** — it is about hero, not about the player
+whose panel is open — so `heroPlayedHand` applies it separately, reusing
+`handNotability(h, heroXid).voluntary` rather than defining "involved" a second
+time. The chip is **hidden** when `heroUnresolved()`, because a control that
+silently matches nothing is the exact failure `heroProblem()` exists to prevent.
+
+**The chip is the marker it selects for** (`tph-hh-tag-<key>`, dimmed when off),
+so there is one vocabulary rather than a chip palette that can drift from the
+marker palette. `ME` needs its own `tph-hh-tag-ME` rule for the same reason every
+generated class here does — a missing rule renders an unstyled chip and throws
+nothing. `test/hand-notability.test.js` covers that, since `no-orphans`' literal
+scan cannot see a concatenated class.
+
+### Action colour is layered under the focus highlight
+
+`HH_ACT` colours the action VERB; `HH.me` colours the focus player's NAME. They
+are **separate spans** — the focus span closes before the action span opens — so
+neither overrides the other. The focus wrap used to cover the whole
+`Name verb amount` string; a colour inside such a wrap is only correct because
+the outer reaches the inner by inheritance alone, and getting the nesting
+backwards renders one gold blob that looks like the feature never landed. Pinned
+in `test/hand-render.test.js`.
+
+Warm for aggression (raise louder than bet), cool for continuing, grey for
+declining — **never red/green**, same rule as the deviation indicators: a raise
+is not "bad" and a fold is not "good". An unrecognised verb renders plain rather
+than being forced into a bucket.
+
+`formatHand` (clipboard, export) is untouched by any of this. Colour is
+presentation; the content of the three renderings must stay identical.
+
 ## Exporting the history (v0.42.0)
 
 `playerHistoryExport(xid)` writes **every** recorded hand against a player, not
