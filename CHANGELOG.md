@@ -9,6 +9,70 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.49.0
+
+The departure pill is movable now.
+
+Asked directly: *"the pill attack/hospital counter should be moveable."*
+
+### It floats over the felt at a fixed anchor
+
+`.tph-depart-pill` sat at `bottom: 96px; right: 12px` with a bare `click`
+handler, so whatever it landed on is whatever it covered — permanently. The
+coach pill hit exactly this problem and was made draggable in v1.42.0; this one
+never was.
+
+### Nothing new was built
+
+`makeDraggable` / `applyStoredPos` / `setFixedPos` already do all of it,
+including the `DRAG_THRESHOLD_PX` (6px) that separates a tap from a drag — so a
+slightly imprecise tap still opens the panel rather than nudging the pill and
+appearing to do nothing.
+
+The click handler was **replaced**, not supplemented. Leaving both wired would
+fire the panel open at the end of every drag, which is the exact behaviour that
+makes a draggable element feel broken.
+
+### Its own settings key
+
+`departPillPos`, not shared with `coachPillPos`. Both pills can be on screen at
+the same time, so a single shared position would stack them on top of each
+other — worse than the fixed anchor it replaces.
+
+### touch-action: none
+
+Same requirement as `.tph-coach-pill`, and the thing that makes a draggable
+element actually draggable in a touch webview: without it, a drag scrolls the
+page underneath instead of moving the element.
+
+### The escape hatch covers both pills
+
+Settings' reset button is relabelled **"Reset panel positions & size"** and now
+clears `departPillPos` too, and the rotate handler re-clamps both pills rather
+than just the coach's. An escape hatch with a gap in it is not an escape hatch,
+and the departure pill is the one carrying a time-limited alert — the worse of
+the two to lose off-screen.
+
+### Tests
+
+14 assertions in `test/depart-pill-drag.test.js`. "Draggable" is not one
+property, it is four things that all have to hold at once, and the file asserts
+each:
+
+- a tap opens the panel and persists nothing;
+- a drag persists a `{left, top}` and does **not** open the panel;
+- the stored position is re-applied on the next **mount** — the pill is torn
+  down whenever the alertable list empties and rebuilt when someone else
+  leaves, several times a session, so a position living only on the element is
+  lost within minutes of being set;
+- the coach pill's key is not read for it.
+
+`classDom()` in `test/harness.js` gained a `classList` backed by `className`,
+because `makeDraggable` toggles `.tph-dragging` and would otherwise throw on the
+first `pointermove`. Backed by `className` rather than kept beside it, so
+`classes()` and the `.foo` selector matching always agree with what `classList`
+did.
+
 ## 1.48.0
 
 Refactor, no behaviour change: one API probe instead of three copies of the

@@ -54,6 +54,16 @@ function classDom() {
       // Test helper: fire a listener the way a tap would.
       _fire(ev) { (el.listeners[ev] || []).forEach((fn) => fn({ target: el })); },
       classes() { return String(el.className || '').split(/\s+/).filter(Boolean); },
+      // Backed by className rather than kept alongside it, so classes() and
+      // the .foo selector match above always agree with what classList did.
+      // Added for makeDraggable, which toggles .tph-dragging on every drag and
+      // would otherwise throw on the first pointermove.
+      classList: {
+        add(c) { if (!el.classes().includes(c)) el.className = el.classes().concat(c).join(' '); },
+        remove(c) { el.className = el.classes().filter((x) => x !== c).join(' '); },
+        contains(c) { return el.classes().includes(c); },
+        toggle(c, on) { const has = el.classes().includes(c); const want = on == null ? !has : !!on; if (want) this.add(c); else this.remove(c); },
+      },
       setAttribute() {},
       getAttribute: () => null,
       removeAttribute() {},

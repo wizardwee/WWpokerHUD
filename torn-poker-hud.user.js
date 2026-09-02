@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.48.0
+// @version      1.49.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,33 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.49.0 - The departure pill is movable now. Asked directly: "the pill
+ *          attack/hospital counter should be moveable."
+ *            - IT FLOATS OVER THE FELT AT A FIXED ANCHOR (bottom 96px, right
+ *              12px), so whatever it landed on is whatever it covered, for
+ *              good. The coach pill hit exactly this and was made draggable in
+ *              v1.42.0; this one still had a bare click handler and no way off.
+ *            - Nothing new was built. makeDraggable / applyStoredPos /
+ *              setFixedPos already do all of it, including the
+ *              DRAG_THRESHOLD_PX that keeps a slightly imprecise tap opening
+ *              the panel instead of nudging the pill and doing nothing.
+ *            - Its own settings key (departPillPos), NOT shared with
+ *              coachPillPos. Both pills can be on screen at once, so one
+ *              shared position would stack them on top of each other — worse
+ *              than the fixed anchor it replaces.
+ *            - touch-action: none on the CSS rule, same as .tph-coach-pill.
+ *              Without it a drag scrolls the page underneath instead of moving
+ *              the element, which is "draggable" that does not drag.
+ *            - Both pills are now re-clamped on rotate, and the Settings
+ *              escape hatch (relabelled "Reset panel positions & size")
+ *              recovers both. An escape hatch with a gap is not one.
+ *            - 14 assertions in test/depart-pill-drag.test.js: tap opens and
+ *              persists nothing, drag persists and does not open, the stored
+ *              position is re-applied on the next mount (the pill is torn down
+ *              and rebuilt every time the watch list empties and refills, so a
+ *              position living only on the element is lost within minutes),
+ *              and the coach pill's key is not read for it.
  *
  * 1.48.0 - Refactor, no behaviour change: one API probe instead of three
  *          copies of the same one. Asked directly ("refactor and compact?").
@@ -98,32 +125,6 @@
  *              able to explain its own silence.
  *            - 37 assertions in test/spy-stats.test.js.
  *
- * 1.46.0 - Departure panel: show the stack ("chips") they left with, not just
- *          level. Asked directly: "current departure panel pill does not show
- *          chips."
- *            - THE DATA ALREADY EXISTED. trackStacks() already freezes
- *              p.stack.now the instant a seat stops reporting someone —
- *              readAllStacks() only sees who is still seated — so the
- *              departure list had nothing to snapshot itself; it just reads
- *              what trackStacks already froze. The same "check whether it's
- *              already collected" pattern that has paid off several times in
- *              this file (fold-to-c-bet, per-street aggression, postflop
- *              re-raise).
- *            - Read via a plain STORE.players[xid] lookup, NOT getPlayer(xid,
- *              name). getPlayer bumps lastSeen on every call, and the panel
- *              calls departedList() on every render tick — going through it
- *              would have made an open panel keep a long-departed player
- *              looking "recently seen" purely from being displayed, a write
- *              side effect from what should be a read.
- *            - Renders as "$41.2M chips" beside level, through fmtMoney like
- *              every other money figure here. No stack ever recorded (the
- *              seat's stack selector never matched this player before they
- *              left) renders nothing rather than "$0 chips" — absent reads as
- *              absent, not as broke.
- *            - 9 new assertions in test/departure-watch.test.js, including one
- *              that pins the getPlayer/STORE.players[xid] distinction
- *              directly: reading the list must not move lastSeen.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -185,7 +186,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.48.0';
+  const HUD_VERSION = '1.49.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -475,6 +476,10 @@
     // without losing the list.
     departureWatch: true,
     departureCue: true,
+    // {left, top} once you've dragged the departure pill somewhere. Its own
+    // key, not shared with coachPillPos: the two pills can both be on screen
+    // at once, so one stored position would stack them on top of each other.
+    departPillPos: null,
     departureVibrate: false, // opt-in, same as the turn cue's
     departureSound: false,   // opt-in
     turnVibrate: false, // opt-in: a short buzz on the rising edge only
@@ -8417,10 +8422,15 @@
     .tph-depart-glow { position: fixed; inset: 0; z-index: 99997; pointer-events: none;
       box-shadow: inset 0 0 0 3px rgba(255,157,138,.85); animation: tphDepart 1.3s ease-out 2; }
     @keyframes tphDepart { 0% { opacity: 0; } 30% { opacity: 1; } 100% { opacity: 0; } }
+    /* touch-action:none so dragging the pill moves it instead of scrolling the
+       page underneath — same requirement as .tph-coach-pill, and the thing
+       that makes a draggable element actually draggable in a touch webview. */
     .tph-depart-pill { position: fixed; z-index: 99998; bottom: 96px; right: 12px;
       background: #ff9d8a !important; color: #14100f !important; font-weight: 700;
       font: 700 12px/1 -apple-system, sans-serif !important; padding: 7px 11px;
-      border-radius: 13px; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,.45); }
+      border-radius: 13px; cursor: grab; touch-action: none; user-select: none;
+      box-shadow: 0 2px 8px rgba(0,0,0,.45); }
+    .tph-depart-pill.tph-dragging { cursor: grabbing; opacity: 0.85; }
     .tph-depart-note { color: #8d959c !important; font-size: 10.5px; margin: 0 0 8px; }
     .tph-depart-row { display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
       padding: 6px; margin-bottom: 6px; border-radius: 4px;
@@ -10250,13 +10260,23 @@
     const pill = document.createElement('div');
     pill.className = 'tph-depart-pill';
     pill.textContent = label;
-    pill.title = 'Players who left the table while attackable. Tap to open.';
-    pill.addEventListener('click', () => {
-      departedPanelOpen = true;
-      renderDepartedPill();
-      renderDepartedPanel();
-    });
+    pill.title = 'Players who left the table while attackable. Tap to open, drag to move.';
     document.body.appendChild(pill);
+    applyStoredPos(pill, 'departPillPos', PILL_KEEP_VISIBLE_PX);
+    // Same treatment the coach pill already got, and for the same reason: it
+    // is a fixed-position element floating over the felt, so whatever it lands
+    // on is whatever it covers until you can move it. A bare click handler
+    // gave no way off. makeDraggable's DRAG_THRESHOLD_PX keeps a slightly
+    // imprecise tap opening the panel rather than nudging the pill.
+    makeDraggable(pill, {
+      onTap: () => {
+        departedPanelOpen = true;
+        renderDepartedPill();
+        renderDepartedPanel();
+      },
+      posKey: 'departPillPos',
+      keepVisiblePx: PILL_KEEP_VISIBLE_PX,
+    });
   }
 
   function renderDepartedPanel() {
@@ -10539,7 +10559,7 @@
         Whatever you set, the call/fold verdict goes quiet and reads &ldquo;marginal&rdquo; when the spot is closer
         than the simulation can actually resolve.</div>
       <div style="opacity:.7;margin:2px 0 6px">Equity is always quoted against a full ring of this size, plus the live and heads-up counts.</div>
-      <button class="tph-coach-reset">Reset coach position &amp; size</button>
+      <button class="tph-coach-reset">Reset panel positions &amp; size</button>
       <div style="opacity:.7;margin:2px 0 10px">Drag the ◢ corner to resize the coach panel — it stays where you put
         it, at the size you set, and now stays on screen between hands instead of disappearing.</div>
       <label><input type="checkbox" class="tph-calib-toggle" ${STORE.settings.calibrationMode ? 'checked' : ''}> Calibration mode</label><br><br>
@@ -10776,13 +10796,18 @@
       STORE.settings.coachPos = null;
       STORE.settings.coachPillPos = null; // the pill is draggable too, and can be
                                           // parked out of reach just as easily
+      STORE.settings.departPillPos = null; // and so is the departure pill — one
+                                           // button has to recover every floating
+                                           // element, or the escape hatch has a gap
       STORE.settings.coachSize = null;    // and a panel shrunk to its floor is as
                                           // unusable as one parked off screen
       saveStore();
       const coach = document.querySelector('.tph-coach');
       if (coach) coach.remove(); // rebuilt at the default anchor on the next tick
-      const pill = document.querySelector('.tph-coach-pill');
-      if (pill) pill.remove();
+      ['.tph-coach-pill', '.tph-depart-pill'].forEach((sel) => {
+        const pill = document.querySelector(sel);
+        if (pill) pill.remove(); // rebuilt at its CSS anchor on the next tick
+      });
     });
     [['.tph-depart-toggle', 'departureWatch'], ['.tph-departcue-toggle', 'departureCue'],
       ['.tph-departvib-toggle', 'departureVibrate'], ['.tph-departsound-toggle', 'departureSound'],
@@ -11518,11 +11543,15 @@
           setFixedPos(coach, cr.left, cr.top, COACH_KEEP_VISIBLE_PX);
         }
       }
-      const pill = document.querySelector('.tph-coach-pill');
-      if (pill && STORE.settings.coachPillPos) {
+      // Both pills, not just the coach's. A rotate that narrows the viewport
+      // can leave either of them off screen, and the departure pill is the one
+      // carrying a time-limited alert — it is the worse one to lose.
+      [['.tph-coach-pill', 'coachPillPos'], ['.tph-depart-pill', 'departPillPos']].forEach(([sel, key]) => {
+        const pill = document.querySelector(sel);
+        if (!pill || !STORE.settings[key]) return;
         const pr = pill.getBoundingClientRect();
         setFixedPos(pill, pr.left, pr.top, PILL_KEEP_VISIBLE_PX);
-      }
+      });
     });
   }
 
@@ -11853,6 +11882,10 @@
 
       // --- DOM-touching, exercised against the harness's minimal document ---
       renderPanel,
+      renderDepartedPill,
+      PILL_KEEP_VISIBLE_PX,
+      get departedPanelOpen() { return departedPanelOpen; },
+      set departedPanelOpen(v) { departedPanelOpen = v; },
       get STORE() { return STORE; },
       set STORE(s) { STORE = s; },
       get heroXid() { return heroXid; },
