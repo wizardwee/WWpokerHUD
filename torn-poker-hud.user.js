@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.50.0
+// @version      1.51.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,61 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.51.0 - Coaching advice: a stale-target bug, a ranking that ignored how far
+ *          a player actually deviates, no memory of what it had already said,
+ *          and one line where there was room for two. Reported directly: the
+ *          advice "seems pretty stale and [...] repeats advice too much across
+ *          player base."
+ *            - THE BUG FIRST, because it is a bug and not a tuning question.
+ *              hand.lastAggressor is written on every raise and NEVER cleared
+ *              when that player folds. It carried a +1000 bonus in
+ *              currentExploitTip and fed betFacing in buildCoachAdvice — so a
+ *              villain who bet the flop and folded to hero's raise kept being
+ *              the player the coach talked about for the rest of the hand, and
+ *              the pot-odds line went on quoting a bet nobody was making.
+ *              streetLeader() (biggest street contributor still in the hand)
+ *              and liveAggressor() (last raiser, only while still in) replace
+ *              it. handContextTokens' `facing` test is the same call now, so
+ *              the token and the number cannot disagree.
+ *            - MEASURED, NOT GUESSED. Over 400 synthetic players spread around
+ *              POOL_AVG by a full POOL_SPREAD — WIDER than the real pool — two
+ *              tips led for 45% of the field and four for 63%. The cause: gain
+ *              is a constant per RULE, so a villain two points past the
+ *              fold-to-c-bet threshold and one at 80% scored identically, and
+ *              whichever rule carried the higher constant won for everybody.
+ *            - `edge` (0..1) on each rule, scored at ±20 around neutral. It is
+ *              a TIEBREAKER: the gain ladder encodes a real judgement
+ *              (postflop reads beat preflop against this pool) and a span wide
+ *              enough to overturn it would replace that judgement with an
+ *              arbitrary one. Effect, measured: cross-player concentration
+ *              45% -> 41% (small, as expected), but it changes the LEAD read
+ *              for 29% of players who have more than one — which is where it
+ *              was always going to matter.
+ *            - TIP FATIGUE is the actual fix for repetition. Nothing
+ *              remembered what it had said, so one sentence rendered every
+ *              1.5s for a session. Now counted per (player, tag) per SPOT
+ *              (hand + street), never per render, decaying after 10 minutes.
+ *              THE INVARIANT: TIP_FATIGUE_MAX (54) is capped below
+ *              EXPLOIT_RELEVANT_BONUS (60), so rotation can never swap a read
+ *              matching the spot hero is in for one that does not. Pinned from
+ *              both sides in test/coach-fatigue.test.js.
+ *            - PER PLAYER ONLY, asked and answered. Global per-tag fatigue
+ *              would flatten the cross-player concentration directly, but by
+ *              suppressing a correct read on a new villain because you saw the
+ *              same read on somebody else — accuracy traded for variety. Out.
+ *            - TWO reads in the panel, one loud and one dim, the second in its
+ *              short form. The runner-up was already being computed and thrown
+ *              away. The collapsed pill stays at one; it has no room.
+ *            - A DIAGNOSTIC in the players list: distinct lead reads across
+ *              your tracked pool, and the top three with their shares. Same
+ *              reason observedPoolAverages() exists — POOL_AVG sat on borrowed
+ *              figures until something reported what this HUD had really seen.
+ *              Memoised behind a 30s TTL: it runs buildExploitPlan per player,
+ *              and renderPlayersList re-renders on every keystroke.
+ *            - 56 assertions in test/coach-fatigue.test.js, checked against the
+ *              old behaviour first — reverting the aggressor guard or zeroing
+ *              the fatigue step fails four of them.
  *
  * 1.50.0 - Moving tables no longer reports the whole old table as departures.
  *          Reported directly: "it should NOT mistakenly count players in when
@@ -84,41 +139,6 @@
  *              position living only on the element is lost within minutes),
  *              and the coach pill's key is not read for it.
  *
- * 1.48.0 - Refactor, no behaviour change: one API probe instead of three
- *          copies of the same one. Asked directly ("refactor and compact?").
- *            - WHAT WAS ACTUALLY WRONG. v1.34.0 built the "explain your own
- *              silence" apparatus for target status after a live report of
- *              exactly that failure. v1.47.0 then copied the whole thing
- *              VERBATIM for the spy lookup: ten parallel module-level `let`s
- *              in two identical sets, two identical diagnostics, two
- *              identical fetch bodies. Both mine, one commit apart.
- *            - Now apiProbe() owns the five counters and the diagnostic
- *              state machine; probeFetch() owns the fetch/parse/cache body.
- *              The wording is the part that must never drift between two
- *              features: a diagnostic that reads differently for two lookups
- *              failing the same way implies a distinction that isn't there.
- *            - IT DID NOT COMPACT ANYTHING, and saying otherwise would be
- *              false: +5 net code lines. The parameter surface of a shared
- *              helper costs about what the duplication did. The win is that
- *              a THIRD copy is now cheap and the two existing ones cannot
- *              drift — not size.
- *            - STOPPED SHORT on purpose: the request/refreshSeated pairs are four
- *              short obvious functions differing by gate/cache/window, and
- *              folding them would trade six readable lines for a
- *              four-parameter factory you have to go read. fetchAffiliation
- *              is out too — no counters, writes to STORE.players not a Map,
- *              so it would need state invented for it.
- *            - FOUND A REAL HOLE while checking the refactor was covered:
- *              deleting `probe.fetchStarted++` failed NOTHING in the whole
- *              suite. That is the counter separating "the request is
- *              hanging" from "no request was ever made" — the exact
- *              distinction that made the v1.38.0 pdaCall hang take a live
- *              deep scan to find, now shared by two features.
- *              test/api-probe.test.js drives the real probeFetch against a
- *              replaced `fetch` on the sandbox global — the DEPENDENCY, not
- *              a seam stub, which does not rebind the module's own function.
- *              31 assertions, verified non-vacuous against two sabotages.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -180,7 +200,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.50.0';
+  const HUD_VERSION = '1.51.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -7318,6 +7338,48 @@
   // 8. COACH PROMPTS (advisory only — never auto-acts)
   // ===========================================================================
 
+  // Who hero is actually up against RIGHT NOW: the opponent still in the hand
+  // with the biggest contribution to THIS street.
+  //
+  // hand.lastAggressor is deliberately not used for this. It is written on
+  // every raise and NEVER cleared when that player folds, so after a villain
+  // bets the flop and folds to hero's raise it still names them — and it fed
+  // both the pot-odds line (quoting a bet nobody was making) and the coach's
+  // +1000 aggressor bonus (spending the rest of the hand advising about a
+  // player who was out of the pot). That is the whole of the "advice goes
+  // stale mid-hand" report.
+  //
+  // Street contributions, not hand totals: calling preflop does not mean hero
+  // is facing a bet on the flop. `facing` is the same test handContextTokens
+  // used to run inline — one source now, so the token and the number cannot
+  // disagree about whether hero is facing anything.
+  //
+  // Returns { xid, chips, facing } or null when there is no live opponent.
+  function streetLeader(hand) {
+    if (!hand || !hand.playersIn) return null;
+    const contrib = hand.streetContributions || {};
+    const mine = (!heroUnresolved() && contrib[heroXid]) || 0;
+    let best = null;
+    hand.playersIn.forEach((x) => {
+      if (isHeroRecord(x)) return;
+      const v = contrib[x] || 0;
+      if (!best || v > best.chips) best = { xid: x, chips: v };
+    });
+    if (!best) return null;
+    return { xid: best.xid, chips: best.chips, facing: best.chips > mine };
+  }
+
+  // The player driving the action, or null when nobody is.
+  //
+  // The last preflop/postflop raiser IF THEY ARE STILL IN THE HAND — they are
+  // who everyone else is playing against. Once they fold there is no
+  // aggressor, and the tip is chosen from the remaining live players on merit
+  // rather than handed to whoever raised last and left.
+  function liveAggressor(hand) {
+    if (!hand || !hand.lastAggressor) return null;
+    return hand.playersIn.has(hand.lastAggressor) ? hand.lastAggressor : null;
+  }
+
   function buildCoachAdvice() {
     if (!currentHand) return null;
     const hand = currentHand;
@@ -7333,8 +7395,12 @@
     const heroTurn = isHeroTurn();
     if (!heroTurn && heroCards.length !== 2) return null;
     const board = readBoardCards();
-    const villainXid = hand.lastAggressor;
-    const betFacing = villainXid ? (hand.streetContributions[villainXid] || 0) : 0;
+    // The live street leader, not hand.lastAggressor — see streetLeader. Zero
+    // when hero is not actually facing anything, so the pot-odds line goes
+    // quiet after a villain calls rather than quoting hero's own bet back.
+    const lead = streetLeader(hand);
+    const villainXid = lead ? lead.xid : null;
+    const betFacing = lead && lead.facing ? lead.chips : 0;
     const pos = heroPositionLabel(hand);
     const position = pos ? pos.label : null;
     // Prefer the table's own pot over our running log sum — see readDomPot.
@@ -7483,21 +7549,30 @@
       out.push(`Need <b>~${need.toFixed(0)}%</b> to continue.`);
     }
 
-    // The live panel takes only the TOP adjustment from the same synthesis the
-    // Exploit tab shows in full — one line is all there is room for mid-hand,
-    // and it should be the most valuable one rather than whichever rule
-    // happened to be checked first.
-    const tip = currentExploitTip();
-    if (tip) {
+    // TWO adjustments from the same synthesis the Exploit tab shows in full,
+    // not one. Asked for directly, and it is the cheaper half of the fix for
+    // "advice repeats too much": a second read hides the repetition without
+    // touching the ranking, because the runner-up is genuine information the
+    // panel was already computing and throwing away.
+    //
+    // The second is rendered dimmer, so the panel still has ONE thing your eye
+    // lands on mid-decision. A pair of equally loud lines is two things to
+    // read in a spot where there is time for one.
+    currentExploitTips(COACH_TIPS_SHOWN).forEach((tip, i) => {
       // The "new" marker sits BETWEEN the name and the read, so it is seen
       // while deciding whether to trust the line rather than as a footnote
       // after it has already been acted on. Hand count included because "new"
       // alone doesn't distinguish 2 hands from 19.
       const isNew = tip.provisional
         ? `<span class="tph-tip-new">new · ${tip.hands}h</span> ` : '';
-      out.push(`⚡ <b>${escapeHtml(playerDisplayName(tip.xid))}</b> ${isNew}— `
-        + `${escapeHtml(squish(tip.entry.text, 150))}`);
-    }
+      // The runner-up gets the SHORT form. At full length two reads is a
+      // paragraph on a phone, which is how the panel stops being read at all.
+      const body = i === 0
+        ? escapeHtml(squish(tip.entry.text, 150))
+        : escapeHtml(tip.entry.short || squish(tip.entry.text, 70));
+      out.push(`<span class="${i === 0 ? 'tph-tip-lead' : 'tph-tip-second'}">`
+        + `${i === 0 ? '⚡' : '·'} <b>${escapeHtml(playerDisplayName(tip.xid))}</b> ${isNew}— ${body}</span>`);
+    });
     return out.filter(Boolean);
   }
 
@@ -7602,12 +7677,21 @@
     // Relevance is a BOOST, never a filter. A hard filter would leave the panel
     // silent in spots no rule happens to cover, and a slightly off-target read
     // beats no read at all. See currentExploitTip.
-    const add = (gain, tag, exploitText, leakText, exploitShort, leakShort, when) => out.push({
+    //
+    // `edge` is an optional 0..1 saying how far past its threshold this
+    // firing actually is — see spreadEdge / thresholdEdge. It separates two
+    // rules carrying the same `gain`, so the read that is most unusual about
+    // THIS player wins rather than whichever rule happens to have the higher
+    // constant. Omitted means EXPLOIT_EDGE_NEUTRAL (0.5): neither promoted nor
+    // punished, same defaulting principle as an untagged `when`. It affects
+    // only the live coach ranking; the Exploit/Leaks tab still orders by gain.
+    const add = (gain, tag, exploitText, leakText, exploitShort, leakShort, when, edge) => out.push({
       gain,
       tag,
       text: voice === 'leak' ? leakText : exploitText,
       short: voice === 'leak' ? leakShort : exploitShort,
       when: when || null,
+      edge: typeof edge === 'number' ? edge : null,
     });
     const n = p.hands || 0;
 
@@ -7621,7 +7705,8 @@
           `You fold to c-bets ${fmtPct(r.foldToCbet)} vs a ${POOL_AVG.foldToCbet}% pool `
             + `(${p.foldToCbetOpp} spots) — you are over-folding to flop pressure. Start defending more `
             + 'of your range, especially in position; anyone paying attention is printing off you right now.',
-          'fire every flop', 'defend flops more', ['flop', 'lead']);
+          'fire every flop', 'defend flops more', ['flop', 'lead'],
+          spreadEdge(s.foldToCbet, POOL_AVG.foldToCbet, POOL_SPREAD.foldToCbet));
       } else if (s.foldToCbet < POOL_AVG.foldToCbet - POOL_SPREAD.foldToCbet) {
         add(95, 'C-bet',
           `Folds to c-bets only ${fmtPct(r.foldToCbet)} (${p.foldToCbetOpp} spots). `
@@ -7629,7 +7714,8 @@
           `You almost never fold to a c-bet (${fmtPct(r.foldToCbet)}, ${p.foldToCbetOpp} spots) — `
             + "you're not folding enough. Good players will stop bluffing you and value-bet you relentlessly "
             + 'instead; tighten what you continue with.',
-          'no flop bluffs', 'fold flops more', ['flop', 'lead']);
+          'no flop bluffs', 'fold flops more', ['flop', 'lead'],
+          spreadEdge(s.foldToCbet, POOL_AVG.foldToCbet, POOL_SPREAD.foldToCbet));
       }
     }
 
@@ -7645,7 +7731,8 @@
           + "you're a one-and-done bettor. Good opponents will float your flop bet and take it away on the "
           + 'turn; barrel more turns when your read says they folded weak, or check back flops you\'re not '
           + 'planning to follow through on.',
-        'float, stab turn', 'follow through on turns', ['postflop']);
+        'float, stab turn', 'follow through on turns', ['postflop'],
+        thresholdEdge(f.afq - tn.afq, 20, 60));
     }
     if (tn.afq != null && tn.actions >= 6 && tn.afq > 55) {
       add(70, 'Turn',
@@ -7654,7 +7741,8 @@
         `You keep firing turns (${fmtPct(tn.afq)} aggression, ${tn.actions} actions) — good opponents `
           + "will start calling you down lighter, since your turn bets stop meaning as much to them. Make "
           + 'sure the second barrel has a real hand or a real plan behind it.',
-        'turn bets are real', 'barrel with a plan', ['turn']);
+        'turn bets are real', 'barrel with a plan', ['turn'],
+        thresholdEdge(tn.afq, 55, 85));
     }
 
     // --- Preflop ------------------------------------------------------------
@@ -7666,7 +7754,8 @@
           `You fold to 3-bets ${fmtPct(r.foldTo3Bet)} vs a ${POOL_AVG.foldTo3Bet}% pool `
             + `(${p.foldTo3BetOpp} spots) — you're giving up your opens too easily. Good players will start `
             + '3-betting you light and taking the pot uncontested; 4-bet or continue more instead of folding.',
-          '3-bet them light', 'defend your opens', ['preflop']);
+          '3-bet them light', 'defend your opens', ['preflop'],
+          spreadEdge(s.foldTo3Bet, POOL_AVG.foldTo3Bet, POOL_SPREAD.foldTo3Bet));
       } else if (s.foldTo3Bet < POOL_AVG.foldTo3Bet - POOL_SPREAD.foldTo3Bet) {
         add(60, '3-bet',
           `Rarely folds to 3-bets (${fmtPct(r.foldTo3Bet)}). 3-bet for value only — `
@@ -7674,7 +7763,8 @@
           `You rarely fold to a 3-bet (${fmtPct(r.foldTo3Bet)}) — you're probably continuing too wide when `
             + 'raised. Tighten up; calling or 4-betting light here builds a bigger pot with the worse hand, '
             + 'not a stand.',
-          '3-bet value only', 'tighten vs 3-bets', ['preflop']);
+          '3-bet value only', 'tighten vs 3-bets', ['preflop'],
+          spreadEdge(s.foldTo3Bet, POOL_AVG.foldTo3Bet, POOL_SPREAD.foldTo3Bet));
       }
     }
     if (r.limpShareOfVpip != null && p.limpMade >= 5
@@ -7685,7 +7775,8 @@
         `You limp into ${fmtPct(r.limpShareOfVpip)} of the pots you enter — your limping range is capped, `
           + 'and attentive opponents will raise big to isolate you knowing they have the range edge. '
           + 'Open-raise more instead of limping.',
-        'isolate their limps', 'raise instead of limp', ['preflop']);
+        'isolate their limps', 'raise instead of limp', ['preflop'],
+        spreadEdge(s.limpShareOfVpip, POOL_AVG.limpShareOfVpip, POOL_SPREAD.limpShareOfVpip));
     }
     if (r.vpip != null && n >= 20) {
       if (s.vpip > POOL_AVG.vpip + POOL_SPREAD.vpip) {
@@ -7695,7 +7786,8 @@
           `You play ${fmtPct(r.vpip)} of hands vs a ${POOL_AVG.vpip.toFixed(0)}% pool — that's wide. `
             + 'Tighten your opening range, especially from early position; a wide range value-bets thinner '
             + 'but also bluffs more, and attentive opponents punish both.',
-          'value bet thin', 'tighten your range');
+          'value bet thin', 'tighten your range', null,
+          spreadEdge(s.vpip, POOL_AVG.vpip, POOL_SPREAD.vpip));
       } else if (s.vpip < POOL_AVG.vpip - POOL_SPREAD.vpip) {
         add(65, 'Range',
           `Plays only ${fmtPct(r.vpip)} of hands vs a ${POOL_AVG.vpip.toFixed(0)}% pool — `
@@ -7703,7 +7795,8 @@
           `You play only ${fmtPct(r.vpip)} of hands vs a ${POOL_AVG.vpip.toFixed(0)}% pool — genuinely `
             + 'tight. Observant opponents will stop respecting your raises and steal your blinds relentlessly; '
             + 'widen up, especially in position and defending the blinds.',
-          'steal their blinds', 'widen your range', ['preflop']);
+          'steal their blinds', 'widen your range', ['preflop'],
+          spreadEdge(s.vpip, POOL_AVG.vpip, POOL_SPREAD.vpip));
       }
     }
     if (r.pfr != null && r.vpip > 0 && n >= 20) {
@@ -7715,7 +7808,8 @@
           `Huge gap between how often you play (${fmtPct(r.vpip)}) and how often you raise (${fmtPct(r.pfr)}) `
             + "— you're a caller, not a raiser. Sharp opponents will play back at your flat-calls and fold "
             + 'correctly to your raises since they mean so much; raise more of your continuing range instead.',
-          'believe their raises', 'raise more, call less', ['facing']);
+          'believe their raises', 'raise more, call less', ['facing'],
+          thresholdEdge(gap, 40, 70));
       }
     }
 
@@ -7728,7 +7822,8 @@
           `You reach showdown ${fmtPct(r.wtsd)} of hands played — you're a station. Sharp opponents will `
             + 'stop bluffing you (correctly) and value-bet you relentlessly (also correctly). Fold more when '
             + "you're beat instead of calling to find out.",
-          'three-street value', 'fold more, call less', ['postflop']);
+          'three-street value', 'fold more, call less', ['postflop'],
+          thresholdEdge(r.wtsd, 40, 65));
       } else if (r.wtsd < 18) {
         add(60, 'Showdown',
           `Reaches showdown only ${fmtPct(r.wtsd)} of the time — they give up a lot. `
@@ -7736,7 +7831,8 @@
           `You reach showdown only ${fmtPct(r.wtsd)} of the time — you're giving up too much. Sharp `
             + 'opponents will bet you off pots relentlessly since they know you fold; call down more or '
             + 'barrel yourself rather than folding to every bet you face.',
-          'barrel more', 'call down more', ['postflop']);
+          'barrel more', 'call down more', ['postflop'],
+          thresholdEdge(18 - r.wtsd, 0, 12));
       }
     }
 
@@ -7761,14 +7857,16 @@
             `You fold ${fmtPct(br.foldToBet)} of the time when bet into on a ${flag.label} board `
               + `(${br.facedN} spots). Anyone paying attention can bet you off this texture `
               + 'with anything; call or raise more of them.',
-            `folds ${flag.label}`, `fold ${flag.label} too much`, tok);
+            `folds ${flag.label}`, `fold ${flag.label} too much`, tok,
+            thresholdEdge(br.foldToBet, 65, 95));
         } else if (br.foldToBet <= 25) {
           add(80, 'Board',
             `Only folds ${fmtPct(br.foldToBet)} when bet into on a ${flag.label} board `
               + `(${br.facedN} spots) — a station here. Value bet thin, do not bluff.`,
             `You only fold ${fmtPct(br.foldToBet)} when bet into on a ${flag.label} board `
               + `(${br.facedN} spots) — you are calling too wide on this texture.`,
-            `calls ${flag.label}`, `too sticky on ${flag.label}`, tok);
+            `calls ${flag.label}`, `too sticky on ${flag.label}`, tok,
+            thresholdEdge(25 - br.foldToBet, 0, 25));
         }
       }
 
@@ -7779,7 +7877,8 @@
               + `(${br.leadN} spots) — their check here means little, so take it away.`,
             `You lead only ${fmtPct(br.lead)} on a ${flag.label} board (${br.leadN} spots) — `
               + 'you are giving up the initiative on a texture you could be betting.',
-            `checks ${flag.label}`, `bet ${flag.label} more`, tok);
+            `checks ${flag.label}`, `bet ${flag.label} more`, tok,
+            thresholdEdge(20 - br.lead, 0, 20));
         } else if (br.lead >= 60) {
           add(70, 'Board',
             `Leads out ${fmtPct(br.lead)} of the time on a ${flag.label} board `
@@ -7787,7 +7886,8 @@
               + 'so their bet is far weaker than it looks.',
             `You lead ${fmtPct(br.lead)} on a ${flag.label} board (${br.leadN} spots) — `
               + 'so predictable that your bet here carries no information.',
-            `auto-bets ${flag.label}`, `too predictable on ${flag.label}`, tok);
+            `auto-bets ${flag.label}`, `too predictable on ${flag.label}`, tok,
+            thresholdEdge(br.lead, 60, 95));
         }
       }
     });
@@ -7802,7 +7902,8 @@
           `You typically bet ${r.medianBetPct.toFixed(0)}% of pot (median of ${szN} bets) — oversized. `
             + 'Observant opponents will read your big bets as value and fold correctly, costing you thin '
             + 'value and making your bluffs too expensive to profitably fire.',
-          'big bet = value', 'size down', ['facing']);
+          'big bet = value', 'size down', ['facing'],
+          thresholdEdge(r.medianBetPct, 85, 140));
       } else if (r.medianBetPct < 40) {
         add(45, 'Sizing',
           `Typically bets only ${r.medianBetPct.toFixed(0)}% of pot (median of ${szN} bets) — `
@@ -7810,7 +7911,8 @@
           `You typically bet only ${r.medianBetPct.toFixed(0)}% of pot (median of ${szN} bets) — undersized. `
             + "You're pricing opponents in to call with worse hands and leaving value behind when you're "
             + 'ahead. Size up.',
-          'raise their small bets', 'size up', ['facing']);
+          'raise their small bets', 'size up', ['facing'],
+          thresholdEdge(40 - r.medianBetPct, 0, 20));
       }
     }
 
@@ -7829,7 +7931,8 @@
           `You size up with a made hand (${r.betMadePct.toFixed(0)}% pot, ${r.betMadeCount} spots) vs a draw `
             + `(${r.betDrawPct.toFixed(0)}%, ${r.betDrawCount} spots) — a sharp opponent can read your size `
             + 'and play accordingly. Mix your sizing so a big bet doesn\'t always mean the same thing.',
-          'read their bet size', 'randomize your sizing', ['facing']);
+          'read their bet size', 'randomize your sizing', ['facing'],
+          thresholdEdge(r.betMadePct - r.betDrawPct, 20, 60));
       } else {
         add(50, 'Sizing',
           `Sizes UP on a draw (${r.betDrawPct.toFixed(0)}% pot, ${r.betDrawCount} spots) vs down with a made `
@@ -7838,7 +7941,8 @@
           `You size UP on a draw (${r.betDrawPct.toFixed(0)}% pot, ${r.betDrawCount} spots) vs down with a `
             + `made hand (${r.betMadePct.toFixed(0)}%, ${r.betMadeCount} spots) — backwards from the norm, and `
             + 'exploitable the same way. Even out your sizing across both.',
-          'their big bet = draw', 'randomize your sizing', ['facing']);
+          'their big bet = draw', 'randomize your sizing', ['facing'],
+          thresholdEdge(r.betDrawPct - r.betMadePct, 20, 60));
       }
     }
 
@@ -7859,7 +7963,8 @@
           `You bet smaller bluffing (${r.betBluffPct.toFixed(0)}% pot, ${r.betBluffCount} spots) than with a `
             + `made hand (${r.betMadePct.toFixed(0)}%, ${r.betMadeCount} spots) — a sharp opponent can read `
             + 'your size and fold only the bluffs. Match your bluff sizing to your value sizing.',
-          'their small bet = air', 'match bluff/value sizing', ['facing']);
+          'their small bet = air', 'match bluff/value sizing', ['facing'],
+          thresholdEdge(r.betMadePct - r.betBluffPct, 20, 60));
       } else {
         add(55, 'Bluff',
           `Bets BIGGER when caught bluffing (${r.betBluffPct.toFixed(0)}% pot, ${r.betBluffCount} spots) `
@@ -7868,7 +7973,8 @@
           `You bet BIGGER bluffing (${r.betBluffPct.toFixed(0)}% pot, ${r.betBluffCount} spots) than with a `
             + `made hand (${r.betMadePct.toFixed(0)}%, ${r.betMadeCount} spots) — backwards, and exploitable `
             + 'the same way. Even out your sizing across both.',
-          'their overbet = air', 'match bluff/value sizing', ['facing']);
+          'their overbet = air', 'match bluff/value sizing', ['facing'],
+          thresholdEdge(r.betBluffPct - r.betMadePct, 20, 60));
       }
     }
     if (r.bluffSample >= TEXTURE_MIN) {
@@ -7880,7 +7986,8 @@
           `You show down with nothing ${fmtPct(r.bluffRate)} of the time after betting (${r.bluffSample} `
             + 'spots, and that floor undercounts every bluff that actually worked). Opponents paying attention '
             + 'will start calling you down lighter — make sure your bluffs are picked, not habitual.',
-          'calls too light vs their air', 'pick bluff spots, don\'t habit-bluff', ['facing']);
+          'calls too light vs their air', 'pick bluff spots, don\'t habit-bluff', ['facing'],
+          thresholdEdge(r.bluffRate, 35, 70));
       } else if (r.bluffRate <= 5) {
         // Deliberately NOT the mirror of the high-rate case above. A LOW
         // showdown bluff rate is genuinely ambiguous — it could mean they
@@ -7898,7 +8005,8 @@
           `You almost never show down with nothing (${fmtPct(r.bluffRate)} of ${r.bluffSample} spots) — `
             + "when your bet reaches showdown it's read as real, which is fine as long as your bluffs are "
             + 'winning the pot before it gets there rather than you simply not bluffing.',
-          'their showdown bet = real', 'no change needed here', ['facing']);
+          'their showdown bet = real', 'no change needed here', ['facing'],
+          thresholdEdge(5 - r.bluffRate, 0, 5));
       }
     }
 
@@ -7911,7 +8019,8 @@
           `You slowplay made hands — check two pair+ instead of betting it ${fmtPct(r.trapRate)} of the time `
             + `(${r.trapSample} spots). It wins the occasional big pot but also lets a free card that could `
             + 'cost you the hand; make sure the trap line is actually the better line here, not just habit.',
-          'their check ≠ weak', 'bet your big hands more');
+          'their check ≠ weak', 'bet your big hands more', null,
+          thresholdEdge(r.trapRate, 40, 80));
       } else if (r.trapRate < 10) {
         add(58, 'Trap',
           `Almost never slowplays — checks two pair+ only ${fmtPct(r.trapRate)} of the time `
@@ -7920,7 +8029,8 @@
           `You almost never slowplay (${fmtPct(r.trapRate)} of ${r.trapSample} made-hand spots) — your checks `
             + 'are read as weak because they always are. Mix in the occasional slowplay so a check doesn\'t '
             + 'give it away.',
-          'their check = weak', 'mix in a slowplay');
+          'their check = weak', 'mix in a slowplay', null,
+          thresholdEdge(10 - r.trapRate, 0, 10));
       }
     }
 
@@ -7964,14 +8074,16 @@
             + `they give up on the ${st} more than anyone should. Fire the ${st} whether or not you hit.`,
           `You fold ${fmtPct(b.foldPct)} of your ${st} decisions (${b.actions} actions) — you give up on `
             + `the ${st} more than you should. Bluff-catch or barrel through it more instead of folding on autopilot.`,
-          `barrel the ${st}`, `stop over-folding the ${st}`, [st]);
+          `barrel the ${st}`, `stop over-folding the ${st}`, [st],
+          thresholdEdge(b.foldPct, 60, 90));
       } else if (b.foldPct < 20) {
         add(74, 'Fold',
           `Almost never folds the ${st} — ${fmtPct(b.foldPct)} of ${b.actions} decisions. `
             + `Bluffing the ${st} against them does not work; bet for value and give up your air.`,
           `You almost never fold the ${st} — ${fmtPct(b.foldPct)} of ${b.actions} decisions. Sharp `
             + `opponents will stop bluffing the ${st} against you and just value-bet instead; find more folds there.`,
-          `no ${st} bluffs`, `fold the ${st} more`, [st]);
+          `no ${st} bluffs`, `fold the ${st} more`, [st],
+          thresholdEdge(20 - b.foldPct, 0, 20));
       }
     });
 
@@ -7985,7 +8097,8 @@
           `You raise ${fmtPct(r.postflopRR)} of the bets you face (${r.rrSample} spots) — you attack bets `
             + 'rather than calling. Sharp opponents will start checking their strong hands to induce your '
             + 'raise, and thin-value you less since a raise can only come from strength or a well-timed bluff.',
-          'they raise bets', 'raise less on autopilot', ['postflop']);
+          'they raise bets', 'raise less on autopilot', ['postflop'],
+          thresholdEdge(r.postflopRR, 18, 45));
       } else if (r.postflopRR < 5) {
         add(76, 'Re-raise',
           `Almost never raises a bet — ${fmtPct(r.postflopRR)} of ${r.rrSample} spots faced. `
@@ -7994,7 +8107,8 @@
           `You almost never raise a bet you face — ${fmtPct(r.postflopRR)} of ${r.rrSample} spots. Good `
             + "opponents will bet-then-give-up into you far less since you never punish it, and they'll "
             + 'thin-value bet you without fear. Raise more of your strong hands instead of just calling.',
-          'their raise = nuts', 'raise more of your strong hands', ['facing']);
+          'their raise = nuts', 'raise more of your strong hands', ['facing'],
+          thresholdEdge(5 - r.postflopRR, 0, 5));
       }
     }
 
@@ -8010,7 +8124,8 @@
         `You've limp-3bet — limped then re-raised — on ${r.limpRaiseCount} occasions. Almost nobody does `
           + 'that light, so sharp opponents will fold almost everything to it — meaning it only pays off '
           + 'against players who call too wide. Make sure the trap line is still the right tool against this table.',
-        'limp-raise = monster', 'check who this works on', ['preflop']);
+        'limp-raise = monster', 'check who this works on', ['preflop'],
+        thresholdEdge(r.limpRaiseCount, 2, 6));
     }
 
     // --- What they showed AFTER a 3-bet, specifically -------------------------
@@ -8044,14 +8159,16 @@
         `You're down ${sw.downBB.toFixed(0)}bb from your high this sitting — this is exactly when tilt `
           + 'creeps in. Play tighter, not looser, until you\'re back to your normal game rather than pressing '
           + 'to get even.',
-        'stuck — value bet', 'stuck — tighten up');
+        'stuck — value bet', 'stuck — tighten up', null,
+        thresholdEdge(sw.downBB, 50, 200));
     } else if (sw && sw.upBB >= 100) {
       add(35, 'Winning',
         `Up ${sw.upBB.toFixed(0)}bb this sitting. A big stack covers yours, `
           + 'so pots against them are for your whole stack — pick spots accordingly.',
         `You're up ${sw.upBB.toFixed(0)}bb this sitting. A big stack means your next pot could be for a lot `
           + "— don't get cute because you're ahead; keep playing your normal game rather than loosening up.",
-        'covers your stack', "don't get cute");
+        'covers your stack', "don't get cute", null,
+        thresholdEdge(sw.upBB, 100, 400));
     }
 
     const tilt = tiltRead(p);
@@ -8061,7 +8178,8 @@
           + 'let them do the bluffing — this fades within an orbit or two.',
         `${tiltText(tilt)} This is the moment leaks actually happen — tighten back up rather than pressing, `
           + 'and it fades within an orbit or two.',
-        'tilting — widen value', 'tilting — tighten up');
+        'tilting — widen value', 'tilting — tighten up', null,
+        thresholdEdge(tilt.jump, TILT_VPIP_JUMP, TILT_VPIP_JUMP * 3));
     }
 
     out.sort((a, b) => b.gain - a.gain);
@@ -8106,17 +8224,13 @@
     boardFlags((hand.board || []).slice(0, BOARD_COUNT_FOR[street] || 0))
       .forEach((f) => ctx.add('board:' + f));
     if (heroUnresolved()) return ctx; // no hero, no "facing" or "lead" to speak of
-    // Facing a bet = someone still in has put MORE into this street than hero.
-    // Street contributions, not hand totals: calling preflop does not mean hero
-    // is facing a bet on the flop.
-    const mine = hand.streetContributions[heroXid] || 0;
-    let most = 0;
-    Object.keys(hand.streetContributions || {}).forEach((x) => {
-      if (x === heroXid) return;
-      const v = hand.streetContributions[x] || 0;
-      if (v > most) most = v;
-    });
-    if (most > mine) ctx.add('facing');
+    // Facing a bet = an opponent STILL IN THE HAND has put more into this
+    // street than hero. Delegated to streetLeader so the token and the
+    // pot-odds figure read the same state — and so a player who bet and then
+    // folded stops counting, which the old inline scan over every key of
+    // streetContributions did not do.
+    const lead = streetLeader(hand);
+    if (lead && lead.facing) ctx.add('facing');
     // Hero took the preflop lead, so the c-bet is theirs to make or skip.
     if (hand.aggressorByStreet && hand.aggressorByStreet.preflop === heroXid) ctx.add('lead');
     return ctx;
@@ -8144,16 +8258,136 @@
   // against, however little you have seen of them.
   const EXPLOIT_PROVISIONAL_PENALTY = 200;
 
-  function currentExploitTip() {
+  // How many reads the expanded coach panel carries. Two, asked for directly.
+  // The collapsed pill stays at one — it is the most width-starved element in
+  // the HUD and a second read there would just be an ellipsis.
+  const COACH_TIPS_SHOWN = 2;
+
+  // How far past its threshold a read actually is, as a 0..1 edge, used to
+  // separate two rules that carry the same `gain`.
+  //
+  // WHY: `gain` is a constant per RULE, so a villain two points over the
+  // fold-to-c-bet threshold and one at 80% scored identically, and whichever
+  // rule had the higher constant won for everybody. Measured over 400
+  // synthetic players spread around POOL_AVG by a full POOL_SPREAD — a WIDER
+  // spread than the real pool — two tips covered 45% of the field and four
+  // covered 63%. That is the "repeats too much across the player base" report.
+  //
+  // 0.5 is the neutral default, so a rule that passes no edge sits in the
+  // middle of the band and is neither promoted nor punished. Same defaulting
+  // principle as an untagged `when`.
+  const EXPLOIT_EDGE_NEUTRAL = 0.5;
+  // ±20 around neutral. Deliberately a TIEBREAKER, not a re-ranking: the gain
+  // ladder encodes a real judgement (postflop reads beat preflop ones against
+  // this pool), and a span wide enough to overturn it would be replacing that
+  // judgement with an arbitrary one. It separates rules within a tier.
+  const EXPLOIT_EDGE_SPAN = 40;
+
+  // Edge for a stat measured against POOL_AVG: 0 at the threshold
+  // (avg ± spread), 1 at two further spreads out, which is the same "one
+  // spread = notable, two = extreme" scale POOL_SPREAD already defines for the
+  // deviation indicators. Clamped, so a wild outlier does not run away with it.
+  function spreadEdge(value, avg, spread) {
+    if (value == null || !spread) return EXPLOIT_EDGE_NEUTRAL;
+    const past = Math.abs(value - avg) - spread;
+    return Math.max(0, Math.min(1, past / (2 * spread)));
+  }
+
+  // Edge for a rule with a bare threshold and no pool figure behind it (fold
+  // percentages, re-raise frequency, trap and bluff rates). `at` is where the
+  // rule starts firing, `full` where it is as extreme as it usefully gets.
+  function thresholdEdge(value, at, full) {
+    if (value == null || at === full) return EXPLOIT_EDGE_NEUTRAL;
+    return Math.max(0, Math.min(1, (value - at) / (full - at)));
+  }
+
+  // --- Tip fatigue ---------------------------------------------------------
+  //
+  // Nothing remembered what it had already told you, so the same sentence
+  // rendered every 1.5 seconds for a whole session. That is the other half of
+  // the "advice seems stale" report, and it is not fixed by better ranking:
+  // the top read genuinely IS the top read, you have simply finished reading
+  // it.
+  //
+  // Keyed 'xid|tag', not stored on the entry — entries are rebuilt from
+  // scratch on every render, so anything hung on them lives 1.5 seconds.
+  //
+  // Counted per SPOT (hand + street), never per render. At 1.5s a single
+  // street would otherwise rack up forty showings and demote the read out of
+  // the very spot it is about, before you had finished reading it once.
+  //
+  // PER PLAYER ONLY, deliberately. A global per-tag fatigue would fix the
+  // cross-player concentration directly, but it does it by suppressing a
+  // correct read on a brand-new villain purely because you saw the same read
+  // on somebody else ten minutes ago — trading accuracy for variety. Asked and
+  // answered: out.
+  const tipFatigue = new Map(); // 'xid|tag' -> { spots, lastAt, lastSpot }
+  const TIP_FATIGUE_MS = 10 * 60 * 1000;
+  const TIP_FATIGUE_STEP = 18;
+  // Capped BELOW EXPLOIT_RELEVANT_BONUS (60), and that relationship is the
+  // invariant: between two equally-strong reads, the one that matches the spot
+  // hero is actually in always wins, however many times you have seen it.
+  // Fatigue rotates within a relevance class; it can never rotate a relevant
+  // read out in favour of an irrelevant one. test/coach-fatigue.test.js pins
+  // both directions, so moving either number fails.
+  const TIP_FATIGUE_MAX = 54;
+
+  function tipFatigueKey(xid, tag) { return xid + '|' + tag; }
+
+  function tipFatiguePenalty(xid, tag) {
+    const rec = tipFatigue.get(tipFatigueKey(xid, tag));
+    if (!rec) return 0;
+    if (Date.now() - rec.lastAt > TIP_FATIGUE_MS) return 0; // gone cold, reads fresh again
+    return Math.min(TIP_FATIGUE_MAX, TIP_FATIGUE_STEP * rec.spots);
+  }
+
+  // One count per (hand, street), not per render — see above. Returns true when
+  // this showing was a new spot, which is only useful to the tests.
+  function noteTipShown(xid, tag, spot) {
+    const key = tipFatigueKey(xid, tag);
+    const rec = tipFatigue.get(key);
+    const now = Date.now();
+    if (!rec || now - rec.lastAt > TIP_FATIGUE_MS) {
+      tipFatigue.set(key, { spots: 1, lastAt: now, lastSpot: spot });
+      return true;
+    }
+    rec.lastAt = now;
+    if (rec.lastSpot === spot) return false;
+    rec.lastSpot = spot;
+    rec.spots += 1;
+    return true;
+  }
+
+  // The spot a tip is being shown IN. Torn's own game id plus the street, so
+  // the same read on the same street of the same hand counts once however many
+  // times the panel re-renders. No game id (a hand joined mid-way) falls back
+  // to the street alone, which under-counts rather than over-counts — the safe
+  // direction, since over-counting demotes a live read.
+  function tipSpotKey(hand) {
+    return (hand && hand.gameId ? hand.gameId : 'nogame') + '|' + ((hand && hand.street) || 'preflop');
+  }
+
+  // Up to `limit` reads for the hand in progress, best first.
+  //
+  // Returns [{ xid, entry, score, relevant, provisional, hands }], and RECORDS
+  // each one it returns as shown (see noteTipShown) so the next spot rotates.
+  // Deduped on (player, tag): two phrasings of the same read on the same
+  // player is one line's worth of information taking two.
+  function currentExploitTips(limit) {
     const hand = currentHand;
-    if (!hand) return null;
+    if (!hand) return [];
     const ctx = handContextTokens(hand);
+    const want = Math.max(1, limit || 1);
+    // Only the aggressor who is STILL IN. hand.lastAggressor is never cleared
+    // on a fold, so the +1000 below used to keep pointing at a player who had
+    // left the pot — see liveAggressor.
+    const aggressor = liveAggressor(hand);
 
     const order = [];
-    if (hand.lastAggressor) order.push(hand.lastAggressor);
+    if (aggressor) order.push(aggressor);
     hand.playersIn.forEach((x) => { if (!order.includes(x)) order.push(x); });
 
-    let best = null;
+    const scored = [];
     for (const xid of order) {
       if (!xid || isHeroRecord(xid)) continue;
       const p = STORE.players[xid];
@@ -8176,16 +8410,35 @@
         const rel = entryRelevance(entry, ctx);
         // The aggressor still wins outright — a stronger read on someone who
         // has already folded out of the decision is not more useful.
+        const edge = typeof entry.edge === 'number' ? entry.edge : EXPLOIT_EDGE_NEUTRAL;
         const score = entry.gain
           + (rel > 0 ? EXPLOIT_RELEVANT_BONUS : rel < 0 ? -EXPLOIT_IRRELEVANT_PENALTY : 0)
+          + EXPLOIT_EDGE_SPAN * (edge - EXPLOIT_EDGE_NEUTRAL)
+          - tipFatiguePenalty(xid, entry.tag)
           + (provisional ? -EXPLOIT_PROVISIONAL_PENALTY : 0)
-          + (xid === hand.lastAggressor ? 1000 : 0);
-        if (!best || score > best.score) {
-          best = { xid, entry, score, relevant: rel > 0, provisional, hands: p.hands };
-        }
+          + (xid === aggressor ? 1000 : 0);
+        scored.push({ xid, entry, score, relevant: rel > 0, provisional, hands: p.hands });
       }
     }
-    return best;
+
+    scored.sort((a, b) => b.score - a.score);
+    const spot = tipSpotKey(hand);
+    const seen = new Set();
+    const out = [];
+    for (const cand of scored) {
+      const key = tipFatigueKey(cand.xid, cand.entry.tag);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(cand);
+      if (out.length >= want) break;
+    }
+    out.forEach((c) => noteTipShown(c.xid, c.entry.tag, spot));
+    return out;
+  }
+
+  // The single best read — the collapsed pill has room for exactly one.
+  function currentExploitTip() {
+    return currentExploitTips(1)[0] || null;
   }
 
   // isSelf switches between the two voices buildTendencyEntries produces —
@@ -8551,6 +8804,12 @@
        so an undeclared one renders dark-on-dark (the v0.18.2 bug). */
     .tph-tip-new { color: #f0c674 !important; font-size: 10px; font-weight: 700;
       border: 1px solid #f0c67455; border-radius: 3px; padding: 0 3px; white-space: nowrap; }
+    /* Two reads, one of them loud. The runner-up is real information, but the
+       panel is read mid-decision and a pair of equally weighted lines is two
+       things to take in where there is time for one. Both declare their own
+       colour — mandatory for a tph- element that holds text, see above. */
+    .tph-tip-lead { color: #e6ebf0 !important; display: block; }
+    .tph-tip-second { color: #98a2ac !important; display: block; font-size: 11px; }
     /* background/color pinned: we inject into Torn's page, so an inherited or
        lower-specificity colour can be overridden by their stylesheet and leave
        dark text on a dark panel. */
@@ -10193,6 +10452,89 @@
     return `<b>${fmtBB(p.plBBEst)}</b><div class="tph-pl-sub">${chips}</div>`;
   }
 
+  // What the coach would actually SAY across the tracked pool, busiest read
+  // first.
+  //
+  // This exists for the same reason observedPoolAverages() does, and it is the
+  // same lesson: POOL_AVG sat on borrowed figures for eleven versions until
+  // something in the UI reported what this HUD had really seen, and the
+  // correction became possible the moment it did. "The coaching advice repeats
+  // too much across the player base" is exactly that shape of claim — checkable
+  // against the store, and previously unchecked. Tuning the gain ladder or the
+  // edge term without this is guessing.
+  //
+  // Ranked the way the LIVE coach ranks, not by gain: gain plus the edge term.
+  // Relevance and fatigue are deliberately absent — both depend on a hand in
+  // progress, and this is a question about the player base, not about a spot.
+  // So this reports the standing bias in the rule set, which is the thing a
+  // tuning pass can act on.
+  // Memoised, unlike observedPoolAverages(), and that difference is deliberate
+  // rather than inconsistency. Both walk every qualifying player, but this one
+  // runs buildExploitPlan per player — computeRates AND computeShrunkRates AND
+  // the shown-range scan AND the board-texture loop AND tiltRead, against a
+  // store that holds hundreds of records. renderPlayersList() re-renders on
+  // every keystroke in the filter box, so an uncached version would put that
+  // whole sweep between each letter and each frame, on a phone.
+  //
+  // A TTL rather than a change-keyed cache because the honest invalidation key
+  // does not exist: a player's numbers move without any count this function
+  // could watch changing. Thirty seconds of staleness costs nothing here — it
+  // is a standing property of the rule set, read while deciding whether to
+  // retune, not a live read on the hand in front of you.
+  const POOL_TIP_SPREAD_TTL_MS = 30 * 1000;
+  let poolTipSpreadCache = null; // { at, value }
+
+  function poolTipSpread() {
+    if (poolTipSpreadCache && Date.now() - poolTipSpreadCache.at < POOL_TIP_SPREAD_TTL_MS) {
+      return poolTipSpreadCache.value;
+    }
+    const value = computePoolTipSpread();
+    poolTipSpreadCache = { at: Date.now(), value };
+    return value;
+  }
+
+  function computePoolTipSpread() {
+    const ps = poolQualifyingPlayers();
+    if (ps.length < 3) return null;
+    const counts = new Map();
+    let withRead = 0;
+    ps.forEach((p) => {
+      const plan = buildExploitPlan(p);
+      if (!plan.length) return;
+      withRead += 1;
+      const top = plan.slice().sort((a, b) => tipBaseScore(b) - tipBaseScore(a))[0];
+      const label = top.short || top.tag;
+      counts.set(label, (counts.get(label) || 0) + 1);
+    });
+    if (!withRead) return null;
+    const rows = Array.from(counts.entries())
+      .map(([label, n]) => ({ label, n, pct: (100 * n) / withRead }))
+      .sort((a, b) => b.n - a.n);
+    return { players: ps.length, withRead, distinct: rows.length, rows };
+  }
+
+  // Gain plus the edge term — the part of the live score that does not depend
+  // on a hand being in progress. Shared so the diagnostic cannot rank by a
+  // formula the coach does not use, which would make it a report about
+  // something nobody sees.
+  function tipBaseScore(entry) {
+    const edge = typeof entry.edge === 'number' ? entry.edge : EXPLOIT_EDGE_NEUTRAL;
+    return entry.gain + EXPLOIT_EDGE_SPAN * (edge - EXPLOIT_EDGE_NEUTRAL);
+  }
+
+  // Top three, with the share of the pool each one is the leading read for. The
+  // headline number is the CONCENTRATION — what fraction of your tracked
+  // players the single busiest read leads on. That is the figure the complaint
+  // is about, and the one to watch after a tuning change.
+  function tipSpreadLine() {
+    const sp = poolTipSpread();
+    if (!sp) return '';
+    const top = sp.rows.slice(0, 3)
+      .map((r) => `${escapeHtml(r.label)} ${r.pct.toFixed(0)}%`).join(' &nbsp;·&nbsp; ');
+    return `<br><b>Coach:</b> ${sp.distinct} distinct lead reads over ${sp.withRead} players `
+      + `&nbsp;|&nbsp; ${top}`;
+  }
+
   function poolComparisonLine() {
     const obs = observedPoolAverages();
     if (!obs) return '';
@@ -10460,7 +10802,7 @@
           const cls = s.level === 'ok' ? '' : ' class="tph-store-warntext"';
           return `<span${cls}>${fmtBytes(s.chars)} stored (${s.pct.toFixed(0)}%)</span>`;
         })()}
-        ${poolComparisonLine()}<br>
+        ${poolComparisonLine()}${tipSpreadLine()}<br>
         <button class="tph-copy-pool">Copy pool tendencies</button>
         <button class="tph-export-pool">${isPDA() ? 'Save / share' : 'Download'} pool tendencies</button>
       </div>
@@ -11687,6 +12029,28 @@
       refreshSeatedTargetStatus,
       requestTargetStatus,
       dropStaleHeroGhost,
+      streetLeader,
+      liveAggressor,
+      currentExploitTips,
+      spreadEdge,
+      thresholdEdge,
+      tipFatiguePenalty,
+      noteTipShown,
+      tipFatigue,
+      EXPLOIT_RELEVANT_BONUS,
+      EXPLOIT_IRRELEVANT_PENALTY,
+      EXPLOIT_PROVISIONAL_PENALTY,
+      tipSpotKey,
+      poolTipSpread,
+      computePoolTipSpread,
+      POOL_TIP_SPREAD_TTL_MS,
+      tipBaseScore,
+      TIP_FATIGUE_STEP,
+      TIP_FATIGUE_MAX,
+      TIP_FATIGUE_MS,
+      EXPLOIT_EDGE_SPAN,
+      EXPLOIT_EDGE_NEUTRAL,
+      COACH_TIPS_SHOWN,
       noteSeatDepartures,
       noteTableChange,
       DEPARTURE_BURST_MAX,

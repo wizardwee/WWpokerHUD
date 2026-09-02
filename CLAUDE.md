@@ -327,6 +327,68 @@ depend on reads already flagged as imperfect (position, and whether an all-in
 was really a call), and a wrong token silently promotes wrong advice — worse
 than advice that is merely general.
 
+### Three things were wrong with it, and they fail differently (v1.51.0)
+
+Reported as one complaint — "stale, and repeats too much across player base" —
+but it was three mechanisms, and conflating them would fix none of them.
+
+**1. `hand.lastAggressor` is never cleared on a fold.** It is written on every
+raise and nothing unsets it, so after a villain bets the flop and folds to
+hero's raise it still names them. That fed a **+1000** bonus in the tip
+selector AND `betFacing` in `buildCoachAdvice` — the coach talked about a
+player who was out of the pot, and quoted pot odds against a bet nobody was
+making. Use **`liveAggressor(hand)`** (last raiser, only while still in) and
+**`streetLeader(hand)`** (biggest street contributor still in, plus whether it
+exceeds hero's own). `handContextTokens`' `facing` test is the same call, so
+the token and the number cannot disagree. Don't reintroduce a bare
+`hand.lastAggressor` read at a decision point.
+
+**2. `gain` is a constant per RULE, so it says nothing about this player.** A
+villain two points past the fold-to-c-bet threshold scored exactly the same as
+one at 80%, and whichever rule carried the higher constant won for everybody.
+Measured over 400 synthetic players spread by a full `POOL_SPREAD` (wider than
+the real pool): two tips led for 45% of the field. The `edge` term (0..1 per
+firing, via `spreadEdge` / `thresholdEdge`, scored at ±20) fixes the
+within-player case — it changes the lead read for **29%** of players who have
+more than one — and barely touches the cross-player figure (45% → 41%). That
+is the correct outcome, not a shortfall: it is a **tiebreaker**. The gain
+ladder encodes a real judgement (postflop beats preflop against this pool) and
+a span wide enough to overturn it would replace that judgement with an
+arbitrary one. An omitted `edge` is neutral (0.5), same defaulting principle as
+an untagged `when`.
+
+**3. Nothing remembered what it had already said.** One sentence, every 1.5
+seconds, all session. Better ranking cannot fix that — the top read genuinely
+IS the top read, you have finished reading it. `tipFatigue` counts per
+`(player, tag)` per **spot** (game id + street), never per render: at 1.5s a
+single street would rack up forty showings and demote the read out of the spot
+it is about before you had read it once.
+
+**The invariant to keep: `TIP_FATIGUE_MAX` (54) is capped below
+`EXPLOIT_RELEVANT_BONUS` (60).** Between two equally-strong reads, the one
+matching the spot hero is in wins however many times it has been seen — fatigue
+rotates *within* a relevance class and can never rotate a relevant read out for
+an irrelevant one. `test/coach-fatigue.test.js` pins it from both sides (it
+must stay under the bonus, and stay big enough to reorder within a tier), so
+moving either number fails.
+
+**Fatigue is per player, never global per tag.** Asked and answered directly.
+A global version would flatten the cross-player concentration, but it does it
+by suppressing a correct read on a brand-new villain because you saw the same
+read on somebody else ten minutes ago. That is accuracy traded for variety.
+
+The panel shows `COACH_TIPS_SHOWN` (2) reads, deduped on `(player, tag)`,
+runner-up dimmer and in its `short` form. The pill stays at one — it is the
+most width-starved element in the HUD.
+
+`poolTipSpread()` in the players list reports how concentrated the reads are
+across your own tracked pool, so the next tuning pass is measured rather than
+guessed — the same role `observedPoolAverages()` played for the v1.11.0
+`POOL_AVG` correction. It ranks by the shared `tipBaseScore` so it cannot
+describe a formula nobody sees, and is memoised behind a 30s TTL because it
+runs `buildExploitPlan` per player while `renderPlayersList` re-renders on
+every keystroke.
+
 ## The report has one source, two renderings (v1.3.0)
 
 `buildReportSections(xid)` is the data; `buildReport` renders it to plain text
@@ -526,6 +588,47 @@ has a genuinely different lifecycle.
 
 Leave alone: the numbered section scheme itself (renumbering churns the whole
 file for no behavioural gain), and the single-file structure.
+
+## The departure watch is mostly guards (v1.50.0)
+
+`noteSeatDepartures` diffs successive seat sweeps, so **every false positive
+comes from the sweep reading short**. The list is the easy part; the guards are
+the feature.
+
+1. An **empty** sweep is never "everyone left" — and never becomes the baseline
+   either, or the next sweep would diff against nothing.
+2. A player must miss **two consecutive** sweeps. Counted over the PENDING set,
+   not over `prev`: a player missing from sweep N is also absent from sweep
+   N+1's `prev` (which IS sweep N), so looking there again could never reach a
+   second miss and would never fire at all.
+3. **More than `DEPARTURE_BURST_MAX` (2) at once is a table change, not
+   departures** — reported directly, as the whole old table showing up as "8
+   left" after moving. Guards 1 and 2 cannot catch this: the sweep is perfectly
+   readable and the old roster stays missing on every sweep after. There is no
+   table identity in this layout to key off, so the signal is the SHAPE of the
+   event — people leave a live table one at a time. The pending set is cleared
+   as well as the batch dropped, because a swap often renders in two steps and
+   stragglers armed by the first would fire two sweeps later. The new roster
+   still becomes the baseline.
+4. A **blind change** is a table change with no ambiguity; `noteBlindLevel`
+   already detects it and now calls `noteTableChange()`. Certain rather than
+   inferred, but only fires on a cross-stake move — Torn runs more than one
+   table at several blind levels — so it complements guard 3, not replaces it.
+
+**Already-watched departures survive guards 3 and 4.** Somebody who left the
+old table a minute before you did is still out there and still attackable; your
+move does not make them less of a target. Only the in-flight suspicion is
+dropped.
+
+Guard 3 is asymmetric on purpose, same principle as `attackReadiness`: being
+wrong costs one missed alert on a table that genuinely broke up, and not having
+it costs eight false targets every time you sit down somewhere else.
+
+Both pills (`.tph-coach-pill`, `.tph-depart-pill`) are draggable through
+`makeDraggable`, each with its own `posKey` — they can be on screen at once, so
+a shared position would stack them. Both need `touch-action: none`, or the drag
+scrolls the page instead of moving the element, and both are recovered by the
+one Settings reset button.
 
 ## Screen real estate (v0.42.0)
 
@@ -1303,6 +1406,33 @@ known faction-mate or spouse**, the same way every selector here got
 confirmed: try it, paste back what the badge (or its absence) actually showed.
 
 ## Next task
+
+**Three things from v1.49.0-v1.51.0 need one report back from a live table,
+same rule as any selector here: nobody working on this can see the screen or
+the store.**
+
+1. **`DEPARTURE_BURST_MAX = 2` is a judgement call, not a measurement.** The
+   claim behind it is that at a live Torn table people leave one at a time, so
+   three vanishing inside one 3-second sweep is a roster change. If a real
+   departure now goes unreported — someone leaves and no pill appears — that
+   number is too tight and should go to 3. If the "8 left" symptom recurs
+   despite it, the table swap is arriving in chunks small enough to slip
+   under the cap and the guard needs a second signal (arrivals, most likely:
+   a sweep that gains unfamiliar seats while losing familiar ones).
+2. **The departure pill's drag needs one confirmation that it actually
+   moves.** `touch-action: none` is what makes it drag rather than scroll the
+   page, and that is reasoned from the coach pill's behaviour, not observed on
+   this one. If it scrolls instead, the CSS is the place to look.
+3. **The coach's tip spread should be read off the REAL store, not the
+   synthetic one.** The 45%-concentration figure that motivated v1.51.0 came
+   from 400 generated players; the players-list footer now reports the same
+   figure over your own tracked pool. If it still shows one read leading 40%+
+   of players, the next lever is the gain ladder itself (the constants, which
+   have never been re-derived) — not more machinery around it. This is exactly
+   how the v1.11.0 `POOL_AVG` correction happened, and the same discipline
+   applies: measure, then move a number.
+
+---
 
 **A live deep scan (v1.5.1, from the actual table) closed all three of the
 open live-verification items.** Keep the scan itself as the record:

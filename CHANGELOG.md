@@ -9,6 +9,137 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.51.0
+
+Coaching advice: a stale-target bug, a ranking that ignored how far a player
+actually deviates, no memory of what it had already said, and one line where
+there was room for two.
+
+Reported directly: the advice *"seems pretty stale and [...] repeats advice too
+much across player base."*
+
+### The bug first, because it is a bug and not a tuning question
+
+`hand.lastAggressor` is written on every raise and **never cleared when that
+player folds**. It carried a `+1000` bonus in `currentExploitTip` and fed
+`betFacing` in `buildCoachAdvice`. So after a villain bet the flop and folded to
+hero's raise, the coach spent the rest of the hand advising about a player who
+was out of the pot — and the pot-odds line went on quoting a bet nobody was
+making.
+
+Two helpers replace it:
+
+- `streetLeader(hand)` — the biggest contributor to **this street** among
+  players **still in the hand**, and whether that exceeds hero's own street
+  contribution.
+- `liveAggressor(hand)` — the last raiser, but only while they are still in.
+  Once they fold there is no aggressor, and the read is chosen from the
+  remaining live players on merit rather than handed to whoever raised last and
+  left.
+
+`handContextTokens`' `facing` test is now the same call, so the context token
+and the pot-odds figure cannot disagree about whether hero is facing anything.
+
+### Measured, not guessed
+
+Over 400 synthetic players spread around `POOL_AVG` by a full `POOL_SPREAD` — a
+*wider* spread than the real pool, so this understates it — two tips led for
+**45%** of the field and four for **63%**.
+
+The cause: `gain` is a constant per **rule**. A villain two points past the
+fold-to-c-bet threshold and one at 80% scored identically, so whichever rule
+carried the higher constant won for everybody.
+
+### The `edge` term
+
+Each rule can now pass a 0..1 `edge` saying how far past its threshold this
+firing actually is — `spreadEdge` for the `POOL_AVG`-anchored stats (0 at
+`avg ± spread`, 1 at two further spreads, the same "one spread = notable, two =
+extreme" scale the deviation indicators already use), `thresholdEdge` for rules
+with a bare cutoff. Omitted means neutral (0.5): neither promoted nor punished,
+the same defaulting principle as an untagged `when`, which is what made the
+annotation incremental instead of all-or-nothing.
+
+Scored at **±20** around neutral. This is a **tiebreaker, not a re-ranking**:
+the gain ladder encodes a real judgement (postflop reads beat preflop ones
+against this pool), and a span wide enough to overturn it would be replacing
+that judgement with an arbitrary one.
+
+Effect, measured both ways:
+
+- cross-player concentration **45% → 41%** — small, and exactly as flagged
+  before building;
+- but it changes the **lead read for 29%** of players who have more than one,
+  which is where a within-player tiebreaker was always going to matter.
+
+### Tip fatigue — the actual fix for repetition
+
+Nothing remembered what it had already told you, so the same sentence rendered
+every 1.5 seconds for a whole session. Better ranking does not fix that: the top
+read genuinely *is* the top read, you have simply finished reading it.
+
+Counted per `(player, tag)` per **spot** — Torn's game id plus the street —
+never per render. At 1.5s a single street would otherwise rack up forty showings
+and demote the read out of the very spot it is about, before you had read it
+once. Decays after 10 minutes, and restarts from one step rather than resuming.
+
+**The invariant:** `TIP_FATIGUE_MAX` (54) is capped below
+`EXPLOIT_RELEVANT_BONUS` (60). Between two equally-strong reads, the one
+matching the spot hero is actually in wins however many times it has been seen.
+Rotation happens *within* a relevance class; it can never rotate a relevant read
+out for an irrelevant one. `test/coach-fatigue.test.js` pins this from both
+sides — the cap must stay under the bonus, and stay big enough to reorder within
+a tier — so moving either number fails.
+
+### Per player only
+
+Asked and answered before building. A **global** per-tag fatigue would flatten
+the cross-player concentration directly, but it does it by suppressing a correct
+read on a brand-new villain purely because you saw the same read on somebody
+else ten minutes ago. That is accuracy traded for variety. Out.
+
+### Two reads, one loud
+
+The panel carries `COACH_TIPS_SHOWN` (2) reads, deduped on `(player, tag)` so
+two phrasings of one read cannot take two lines. The runner-up renders dimmer
+and in its **short** form — at full length two reads is a paragraph on a phone,
+which is how a panel stops being read at all. The collapsed pill stays at one;
+it is the most width-starved element in the HUD.
+
+The runner-up was already being computed and thrown away, so this is the cheaper
+half of the repetition fix: it hides the repetition without touching the
+ranking.
+
+### A diagnostic, so the next pass is measured
+
+The players list footer now reports how many **distinct lead reads** the coach
+produces across your tracked pool, and the top three with their shares. Same
+reason `observedPoolAverages()` exists, and the same lesson: `POOL_AVG` sat on
+borrowed figures for eleven versions until something in the UI reported what
+this HUD had actually seen, and the correction became possible the moment it
+did. Tuning the gain ladder without this is guessing.
+
+It ranks the way the live coach ranks (gain plus edge, via a shared
+`tipBaseScore`), so it cannot become a report about a formula nobody sees.
+Relevance and fatigue are deliberately absent — both need a hand in progress,
+and this is a question about the player base, not about a spot.
+
+Memoised behind a 30-second TTL, unlike `observedPoolAverages()`, and the
+difference is deliberate: this one runs `buildExploitPlan` **per player** —
+`computeRates` and `computeShrunkRates` and the shown-range scan and the
+board-texture loop and `tiltRead` — while `renderPlayersList()` re-renders on
+every keystroke in the filter box. A TTL rather than a change-keyed cache
+because the honest invalidation key does not exist: a player's numbers move
+without any count this function could watch.
+
+### Tests
+
+56 assertions in `test/coach-fatigue.test.js`, checked against the old behaviour
+first: reverting the aggressor guard or zeroing the fatigue step fails four of
+them. `EXPLOIT_RELEVANT_BONUS`, `EXPLOIT_IRRELEVANT_PENALTY` and the fatigue
+constants joined the test seam so the invariant is asserted as a relationship
+between the real values rather than against copies.
+
 ## 1.50.0
 
 Moving tables no longer reports the whole old table as departures.
