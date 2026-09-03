@@ -83,6 +83,24 @@ no GitHub account needed.
 - **Pool-average comparisons are borrowed, not measured on Torn**, and the
   UI says which figures those are.
 
+## Analysing your data
+
+`analysis/pool-analyzer.html` is a standalone page (no build step, same as the
+userscript) that reads a Gist export — Settings → GitHub Gist sync, or
+Settings → Backup → Copy — and shows pool distributions, your win rate by
+stake, opponent P/L, and a showdown-range grid, entirely from stored counters.
+Nothing leaves the browser. Open the file directly, or publish it wherever you
+publish HTML.
+
+For questions that need the app's own scoring logic (archetype classification,
+the coach's tip-concentration across your real pool, a measured `POOL_SPREAD`)
+rather than plain averages, `analysis/pool-report.js` drives the actual
+functions via `test/harness.js` against the same export:
+
+```
+node analysis/pool-report.js /path/to/torn-poker-hud-data.json
+```
+
 ## Issues / feedback
 
 Either works — a [GitHub Issue](https://github.com/wizardwee/WWpokerHUD/issues)

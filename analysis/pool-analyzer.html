@@ -1,0 +1,1184 @@
+<!--
+  Torn Poker HUD - export analyzer.
+
+  A static, single-file page: drop in a gist export (Settings -> GitHub sync ->
+  the same JSON the HUD itself writes) and it computes pool distributions,
+  hero performance, opponent P/L, and a showdown-range grid entirely from
+  stored counters - plain ratios and sums, nothing that reproduces the
+  userscript's judgement calls (POOL_AVG, archetype thresholds, the coach's
+  gain ladder). Those live in analysis/pool-report.js instead, which drives
+  the REAL functions via test/harness.js - see CLAUDE.md and that file's own
+  header for why the split is drawn there.
+
+  No network calls, no persistence: the file you drop in is parsed in memory
+  and never leaves the tab. Opens with a small synthetic sample so the page
+  has something to show before you load your own export - clearly labelled,
+  never mistaken for real figures.
+-->
+<title>Pool Analyzer</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Serif:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    color-scheme: light;
+    --paper: #EEF1EA;
+    --surface: #FFFFFF;
+    --surface-2: #E4E8DE;
+    --ink: #1B1D19;
+    --ink-soft: #3B3D36;
+    --muted: #6D6A60;
+    --line: rgba(27,29,25,0.12);
+    --line-strong: rgba(27,29,25,0.24);
+    --felt: #1F5B3F;
+    --felt-soft: #DCEAE1;
+    --gold: #87600C;
+    --gold-soft: #F3E3BE;
+    --gold-strong: #C08A22;
+    --clay: #9C3F2A;
+    --clay-soft: #F4DED7;
+    --good: #0ca30c;
+    --warning: #B4790A;
+    --critical: #d03b3b;
+    --seq-1: #3bb075; --seq-2: #2a7e54; --seq-3: #1b5036; --seq-4: #0f2e1f;
+    --cat-nit: #2a78d6; --cat-tag: #eb6834; --cat-lag: #1baf7a; --cat-maniac: #b3860a;
+    --cat-station: #e87ba4; --cat-fish: #008300; --cat-balanced: #4a3aa7;
+    --shadow: 0 1px 2px rgba(27,29,25,0.06), 0 6px 20px -8px rgba(27,29,25,0.18);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --paper: #141815; --surface: #1B211C; --surface-2: #202721;
+      --ink: #EDEBE2; --ink-soft: #D3D1C6; --muted: #9B9A8F;
+      --line: rgba(237,235,226,0.12); --line-strong: rgba(237,235,226,0.24);
+      --felt: #6FCB9A; --felt-soft: #1E2E26;
+      --gold: #E0B34A; --gold-soft: #3A2E12; --gold-strong: #C9A227;
+      --clay: #E2836A; --clay-soft: #3A1F17;
+      --warning: #E4A93B;
+      --seq-1: #d1f0e0; --seq-2: #9cdebd; --seq-3: #66cc99; --seq-4: #3bb075;
+      --cat-nit: #3987e5; --cat-tag: #d95926; --cat-lag: #199e70; --cat-maniac: #c98500;
+      --cat-station: #d55181; --cat-fish: #35b235; --cat-balanced: #9085e9;
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 6px 24px -8px rgba(0,0,0,0.5);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --paper: #141815; --surface: #1B211C; --surface-2: #202721;
+    --ink: #EDEBE2; --ink-soft: #D3D1C6; --muted: #9B9A8F;
+    --line: rgba(237,235,226,0.12); --line-strong: rgba(237,235,226,0.24);
+    --felt: #6FCB9A; --felt-soft: #1E2E26;
+    --gold: #E0B34A; --gold-soft: #3A2E12; --gold-strong: #C9A227;
+    --clay: #E2836A; --clay-soft: #3A1F17;
+    --warning: #E4A93B;
+    --seq-1: #d1f0e0; --seq-2: #9cdebd; --seq-3: #66cc99; --seq-4: #3bb075;
+    --cat-nit: #3987e5; --cat-tag: #d95926; --cat-lag: #199e70; --cat-maniac: #c98500;
+    --cat-station: #d55181; --cat-fish: #35b235; --cat-balanced: #9085e9;
+    --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 6px 24px -8px rgba(0,0,0,0.5);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--paper); color: var(--ink);
+    font-family: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+    font-size: 14px; line-height: 1.5;
+  }
+  h1, h2, h3 { font-family: "IBM Plex Serif", Georgia, serif; font-weight: 600; margin: 0; text-wrap: balance; }
+  .num, .tabular { font-family: "IBM Plex Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+  a { color: var(--felt); }
+
+  /* --- shell ---------------------------------------------------------- */
+  .shell { max-width: 1180px; margin: 0 auto; padding: 20px 16px 64px; }
+  header.top {
+    display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: flex-end;
+    justify-content: space-between; padding-bottom: 16px; border-bottom: 1px solid var(--line-strong);
+    margin-bottom: 16px;
+  }
+  header.top .brand { display: flex; flex-direction: column; gap: 4px; }
+  header.top .brand .eyebrow {
+    font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--felt); font-weight: 600;
+  }
+  header.top h1 { font-size: 26px; }
+  header.top .sub { color: var(--muted); font-size: 13px; max-width: 46ch; }
+
+  .loader { display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
+  .loader-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+  button, .file-btn {
+    font: inherit; font-weight: 600; font-size: 13px; cursor: pointer;
+    background: var(--felt); color: var(--surface); border: none; border-radius: 7px;
+    padding: 9px 14px; display: inline-flex; align-items: center; gap: 6px;
+  }
+  button.ghost {
+    background: transparent; color: var(--ink-soft); border: 1px solid var(--line-strong);
+  }
+  button:active { transform: translateY(1px); }
+  input[type=file] { display: none; }
+  textarea.paste {
+    width: 100%; max-width: 420px; height: 70px; font-family: "IBM Plex Mono", monospace; font-size: 11px;
+    background: var(--surface); color: var(--ink); border: 1px solid var(--line-strong); border-radius: 7px; padding: 8px;
+  }
+  .paste-wrap { display: none; flex-direction: column; gap: 6px; align-items: flex-end; }
+  .paste-wrap.open { display: flex; }
+  .load-status { font-size: 12px; color: var(--muted); }
+  .load-status.err { color: var(--critical); font-weight: 600; }
+
+  .sample-banner {
+    display: flex; gap: 10px; align-items: center; background: var(--gold-soft); color: var(--gold);
+    border: 1px solid var(--gold); border-radius: 9px; padding: 10px 14px; margin-bottom: 16px; font-size: 13px;
+  }
+  .sample-banner strong { font-weight: 700; }
+  .sample-banner[hidden] { display: none; }
+
+  /* --- health strip ----------------------------------------------------*/
+  .health {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow);
+    margin-bottom: 20px; overflow: hidden;
+  }
+  .health-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; cursor: pointer;
+  }
+  .health-head h2 { font-size: 15px; }
+  .health-pills { display: flex; gap: 6px; flex-wrap: wrap; }
+  .pill {
+    font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 999px; display: inline-flex;
+    align-items: center; gap: 5px; white-space: nowrap;
+  }
+  .pill::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  .pill.good { background: color-mix(in srgb, var(--good) 16%, var(--surface)); color: var(--good); }
+  .pill.warn { background: color-mix(in srgb, var(--warning) 20%, var(--surface)); color: var(--warning); }
+  .pill.bad { background: color-mix(in srgb, var(--critical) 16%, var(--surface)); color: var(--critical); }
+  .health-body { padding: 0 16px 16px; display: none; border-top: 1px solid var(--line); }
+  .health-body.open { display: block; padding-top: 14px; }
+  .health-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px 20px; }
+  .health-row { display: flex; justify-content: space-between; gap: 12px; font-size: 12.5px; padding: 4px 0; border-bottom: 1px dashed var(--line); }
+  .health-row span:first-child { color: var(--muted); }
+  .health-row span:last-child { font-family: "IBM Plex Mono", monospace; text-align: right; }
+  .chev { transition: transform 0.15s; color: var(--muted); }
+  .health-head.open .chev { transform: rotate(180deg); }
+
+  /* --- tabs --------------------------------------------------------- */
+  nav.tabs {
+    display: flex; gap: 2px; overflow-x: auto; margin-bottom: 18px; border-bottom: 1px solid var(--line-strong);
+    -webkit-overflow-scrolling: touch;
+  }
+  nav.tabs button {
+    background: none; color: var(--muted); border: none; border-radius: 0; padding: 10px 14px;
+    font-size: 13.5px; font-weight: 600; white-space: nowrap; border-bottom: 2px solid transparent; margin-bottom: -1px;
+  }
+  nav.tabs button.active { color: var(--felt); border-bottom-color: var(--felt); }
+  section.tab { display: none; }
+  section.tab.active { display: block; animation: fade .18s ease; }
+  @keyframes fade { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: none; } }
+  @media (prefers-reduced-motion: reduce) { section.tab.active { animation: none; } }
+
+  /* --- cards / tiles -------------------------------------------------- */
+  .card {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow);
+    padding: 16px; margin-bottom: 18px;
+  }
+  .card > h3 { font-size: 15px; margin-bottom: 4px; }
+  .card > .hint { color: var(--muted); font-size: 12px; margin-bottom: 12px; }
+  .tile-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 18px; }
+  .tile {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow);
+    padding: 14px 16px;
+  }
+  .tile .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; }
+  .tile .value { font-family: "IBM Plex Mono", monospace; font-size: 24px; font-weight: 600; margin-top: 4px; }
+  .tile .foot { font-size: 11.5px; color: var(--muted); margin-top: 3px; }
+  .up { color: var(--gold); } .down { color: var(--clay); }
+
+  .grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+  .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 14px; }
+
+  /* --- histogram / scatter chrome -------------------------------------*/
+  .stat-caption { font-size: 11px; color: var(--muted); margin-top: 6px; font-family: "IBM Plex Mono", monospace; }
+  .stat-caption b { color: var(--ink-soft); }
+  svg.chart text { fill: var(--muted); font-size: 9.5px; font-family: "IBM Plex Sans", sans-serif; }
+  svg.chart .axis { stroke: var(--line-strong); stroke-width: 1; }
+  svg.chart .gridline { stroke: var(--line); stroke-width: 1; }
+
+  /* --- bars (HTML) ------------------------------------------------------*/
+  .barlist { display: flex; flex-direction: column; gap: 8px; }
+  .barlist .row { display: grid; grid-template-columns: 108px 1fr auto; gap: 10px; align-items: center; font-size: 12.5px; }
+  .barlist .name { color: var(--ink-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .barlist .track { background: var(--surface-2); border-radius: 5px; height: 12px; position: relative; overflow: hidden; }
+  .barlist .fill { position: absolute; top: 0; left: 0; height: 100%; border-radius: 5px; background: var(--felt); }
+  .barlist .fill.clay { background: var(--clay); } .barlist .fill.gold { background: var(--gold-strong); }
+  .barlist .val { font-family: "IBM Plex Mono", monospace; text-align: right; min-width: 5.5ch; }
+
+  /* --- tables ----------------------------------------------------------*/
+  .table-wrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  th, td { padding: 7px 10px; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; cursor: pointer; user-select: none; }
+  th.sorted { color: var(--felt); }
+  th .arrow { font-size: 9px; margin-left: 3px; }
+  td.num, th.num { font-family: "IBM Plex Mono", monospace; }
+  tbody tr:hover { background: var(--surface-2); }
+  td.pos { color: var(--gold); font-weight: 600; } td.neg { color: var(--clay); font-weight: 600; }
+
+  .toolbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+  input[type=search], select {
+    font: inherit; font-size: 13px; padding: 7px 10px; border-radius: 7px; border: 1px solid var(--line-strong);
+    background: var(--surface); color: var(--ink);
+  }
+  .pager { display: flex; gap: 8px; align-items: center; margin-top: 10px; font-size: 12px; color: var(--muted); }
+  .pager button { padding: 5px 10px; font-size: 12px; }
+  .pager button:disabled { opacity: 0.4; cursor: default; }
+
+  /* --- showdown grid -----------------------------------------------------*/
+  .sd-layout { display: grid; grid-template-columns: minmax(0, 1fr) 240px; gap: 16px; align-items: start; }
+  @media (max-width: 760px) { .sd-layout { grid-template-columns: 1fr; } }
+  .sd-grid { display: grid; grid-template-columns: repeat(13, 1fr); gap: 2px; }
+  .sd-cell {
+    aspect-ratio: 1; display: flex; align-items: center; justify-content: center; border-radius: 3px;
+    font-family: "IBM Plex Mono", monospace; font-size: 9px; cursor: pointer; color: var(--ink);
+    border: 1px solid var(--line); background: var(--surface-2);
+  }
+  .sd-cell.pair { font-weight: 700; }
+  .sd-cell.sel { outline: 2px solid var(--gold); outline-offset: -2px; }
+  .sd-legend { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); margin-top: 8px; }
+  .sd-legend .sw { width: 14px; height: 10px; border-radius: 2px; }
+  .sd-detail { background: var(--surface-2); border-radius: 10px; padding: 12px; font-size: 12.5px; min-height: 160px; }
+  .sd-detail h4 { font-size: 13px; margin: 0 0 8px; }
+  .sd-detail table { font-size: 11.5px; }
+  .seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: 7px; overflow: hidden; }
+  .seg button { background: var(--surface); color: var(--ink-soft); border-radius: 0; padding: 6px 10px; font-size: 12px; }
+  .seg button.active { background: var(--felt); color: var(--surface); }
+
+  .lb-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+  .lb-list { display: flex; flex-direction: column; }
+  .lb-row { display: flex; justify-content: space-between; gap: 10px; padding: 6px 0; border-bottom: 1px dashed var(--line); font-size: 12.5px; }
+  .lb-row .n { color: var(--muted); width: 1.4em; }
+
+  .tooltip {
+    position: fixed; pointer-events: none; background: var(--ink); color: var(--paper); font-size: 11.5px;
+    padding: 6px 9px; border-radius: 6px; box-shadow: var(--shadow); z-index: 50; max-width: 240px;
+    font-family: "IBM Plex Sans", sans-serif; line-height: 1.4;
+  }
+  .tooltip .t-title { font-weight: 700; margin-bottom: 2px; }
+  .tooltip[hidden] { display: none; }
+
+  footer.note { color: var(--muted); font-size: 11.5px; margin-top: 28px; padding-top: 14px; border-top: 1px solid var(--line); }
+
+  @media (max-width: 620px) {
+    header.top { flex-direction: column; align-items: stretch; }
+    .loader { align-items: stretch; }
+    .loader-row, .paste-wrap { justify-content: stretch; }
+    .barlist .row { grid-template-columns: 84px 1fr auto; }
+  }
+</style>
+
+<div class="shell">
+  <header class="top">
+    <div class="brand">
+      <span class="eyebrow">Torn Poker HUD</span>
+      <h1>Pool Analyzer</h1>
+      <div class="sub">Drop in a gist export to see pool distributions, your win rate, opponent P/L and showdown ranges. Nothing here leaves the browser.</div>
+    </div>
+    <div class="loader">
+      <div class="loader-row">
+        <label class="file-btn" for="file-input">Load export...</label>
+        <input id="file-input" type="file" accept=".json,application/json">
+        <button class="ghost" id="paste-toggle" type="button">Paste JSON instead</button>
+      </div>
+      <div class="paste-wrap" id="paste-wrap">
+        <textarea class="paste" id="paste-area" placeholder="Paste the exported JSON here..."></textarea>
+        <button id="paste-load" type="button">Parse pasted JSON</button>
+      </div>
+      <div class="load-status" id="load-status"></div>
+    </div>
+  </header>
+
+  <div class="sample-banner" id="sample-banner">
+    <div><strong>Sample data.</strong> This is a synthetic pool for illustration, not a real player's figures. Load your own export above - Settings -> GitHub sync in the HUD, then the gist's raw JSON file.</div>
+  </div>
+
+  <div class="health" id="health">
+    <div class="health-head" id="health-head">
+      <h2>Store health</h2>
+      <div class="health-pills" id="health-pills"></div>
+      <span class="chev">v</span>
+    </div>
+    <div class="health-body" id="health-body"></div>
+  </div>
+
+  <nav class="tabs" id="tabs">
+    <button data-tab="you" class="active">You</button>
+    <button data-tab="pool">Pool</button>
+    <button data-tab="opponents">Opponents</button>
+    <button data-tab="showdowns">Showdowns</button>
+    <button data-tab="recent">Recent hands</button>
+  </nav>
+
+  <section class="tab active" id="tab-you"></section>
+  <section class="tab" id="tab-pool"></section>
+  <section class="tab" id="tab-opponents"></section>
+  <section class="tab" id="tab-showdowns"></section>
+  <section class="tab" id="tab-recent"></section>
+
+  <footer class="note">
+    Pool figures are raw averages of stored per-player counters - not the sample-shrunk or archetype-classified
+    versions the HUD's own coach uses. For those (and a proper cross-check against the app's real scoring
+    functions), see <code>analysis/pool-report.js</code> in the repo, run over the same export via
+    <code>node test/harness.js</code>. Formula for every stat is printed under its chart.
+  </footer>
+</div>
+
+<div class="tooltip" id="tooltip" hidden></div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ---------------------------------------------------------------------
+  // Formatting - pure presentation, no scoring judgement of any kind.
+  // ---------------------------------------------------------------------
+  function fmtInt(n) { return n == null || Number.isNaN(n) ? '-' : Math.round(n).toLocaleString('en-US'); }
+  function fmtPct1(n) { return n == null || Number.isNaN(n) ? '-' : n.toFixed(1) + '%'; }
+  function fmtMoney(n) {
+    if (n == null || Number.isNaN(n)) return '-';
+    const neg = n < 0; n = Math.abs(n);
+    let out;
+    if (n >= 1e9) out = '$' + trimZero(n / 1e9) + 'B';
+    else if (n >= 1e6) out = '$' + trimZero(n / 1e6) + 'M';
+    else if (n >= 1e4) out = '$' + trimZero(n / 1e3) + 'k';
+    else out = '$' + Math.round(n).toLocaleString('en-US');
+    return (neg ? '-' : '') + out;
+  }
+  function trimZero(v) { const s = v >= 100 ? v.toFixed(0) : v.toFixed(1); return s.replace(/\.0$/, ''); }
+  function fmtSignedMoney(n) { if (n == null) return '-'; return (n > 0 ? '+' : '') + fmtMoney(n); }
+  function fmtBB(n) { if (n == null || Number.isNaN(n)) return '-'; return (n > 0 ? '+' : '') + n.toFixed(1) + 'bb'; }
+  function fmtDate(t) { if (!t) return '-'; const d = new Date(t); return d.toISOString().slice(0, 10); }
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+
+  // ---------------------------------------------------------------------
+  // Small stats helpers - arithmetic only.
+  // ---------------------------------------------------------------------
+  function mean(arr) { const v = arr.filter((x) => x != null && !Number.isNaN(x)); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; }
+  function popSd(arr) { const v = arr.filter((x) => x != null && !Number.isNaN(x)); if (v.length < 2) return null; const m = mean(v); return Math.sqrt(mean(v.map((x) => (x - m) ** 2))); }
+  function median(arr) { const v = arr.filter((x) => x != null && !Number.isNaN(x)).slice().sort((a, b) => a - b); return quantile(v, 0.5); }
+  function quantile(sorted, q) {
+    if (!sorted.length) return null;
+    const pos = (sorted.length - 1) * q, base = Math.floor(pos), rest = pos - base;
+    return sorted[base + 1] !== undefined ? sorted[base] + rest * (sorted[base + 1] - sorted[base]) : sorted[base];
+  }
+  function pct(a, b) { return b ? (100 * a) / b : null; }
+
+  // ---------------------------------------------------------------------
+  // Synthetic sample - deterministic PRNG, clearly not real data.
+  // Field shape matches the real export exactly (see torn-poker-hud.user.js
+  // emptyPlayer/ensureHeroShape) but every value here is generated.
+  // ---------------------------------------------------------------------
+  function mulberry32(seed) {
+    return function () {
+      seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  const RANKS = ['A', 'K', 'Q', 'J', 'T', '9', '8', '7', '6', '5', '4', '3', '2'];
+  function allHandClasses() {
+    const out = [];
+    for (let i = 0; i < 13; i++) for (let j = 0; j < 13; j++) {
+      if (i === j) out.push(RANKS[i] + RANKS[i]);
+      else if (i < j) out.push(RANKS[i] + RANKS[j] + 's');
+      else out.push(RANKS[j] + RANKS[i] + 'o');
+    }
+    return out;
+  }
+  const SAMPLE_NAMES = ['Riverwolf', 'ChipLeader', 'FoldEquity', 'BluffCatcher', 'SlowRoll99', 'Nitropoker',
+    'TorncardTina', 'PocketRox', 'AllInAndy', 'GutshotGus', 'CheckRaiser', 'ValueVern', 'ShortStackSam',
+    'BigBlindBea', 'CutoffCarl', 'DonkBetDan', 'RangeReader', 'ThinValue', 'FelttableFin', 'RiverRat',
+    'PolarizedPat', 'MergeMara', 'ThreeBetTom', 'LimperLu', 'StackedSteve', 'TrapTrish', 'BubbleBoyBo',
+    'GTOGiselle', 'ExploitEd', 'CalldownCal'];
+  const STAKES = [50000, 100000, 250000, 500000, 1000000, 2500000, 5000000];
+
+  function buildSampleStore() {
+    const rng = mulberry32(20260903);
+    const heroXid = '900001';
+    const players = {};
+
+    function makePlayer(xid, name, hands, style) {
+      const vpipRate = style.vpip, pfrRate = style.pfr;
+      const vpip = Math.round(hands * vpipRate);
+      const pfr = Math.min(vpip, Math.round(hands * pfrRate));
+      const threeBetMade = Math.round(vpip * (0.02 + rng() * 0.05));
+      const foldTo3BetOpp = Math.round(pfr * (0.25 + rng() * 0.3));
+      const foldTo3BetMade = Math.round(foldTo3BetOpp * (0.35 + rng() * 0.35));
+      const cbetOpp = Math.round(pfr * (0.7 + rng() * 0.5));
+      const cbetMade = Math.round(cbetOpp * (0.3 + rng() * 0.4));
+      const foldToCbetOpp = Math.round(vpip * (0.35 + rng() * 0.3));
+      const foldToCbetMade = Math.round(foldToCbetOpp * (0.3 + rng() * 0.4));
+      const limpMade = Math.round(vpip * (0.15 + rng() * 0.55));
+      const wtsd = Math.round(hands * (0.08 + rng() * 0.12));
+      const streetActions = {};
+      ['flop', 'turn', 'river'].forEach((s, i) => {
+        const opp = Math.round((vpip * (0.9 - i * 0.28)));
+        const bet = Math.round(opp * (0.12 + rng() * 0.28));
+        const raise = Math.round(opp * rng() * 0.05);
+        const call = Math.round(opp * (0.18 + rng() * 0.25));
+        const check = Math.max(0, opp - bet - raise - call - Math.round(opp * 0.15));
+        const fold = Math.max(0, opp - bet - raise - call - check);
+        streetActions[s] = { bet, raise, call, check, fold };
+      });
+      const plBB = (rng() - 0.48) * hands * 1.4;
+      const bb = STAKES[Math.floor(rng() * STAKES.length)];
+      const tables = {}; tables[bb] = hands;
+      const shownHands = {};
+      const classes = allHandClasses();
+      const nShown = Math.min(classes.length, Math.round(8 + rng() * 60));
+      for (let k = 0; k < nShown; k++) {
+        const cls = classes[Math.floor(rng() * classes.length)];
+        const seen = 1 + Math.floor(rng() * 6);
+        shownHands[cls] = shownHands[cls] || { seen: 0, raised: 0, won: 0 };
+        shownHands[cls].seen += seen;
+        shownHands[cls].raised += Math.round(seen * rng() * 0.7);
+        shownHands[cls].won += Math.round(seen * rng() * 0.55);
+      }
+      return {
+        xid, name, hands, vpip, pfr, threeBetMade, foldTo3BetMade, foldTo3BetOpp,
+        cbetMade, cbetOpp, foldToCbetMade, foldToCbetOpp, streetActions,
+        wtsd, limpMade, shownHands, tables,
+        plChipsEst: plBB * bb, plBBEst: plBB,
+        lastSeen: Date.now() - Math.floor(rng() * 30) * 86400000,
+      };
+    }
+
+    const styles = [
+      { vpip: 0.22, pfr: 0.18 }, { vpip: 0.65, pfr: 0.10 }, { vpip: 0.48, pfr: 0.30 },
+      { vpip: 0.55, pfr: 0.08 }, { vpip: 0.38, pfr: 0.20 }, { vpip: 0.70, pfr: 0.42 },
+    ];
+    SAMPLE_NAMES.forEach((name, i) => {
+      const xid = String(500000 + i);
+      const hands = 25 + Math.floor(rng() * rng() * 1400);
+      const style = styles[Math.floor(rng() * styles.length)];
+      players[xid] = makePlayer(xid, name, hands, style);
+    });
+
+    const heroHands = 3200;
+    players[heroXid] = makePlayer(heroXid, 'YourHandle', heroHands, { vpip: 0.30, pfr: 0.21 });
+    players[heroXid].plChipsEst = 0; players[heroXid].plBBEst = 0;
+
+    const sessionHistory = [];
+    let t = Date.now() - 21 * 86400000;
+    for (let i = 0; i < 9; i++) {
+      const hands = 60 + Math.floor(rng() * 260);
+      const bb = STAKES[3 + Math.floor(rng() * 3)];
+      const netBB = (rng() - 0.42) * hands * 1.2;
+      sessionHistory.push({
+        startedAt: t, endedAt: t + hands * 40000, hands,
+        netChips: netBB * bb, netBB,
+        vpip: Math.round(hands * (0.28 + rng() * 0.2)), pfr: Math.round(hands * (0.15 + rng() * 0.12)),
+        aggActions: Math.round(hands * 0.3), passActions: Math.round(hands * 0.2), bb,
+      });
+      t += hands * 40000 + 3600000 + rng() * 8 * 3600000;
+    }
+
+    const hands = [];
+    let ht = Date.now() - 18 * 3600000;
+    for (let i = 0; i < 60; i++) {
+      const bb = STAKES[3 + Math.floor(rng() * 4)];
+      const involvesHero = rng() < 0.6;
+      const seatCount = 4 + Math.floor(rng() * 5);
+      const seatPlayers = [];
+      if (involvesHero) seatPlayers.push(heroXid);
+      for (let s = 0; s < seatCount; s++) seatPlayers.push(String(500000 + Math.floor(rng() * SAMPLE_NAMES.length)));
+      hands.push({ t: ht, bb, pinned: rng() < 0.4, players: seatPlayers, pot: bb * (6 + rng() * 60) });
+      ht += 30000 + Math.floor(rng() * 90000);
+    }
+
+    const plLedger = [];
+    let lt = Date.now() - 3 * 3600000;
+    for (let i = 0; i < 24; i++) {
+      const d = Math.round((rng() - 0.45) * 1500000);
+      plLedger.push({ t: lt, d, b: 500000, g: rng() < 0.85 ? 'sample' + i : null });
+      lt += 60000 + Math.floor(rng() * 240000);
+    }
+
+    return {
+      version: 3, players, hands,
+      hero: { hands: heroHands, netChips: sessionHistory.reduce((a, s) => a + s.netChips, 0), netBB: sessionHistory.reduce((a, s) => a + s.netBB, 0), bbHands: heroHands, xid: heroXid },
+      session: { startedAt: Date.now() - 3600000, hands: 40, net: 240000, lastHandAt: Date.now(), vpip: 12, pfr: 8, aggActions: 9, passActions: 6, bb: 500000 },
+      settings: { heroName: 'YourHandle', minHands: 20, historyLimit: 200, sessionWindow: 15, badgeMode: 'session', tableMax: 9 },
+      sessionHistory, plLedger,
+    };
+  }
+
+  // ---------------------------------------------------------------------
+  // State
+  // ---------------------------------------------------------------------
+  let STORE = null, HERO_XID = null, IS_SAMPLE = true, M = null;
+  let showdownMetric = 'seen', showdownSel = null;
+  let oppSort = { key: 'hands', dir: 'desc' }, oppFilter = '', oppPage = 0;
+  const OPP_PAGE_SIZE = 100;
+
+  // ---------------------------------------------------------------------
+  // Metric computation - every figure here is a direct ratio/sum of stored
+  // fields. No thresholds, no shrinkage, no classification: see the note in
+  // the file header for why that line is drawn here.
+  // ---------------------------------------------------------------------
+  const RATE_KEYS = ['vpip', 'pfr', 'threeBet', 'foldTo3Bet', 'cbet', 'foldToCbet', 'limpShareOfVpip', 'afq', 'wtsd'];
+  const RATE_LABELS = {
+    vpip: 'VPIP', pfr: 'PFR', threeBet: '3-Bet', foldTo3Bet: 'Fold to 3-Bet', cbet: 'C-Bet',
+    foldToCbet: 'Fold to C-Bet', limpShareOfVpip: 'Limp share of VPIP', afq: 'AFq (folds excluded)', wtsd: 'WTSD',
+  };
+  const RATE_FORMULA = {
+    vpip: 'vpip / hands', pfr: 'pfr / hands', threeBet: 'threeBetMade / hands',
+    foldTo3Bet: 'foldTo3BetMade / foldTo3BetOpp', cbet: 'cbetMade / cbetOpp', foldToCbet: 'foldToCbetMade / foldToCbetOpp',
+    limpShareOfVpip: 'limpMade / vpip', afq: '(bet+raise) / (bet+raise+call), postflop', wtsd: 'wtsd / hands',
+  };
+  function playerRates(p) {
+    const s = p.streetActions || {};
+    let agg = 0, pass = 0;
+    ['flop', 'turn', 'river'].forEach((k) => { const st = s[k] || {}; agg += (st.bet || 0) + (st.raise || 0); pass += (st.call || 0); });
+    return {
+      vpip: pct(p.vpip, p.hands), pfr: pct(p.pfr, p.hands), threeBet: pct(p.threeBetMade, p.hands),
+      foldTo3Bet: pct(p.foldTo3BetMade, p.foldTo3BetOpp), cbet: pct(p.cbetMade, p.cbetOpp),
+      foldToCbet: pct(p.foldToCbetMade, p.foldToCbetOpp), limpShareOfVpip: pct(p.limpMade, p.vpip),
+      afq: pct(agg, agg + pass), wtsd: pct(p.wtsd, p.hands),
+    };
+  }
+
+  function qualifying(minHands) {
+    return Object.keys(STORE.players)
+      .filter((x) => x !== HERO_XID)
+      .map((x) => STORE.players[x])
+      .filter((p) => p && p.hands >= minHands);
+  }
+
+  function computeAll() {
+    HERO_XID = STORE.hero && STORE.hero.xid != null ? String(STORE.hero.xid) : null;
+    const allXids = Object.keys(STORE.players);
+    const pseudoXids = allXids.filter((x) => x.startsWith('name:'));
+    const pseudoQual = pseudoXids.map((x) => STORE.players[x]).filter((p) => p && p.hands >= 25);
+    const heroRecord = HERO_XID ? STORE.players[HERO_XID] : null;
+
+    const qual25 = qualifying(25);
+    const rates25 = qual25.map(playerRates);
+
+    const poolStats = {};
+    RATE_KEYS.forEach((k) => {
+      const vals = rates25.map((r) => r[k]);
+      poolStats[k] = { mean: mean(vals), median: median(vals), sd: popSd(vals), n: vals.filter((v) => v != null).length };
+    });
+
+    const cutoffSweep = [25, 50, 100, 200].map((cutoff) => {
+      const ps = qualifying(cutoff);
+      const rs = ps.map(playerRates);
+      const row = { cutoff, n: ps.length };
+      RATE_KEYS.slice(0, 7).forEach((k) => { row[k] = popSd(rs.map((r) => r[k])); });
+      return row;
+    });
+
+    const handsAll = Object.keys(STORE.players).filter((x) => x !== HERO_XID).map((x) => STORE.players[x].hands || 0).sort((a, b) => a - b);
+    const sampleSizeQ = [0.1, 0.25, 0.5, 0.75, 0.9].map((q) => quantile(handsAll, q));
+
+    const stakesMix = {};
+    qual25.forEach((p) => { Object.keys(p.tables || {}).forEach((bb) => { stakesMix[bb] = (stakesMix[bb] || 0) + p.tables[bb]; }); });
+    const stakesTotal = Object.values(stakesMix).reduce((a, b) => a + b, 0);
+
+    const opponents = Object.keys(STORE.players)
+      .filter((x) => x !== HERO_XID)
+      .map((x) => STORE.players[x])
+      .filter((p) => p && p.hands > 0)
+      .map((p) => ({ p, r: playerRates(p) }));
+
+    const plSum = opponents.reduce((a, o) => a + (o.p.plChipsEst || 0), 0);
+    const plBBSum = opponents.reduce((a, o) => a + (o.p.plBBEst || 0), 0);
+
+    const byStake = {};
+    (STORE.sessionHistory || []).forEach((s) => {
+      const k = s.bb || 0;
+      byStake[k] = byStake[k] || { bb: k, hands: 0, netChips: 0, netBB: 0, sessions: 0 };
+      byStake[k].hands += s.hands || 0; byStake[k].netChips += s.netChips || 0; byStake[k].netBB += s.netBB || 0; byStake[k].sessions += 1;
+    });
+
+    // Showdown grid, aggregated across every non-hero player regardless of
+    // the 25-hand pool cutoff - a showdown is real evidence the moment it
+    // happens, independent of how many hands that player has logged.
+    const sdGrid = {};
+    const sdPlayers = {};
+    Object.keys(STORE.players).filter((x) => x !== HERO_XID).forEach((x) => {
+      const p = STORE.players[x];
+      Object.keys(p.shownHands || {}).forEach((cls) => {
+        const e = p.shownHands[cls];
+        if (!e || !e.seen) return;
+        sdGrid[cls] = sdGrid[cls] || { seen: 0, raised: 0, won: 0 };
+        sdGrid[cls].seen += e.seen; sdGrid[cls].raised += e.raised || 0; sdGrid[cls].won += e.won || 0;
+        sdPlayers[cls] = sdPlayers[cls] || [];
+        sdPlayers[cls].push({ name: p.name, xid: x, seen: e.seen, raised: e.raised || 0, won: e.won || 0 });
+      });
+    });
+
+    const handsArr = STORE.hands || [];
+    const bbMix = {};
+    let pinnedN = 0, heroInvolved = 0;
+    handsArr.forEach((h) => {
+      const bb = h.bb || 0; bbMix[bb] = (bbMix[bb] || 0) + 1;
+      if (h.pinned) pinnedN++;
+      if (HERO_XID && Array.isArray(h.players) && h.players.map(String).includes(HERO_XID)) heroInvolved++;
+    });
+    const tsSpan = handsArr.length ? { min: Math.min(...handsArr.map((h) => h.t || Infinity)), max: Math.max(...handsArr.map((h) => h.t || 0)) } : null;
+
+    M = {
+      allXids, pseudoXids, pseudoQual, heroRecord, qual25, poolStats, cutoffSweep,
+      sampleSizeQ, handsAllCount: handsAll.length, stakesMix, stakesTotal, opponents, plSum, plBBSum,
+      byStake, sdGrid, sdPlayers, bbMix, pinnedN, heroInvolved, tsSpan, handsArr,
+    };
+  }
+
+  // ---------------------------------------------------------------------
+  // Tooltip
+  // ---------------------------------------------------------------------
+  const tt = document.getElementById('tooltip');
+  function showTip(evt, title, body) {
+    tt.innerHTML = '<div class="t-title">' + esc(title) + '</div>' + (body ? esc(body) : '');
+    tt.hidden = false;
+    positionTip(evt);
+  }
+  function positionTip(evt) {
+    const x = evt.clientX, y = evt.clientY;
+    const pad = 14;
+    let left = x + pad, top = y + pad;
+    if (left + 240 > window.innerWidth) left = x - 240 - pad;
+    if (top + 60 > window.innerHeight) top = y - 60 - pad;
+    tt.style.left = left + 'px'; tt.style.top = top + 'px';
+  }
+  function hideTip() { tt.hidden = true; }
+
+  // ---------------------------------------------------------------------
+  // SVG chart builders
+  // ---------------------------------------------------------------------
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  function svg(tag, attrs) {
+    const el = document.createElementNS(SVG_NS, tag);
+    Object.keys(attrs || {}).forEach((k) => el.setAttribute(k, attrs[k]));
+    return el;
+  }
+
+  function histogramChart(values, opts) {
+    const vals = values.filter((v) => v != null && !Number.isNaN(v));
+    const w = 260, h = 120, padL = 4, padR = 4, padT = 6, padB = 16;
+    const root = svg('svg', { class: 'chart', viewBox: '0 0 ' + w + ' ' + h, width: '100%', height: h });
+    if (!vals.length) {
+      const t = svg('text', { x: w / 2, y: h / 2, 'text-anchor': 'middle' }); t.textContent = 'no data'; root.appendChild(t);
+      return root;
+    }
+    const dataMax = Math.max(...vals);
+    const domainMax = Math.max(dataMax * 1.08, 1);
+    const bins = 9;
+    const step = domainMax / bins;
+    const counts = new Array(bins).fill(0);
+    vals.forEach((v) => { let idx = Math.floor(v / step); if (idx >= bins) idx = bins - 1; if (idx < 0) idx = 0; counts[idx]++; });
+    const maxCount = Math.max(...counts, 1);
+    const plotW = w - padL - padR, plotH = h - padT - padB;
+    const bw = plotW / bins;
+    root.appendChild(svg('line', { class: 'axis', x1: padL, y1: h - padB, x2: w - padR, y2: h - padB }));
+    counts.forEach((c, i) => {
+      const barH = (c / maxCount) * plotH;
+      const x = padL + i * bw + 1.5;
+      const y = h - padB - barH;
+      const rect = svg('rect', { x, y, width: Math.max(1, bw - 3), height: barH, rx: 2, fill: 'var(--felt)', 'fill-opacity': 0.85 });
+      rect.addEventListener('pointermove', (e) => showTip(e, (i * step).toFixed(1) + '-' + ((i + 1) * step).toFixed(1) + '%', c + ' player(s)'));
+      rect.addEventListener('pointerleave', hideTip);
+      root.appendChild(rect);
+    });
+    // mean marker
+    const m = mean(vals);
+    if (m != null) {
+      const mx = padL + (m / domainMax) * plotW;
+      root.appendChild(svg('line', { x1: mx, y1: padT, x2: mx, y2: h - padB, stroke: 'var(--gold)', 'stroke-width': 1.5, 'stroke-dasharray': '3,2' }));
+    }
+    [0, domainMax].forEach((v, i) => {
+      const t = svg('text', { x: i === 0 ? padL : w - padR, y: h - 4, 'text-anchor': i === 0 ? 'start' : 'end' });
+      t.textContent = v.toFixed(v < 5 ? 1 : 0) + '%'; root.appendChild(t);
+    });
+    return root;
+  }
+
+  function scatterChart(points, heroPoint) {
+    const w = 480, h = 320, pad = 34;
+    const root = svg('svg', { class: 'chart', viewBox: '0 0 ' + w + ' ' + h, width: '100%', height: h });
+    const xs = points.map((p) => p.x).concat(heroPoint ? [heroPoint.x] : []);
+    const ys = points.map((p) => p.y).concat(heroPoint ? [heroPoint.y] : []);
+    const xMax = Math.max(...xs, 10) * 1.08, yMax = Math.max(...ys, 10) * 1.15;
+    const plotW = w - pad - 10, plotH = h - pad - 10;
+    const sx = (v) => pad + (v / xMax) * plotW;
+    const sy = (v) => h - pad - (v / yMax) * plotH;
+    [0.25, 0.5, 0.75, 1].forEach((f) => {
+      root.appendChild(svg('line', { class: 'gridline', x1: pad, y1: sy(yMax * f), x2: w - 10, y2: sy(yMax * f) }));
+    });
+    root.appendChild(svg('line', { class: 'axis', x1: pad, y1: h - pad, x2: w - 10, y2: h - pad }));
+    root.appendChild(svg('line', { class: 'axis', x1: pad, y1: 10, x2: pad, y2: h - pad }));
+    const xt = svg('text', { x: w / 2, y: h - 4, 'text-anchor': 'middle' }); xt.textContent = 'VPIP %'; root.appendChild(xt);
+    const yt = svg('text', { x: 10, y: 10, 'text-anchor': 'start' }); yt.textContent = 'PFR %'; root.appendChild(yt);
+    points.forEach((p) => {
+      const c = svg('circle', { cx: sx(p.x), cy: sy(p.y), r: 3, fill: 'var(--felt)', 'fill-opacity': 0.55 });
+      c.addEventListener('pointermove', (e) => showTip(e, p.name, 'VPIP ' + p.x.toFixed(1) + '% - PFR ' + p.y.toFixed(1) + '% - ' + p.hands + ' hands'));
+      c.addEventListener('pointerleave', hideTip);
+      root.appendChild(c);
+    });
+    if (heroPoint) {
+      root.appendChild(svg('circle', { cx: sx(heroPoint.x), cy: sy(heroPoint.y), r: 6, fill: 'var(--gold)', stroke: 'var(--surface)', 'stroke-width': 2 }));
+      const lbl = svg('text', { x: sx(heroPoint.x) + 9, y: sy(heroPoint.y) - 8, fill: 'var(--gold)', 'font-weight': 700 });
+      lbl.style.fill = 'var(--gold)'; lbl.textContent = 'You'; root.appendChild(lbl);
+    }
+    return root;
+  }
+
+  function barListRows(container, rows, opts) {
+    container.innerHTML = '';
+    const wrap = document.createElement('div'); wrap.className = 'barlist';
+    const max = Math.max(...rows.map((r) => Math.abs(r.value)), 1);
+    rows.forEach((r) => {
+      const row = document.createElement('div'); row.className = 'row';
+      const name = document.createElement('div'); name.className = 'name'; name.textContent = r.label; name.title = r.label;
+      const track = document.createElement('div'); track.className = 'track';
+      const fill = document.createElement('div'); fill.className = 'fill' + (r.cls ? ' ' + r.cls : '');
+      const pctW = Math.max(2, (Math.abs(r.value) / max) * 100);
+      fill.style.width = pctW + '%';
+      if (opts && opts.center) { fill.style.left = r.value < 0 ? (50 - pctW / 2) + '%' : '50%'; fill.style.width = (pctW / 2) + '%'; }
+      track.appendChild(fill);
+      const val = document.createElement('div'); val.className = 'val'; val.textContent = r.display != null ? r.display : r.value;
+      track.title = r.tip || ''; row.title = r.tip || '';
+      row.appendChild(name); row.appendChild(track); row.appendChild(val);
+      wrap.appendChild(row);
+    });
+    container.appendChild(wrap);
+  }
+
+  // ---------------------------------------------------------------------
+  // Health strip
+  // ---------------------------------------------------------------------
+  function renderHealth() {
+    const pills = document.getElementById('health-pills');
+    const body = document.getElementById('health-body');
+    const hero = STORE.hero || {};
+    const rows = [];
+    const pillList = [];
+
+    const heroOk = !!(HERO_XID && M.heroRecord);
+    pillList.push(heroOk
+      ? { cls: 'good', label: 'Hero identity OK' }
+      : { cls: 'bad', label: 'Hero not resolved' });
+    rows.push(['hero.xid', HERO_XID || '-']);
+    rows.push(['players[heroXid] found', heroOk ? 'yes' : 'no']);
+    if (heroOk) rows.push(['players[hero].hands vs hero.hands', M.heroRecord.hands + ' / ' + hero.hands + (M.heroRecord.hands === hero.hands ? ' - match' : ' - MISMATCH')]);
+
+    if (hero.bbHands > hero.hands) pillList.push({ cls: 'warn', label: 'bbHands > hands' });
+    rows.push(['hero.bbHands vs hero.hands', fmtInt(hero.bbHands) + ' / ' + fmtInt(hero.hands)]);
+
+    const playersN = M.allXids.length;
+    const pseudoN = M.pseudoXids.length;
+    rows.push(['players total', fmtInt(playersN)]);
+    rows.push(['pseudo ("name:") records', fmtInt(pseudoN) + ' (' + fmtInt(M.pseudoQual.length) + ' qualify, ' + fmtInt(M.pseudoQual.reduce((a, p) => a + p.hands, 0)) + ' hands)']);
+    rows.push(['qualifying opponents (>=25 hands)', fmtInt(M.qual25.length)]);
+    rows.push(['hand records stored', fmtInt(M.handsArr.length)]);
+    rows.push(['sessionHistory rows', fmtInt((STORE.sessionHistory || []).length)]);
+    rows.push(['plLedger rows', fmtInt((STORE.plLedger || []).length)]);
+
+    const gap = (hero.netChips || 0) - M.plSum;
+    const gapPct = hero.netChips ? Math.abs(gap / hero.netChips) * 100 : 0;
+    if (gapPct > 40) pillList.push({ cls: 'warn', label: 'Opponent P/L gap ' + gapPct.toFixed(0) + '%' });
+    rows.push(['Sum of opponent plChipsEst vs hero.netChips', fmtMoney(M.plSum) + ' / ' + fmtMoney(hero.netChips) + ' (gap ' + fmtMoney(gap) + ')']);
+    rows.push(['Sum of opponent plBBEst vs hero.netBB', (M.plBBSum || 0).toFixed(0) + 'bb / ' + (hero.netBB || 0).toFixed(0) + 'bb']);
+
+    const shSum = (STORE.sessionHistory || []).reduce((a, s) => a + (s.hands || 0), 0);
+    rows.push(['Sum of sessionHistory.hands vs hero.hands', fmtInt(shSum) + ' / ' + fmtInt(hero.hands) + ' (sessionHistory is capped at 20 rows)']);
+
+    if (STORE.version !== 3) pillList.push({ cls: 'warn', label: 'store schema v' + STORE.version });
+    rows.push(['store schema version', String(STORE.version)]);
+
+    pills.innerHTML = pillList.map((p) => '<span class="pill ' + p.cls + '">' + esc(p.label) + '</span>').join('');
+    body.innerHTML = '<div class="health-grid">' + rows.map((r) =>
+      '<div class="health-row"><span>' + esc(r[0]) + '</span><span>' + r[1] + '</span></div>').join('') + '</div>';
+  }
+
+  // ---------------------------------------------------------------------
+  // Tab: You
+  // ---------------------------------------------------------------------
+  function renderYou() {
+    const el = document.getElementById('tab-you');
+    const hero = STORE.hero || {};
+    const bbRate = hero.bbHands ? (100 * (hero.netBB || 0)) / hero.bbHands : null;
+    let html = '<div class="tile-row">';
+    html += tile('Lifetime hands', fmtInt(hero.hands));
+    html += tile('Net chips', fmtSignedMoney(hero.netChips), hero.netChips >= 0 ? 'up' : 'down');
+    html += tile('Net BB', fmtBB(hero.netBB), hero.netBB >= 0 ? 'up' : 'down');
+    html += tile('bb/100', bbRate == null ? '-' : (bbRate >= 0 ? '+' : '') + bbRate.toFixed(2), bbRate >= 0 ? 'up' : 'down', 'over ' + fmtInt(hero.bbHands) + ' bb-hands');
+    html += '</div>';
+
+    if (M.heroRecord) {
+      const r = playerRates(M.heroRecord);
+      html += '<div class="card"><h3>Your raw rates</h3><div class="hint">Same field-ratios as the pool figures below - see the formula under each.</div><div class="grid-3">';
+      RATE_KEYS.forEach((k) => {
+        html += '<div><div class="label" style="font-size:11px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.05em">' + RATE_LABELS[k] + '</div>'
+          + '<div class="num" style="font-size:20px;font-weight:600">' + fmtPct1(r[k]) + '</div>'
+          + '<div class="stat-caption">' + RATE_FORMULA[k] + '</div></div>';
+      });
+      html += '</div></div>';
+    }
+
+    const stakeRows = Object.values(M.byStake).sort((a, b) => b.hands - a.hands);
+    if (stakeRows.length) {
+      html += '<div class="card"><h3>By stake</h3><div class="hint">From the last ' + (STORE.sessionHistory || []).length + ' recorded sessions.</div>'
+        + '<div class="table-wrap"><table><thead><tr><th>Stake</th><th class="num">Sessions</th><th class="num">Hands</th><th class="num">Net chips</th><th class="num">Net BB</th><th class="num">bb/100</th></tr></thead><tbody>';
+      stakeRows.forEach((s) => {
+        const rate = s.hands ? (100 * s.netBB) / s.hands : null;
+        html += '<tr><td>' + fmtMoney(s.bb) + ' BB</td><td class="num">' + s.sessions + '</td><td class="num">' + fmtInt(s.hands) + '</td>'
+          + '<td class="num ' + (s.netChips >= 0 ? 'pos' : 'neg') + '">' + fmtSignedMoney(s.netChips) + '</td>'
+          + '<td class="num ' + (s.netBB >= 0 ? 'pos' : 'neg') + '">' + fmtBB(s.netBB) + '</td>'
+          + '<td class="num">' + (rate == null ? '-' : (rate >= 0 ? '+' : '') + rate.toFixed(1)) + '</td></tr>';
+      });
+      html += '</tbody></table></div></div>';
+    }
+
+    const sessions = (STORE.sessionHistory || []).slice().sort((a, b) => a.startedAt - b.startedAt);
+    html += '<div class="card"><h3>Session-by-session net BB</h3><div class="hint">Last ' + sessions.length + ' sessions, oldest -> newest. Hover a bar for hands / VPIP / PFR.</div><div id="you-sessions"></div></div>';
+
+    if ((STORE.plLedger || []).length >= 10) {
+      html += '<div class="card"><h3>P/L ledger (cumulative)</h3><div class="hint">' + STORE.plLedger.length + ' rows - a bounded, FIFO-capped audit trail, not the lifetime total on its own.</div><div id="you-ledger"></div></div>';
+    }
+
+    el.innerHTML = html;
+
+    const sessWrap = document.getElementById('you-sessions');
+    if (sessions.length && sessWrap) {
+      const rows = sessions.map((s, i) => ({
+        label: 'S' + (i + 1), value: s.netBB,
+        display: fmtBB(s.netBB),
+        cls: s.netBB >= 0 ? 'gold' : 'clay',
+        tip: fmtInt(s.hands) + ' hands - VPIP ' + fmtPct1(pct(s.vpip, s.hands)) + ' - PFR ' + fmtPct1(pct(s.pfr, s.hands)) + ' - ' + fmtMoney(s.bb) + ' BB',
+      }));
+      barListRows(sessWrap, rows, { center: true });
+    }
+    const ledgerWrap = document.getElementById('you-ledger');
+    if (ledgerWrap) {
+      const rows = STORE.plLedger.slice(-40);
+      let running = hero.netChips - STORE.plLedger.slice(-40).reduce((a, r) => a + (r.d || 0), 0);
+      const points = rows.map((r) => { running += r.d || 0; return running; });
+      const w = 640, h = 130, pad = 8;
+      const min = Math.min(...points, 0), max = Math.max(...points, 0);
+      const svgEl = svg('svg', { class: 'chart', viewBox: '0 0 ' + w + ' ' + h, width: '100%', height: h });
+      const sx = (i) => pad + (i / Math.max(1, points.length - 1)) * (w - pad * 2);
+      const sy = (v) => h - pad - ((v - min) / Math.max(1, max - min)) * (h - pad * 2);
+      let d = 'M ' + sx(0) + ' ' + sy(points[0]);
+      points.forEach((v, i) => { if (i) d += ' L ' + sx(i) + ' ' + sy(v); });
+      svgEl.appendChild(svg('path', { d, fill: 'none', stroke: 'var(--felt)', 'stroke-width': 2 }));
+      svgEl.appendChild(svg('circle', { cx: sx(points.length - 1), cy: sy(points[points.length - 1]), r: 4, fill: 'var(--gold)' }));
+      ledgerWrap.appendChild(svgEl);
+    }
+  }
+  function tile(label, value, dir, foot) {
+    return '<div class="tile"><div class="label">' + esc(label) + '</div><div class="value ' + (dir || '') + '">' + value + '</div>' + (foot ? '<div class="foot">' + esc(foot) + '</div>' : '') + '</div>';
+  }
+
+  // ---------------------------------------------------------------------
+  // Tab: Pool
+  // ---------------------------------------------------------------------
+  function renderPool() {
+    const el = document.getElementById('tab-pool');
+    let html = '<div class="tile-row">';
+    html += tile('Qualifying opponents', fmtInt(M.qual25.length), '', '>=25 hands, hero excluded');
+    html += tile('Evidence', fmtInt(M.qual25.reduce((a, p) => a + p.hands, 0)) + ' hands', '', 'summed lifetime hands');
+    const q = M.sampleSizeQ;
+    html += tile('Sample size (all opp.)', 'p50 = ' + fmtInt(q[2]), '', 'p10 ' + fmtInt(q[0]) + ' - p90 ' + fmtInt(q[4]) + ' hands');
+    html += '</div>';
+
+    html += '<div class="card"><h3>Distributions</h3><div class="hint">Raw per-player rates, >=25 hands, hero excluded. Dashed line = mean. Formula printed under each.</div><div class="grid-3" id="pool-hists"></div></div>';
+
+    html += '<div class="card"><h3>VPIP vs PFR</h3><div class="hint">One dot per qualifying opponent; your own rate in gold.</div><div id="pool-scatter"></div></div>';
+
+    if (M.stakesTotal) {
+      html += '<div class="card"><h3>Stakes mix</h3><div class="hint">Summed <code>tables</code> across qualifying opponents - ' + fmtInt(M.stakesTotal) + ' hands with a readable blind.</div><div id="pool-stakes"></div></div>';
+    }
+
+    html += '<div class="card"><h3>Spread by sample-size cutoff</h3><div class="hint">Population SD of each raw rate, at rising minimum-hands cutoffs - the between-player spread is what these converge to as n rises. Compare against <code>POOL_SPREAD</code> in the script before proposing a change; see <code>analysis/pool-report.js</code> for the sample-adjusted (shrunk) version.</div>'
+      + '<div class="table-wrap"><table><thead><tr><th>Cutoff</th><th class="num">n</th>' + RATE_KEYS.slice(0, 7).map((k) => '<th class="num">' + RATE_LABELS[k] + '</th>').join('') + '</tr></thead><tbody>';
+    M.cutoffSweep.forEach((row) => {
+      html += '<tr><td>>=' + row.cutoff + '</td><td class="num">' + row.n + '</td>' + RATE_KEYS.slice(0, 7).map((k) => '<td class="num">' + (row[k] == null ? '-' : row[k].toFixed(1)) + '</td>').join('') + '</tr>';
+    });
+    html += '</tbody></table></div></div>';
+
+    el.innerHTML = html;
+
+    const histsWrap = document.getElementById('pool-hists');
+    RATE_KEYS.forEach((k) => {
+      const vals = M.qual25.map((p) => playerRates(p)[k]);
+      const box = document.createElement('div');
+      const s = M.poolStats[k];
+      box.innerHTML = '<div style="font-size:12.5px;font-weight:600">' + RATE_LABELS[k] + '</div>';
+      box.appendChild(histogramChart(vals, {}));
+      const cap = document.createElement('div'); cap.className = 'stat-caption';
+      cap.innerHTML = 'mean <b>' + fmtPct1(s.mean) + '</b> - median <b>' + fmtPct1(s.median) + '</b> - sd <b>' + (s.sd == null ? '-' : s.sd.toFixed(1)) + '</b> - n=' + s.n + '<br>' + RATE_FORMULA[k];
+      box.appendChild(cap);
+      histsWrap.appendChild(box);
+    });
+
+    const scatterWrap = document.getElementById('pool-scatter');
+    if (scatterWrap) {
+      const points = M.qual25.map((p) => { const r = playerRates(p); return { x: r.vpip || 0, y: r.pfr || 0, name: p.name, hands: p.hands }; });
+      let heroPoint = null;
+      if (M.heroRecord) { const r = playerRates(M.heroRecord); heroPoint = { x: r.vpip || 0, y: r.pfr || 0 }; }
+      scatterWrap.appendChild(scatterChart(points, heroPoint));
+    }
+
+    const stakesWrap = document.getElementById('pool-stakes');
+    if (stakesWrap) {
+      const rows = Object.keys(M.stakesMix).map((bb) => ({ bb: Number(bb), hands: M.stakesMix[bb] })).sort((a, b) => b.hands - a.hands).slice(0, 12);
+      barListRows(stakesWrap, rows.map((r) => ({
+        label: fmtMoney(r.bb) + ' BB', value: r.hands, display: fmtInt(r.hands),
+        tip: ((100 * r.hands) / M.stakesTotal).toFixed(0) + '% of stakes-tagged hands',
+      })));
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Tab: Opponents
+  // ---------------------------------------------------------------------
+  const OPP_COLS = [
+    { key: 'name', label: 'Name', num: false },
+    { key: 'hands', label: 'Hands', num: true },
+    { key: 'vpip', label: 'VPIP', num: true, rate: true },
+    { key: 'pfr', label: 'PFR', num: true, rate: true },
+    { key: 'threeBet', label: '3-Bet', num: true, rate: true },
+    { key: 'wtsd', label: 'WTSD', num: true, rate: true },
+    { key: 'plChipsEst', label: 'P/L chips', num: true },
+    { key: 'plBBEst', label: 'P/L bb', num: true },
+    { key: 'lastSeen', label: 'Last seen', num: true },
+  ];
+  function renderOpponents() {
+    const el = document.getElementById('tab-opponents');
+    let html = '<div class="lb-grid" style="margin-bottom:18px">';
+    html += leaderboard('Top P/L (chips)', M.opponents.slice().sort((a, b) => b.p.plChipsEst - a.p.plChipsEst).slice(0, 10), 'plChipsEst', fmtSignedMoney);
+    html += leaderboard('Bottom P/L (chips)', M.opponents.slice().sort((a, b) => a.p.plChipsEst - b.p.plChipsEst).slice(0, 10), 'plChipsEst', fmtSignedMoney);
+    html += '</div>';
+
+    html += '<div class="card"><h3>All tracked opponents</h3>'
+      + '<div class="toolbar"><input type="search" id="opp-search" placeholder="Filter by name..." value="' + esc(oppFilter) + '"><span class="hint" id="opp-count" style="color:var(--muted);font-size:12px"></span></div>'
+      + '<div class="table-wrap"><table><thead><tr>' + OPP_COLS.map((c) => '<th data-key="' + c.key + '" class="' + (c.num ? 'num' : '') + '">' + c.label + '</th>').join('') + '</tr></thead><tbody id="opp-tbody"></tbody></table></div>'
+      + '<div class="pager"><button id="opp-prev"><- Prev</button><span id="opp-page-label"></span><button id="opp-next">Next -></button></div>'
+      + '</div>';
+    el.innerHTML = html;
+
+    document.getElementById('opp-search').addEventListener('input', (e) => { oppFilter = e.target.value; oppPage = 0; renderOppTable(); });
+    document.querySelectorAll('#tab-opponents th[data-key]').forEach((th) => {
+      th.addEventListener('click', () => {
+        const k = th.dataset.key;
+        if (oppSort.key === k) oppSort.dir = oppSort.dir === 'asc' ? 'desc' : 'asc';
+        else oppSort = { key: k, dir: 'desc' };
+        renderOppTable();
+      });
+    });
+    document.getElementById('opp-prev').addEventListener('click', () => { if (oppPage > 0) { oppPage--; renderOppTable(); } });
+    document.getElementById('opp-next').addEventListener('click', () => { oppPage++; renderOppTable(); });
+    renderOppTable();
+  }
+  function leaderboard(title, list, key, fmt) {
+    let html = '<div class="card"><h3>' + title + '</h3><div class="lb-list">';
+    list.forEach((o, i) => {
+      const v = o.p[key];
+      html += '<div class="lb-row"><span class="n">' + (i + 1) + '</span><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(o.p.name) + '</span>'
+        + '<span class="' + (v >= 0 ? 'pos' : 'neg') + '">' + fmt(v) + '</span></div>';
+    });
+    if (!list.length) html += '<div class="hint">No data.</div>';
+    html += '</div></div>';
+    return html;
+  }
+  function renderOppTable() {
+    let rows = M.opponents;
+    if (oppFilter.trim()) { const f = oppFilter.trim().toLowerCase(); rows = rows.filter((o) => o.p.name.toLowerCase().includes(f)); }
+    const key = oppSort.key, dir = oppSort.dir === 'asc' ? 1 : -1;
+    rows = rows.slice().sort((a, b) => {
+      const av = key === 'name' ? a.p.name : (OPP_COLS.find((c) => c.key === key).rate ? a.r[key] : a.p[key]);
+      const bv = key === 'name' ? b.p.name : (OPP_COLS.find((c) => c.key === key).rate ? b.r[key] : b.p[key]);
+      if (av == null && bv == null) return 0; if (av == null) return 1; if (bv == null) return -1;
+      if (typeof av === 'string') return dir * av.localeCompare(bv);
+      return dir * (av - bv);
+    });
+    const total = rows.length;
+    const maxPage = Math.max(0, Math.ceil(total / OPP_PAGE_SIZE) - 1);
+    if (oppPage > maxPage) oppPage = maxPage;
+    const page = rows.slice(oppPage * OPP_PAGE_SIZE, oppPage * OPP_PAGE_SIZE + OPP_PAGE_SIZE);
+
+    document.getElementById('opp-count').textContent = fmtInt(total) + ' opponent(s)';
+    document.querySelectorAll('#tab-opponents th[data-key]').forEach((th) => {
+      th.classList.toggle('sorted', th.dataset.key === key);
+      th.innerHTML = OPP_COLS.find((c) => c.key === th.dataset.key).label + (th.dataset.key === key ? '<span class="arrow">' + (dir === 1 ? '^' : 'v') + '</span>' : '');
+    });
+    const tbody = document.getElementById('opp-tbody');
+    tbody.innerHTML = page.map((o) => {
+      const p = o.p, r = o.r;
+      return '<tr><td>' + esc(p.name) + '</td><td class="num">' + fmtInt(p.hands) + '</td>'
+        + '<td class="num">' + fmtPct1(r.vpip) + '</td><td class="num">' + fmtPct1(r.pfr) + '</td>'
+        + '<td class="num">' + fmtPct1(r.threeBet) + '</td><td class="num">' + fmtPct1(r.wtsd) + '</td>'
+        + '<td class="num ' + (p.plChipsEst >= 0 ? 'pos' : 'neg') + '">' + fmtSignedMoney(p.plChipsEst) + '</td>'
+        + '<td class="num ' + (p.plBBEst >= 0 ? 'pos' : 'neg') + '">' + fmtBB(p.plBBEst) + '</td>'
+        + '<td class="num">' + fmtDate(p.lastSeen) + '</td></tr>';
+    }).join('');
+    document.getElementById('opp-page-label').textContent = 'Page ' + (oppPage + 1) + ' of ' + (maxPage + 1);
+    document.getElementById('opp-prev').disabled = oppPage === 0;
+    document.getElementById('opp-next').disabled = oppPage >= maxPage;
+  }
+
+  // ---------------------------------------------------------------------
+  // Tab: Showdowns
+  // ---------------------------------------------------------------------
+  function renderShowdowns() {
+    const el = document.getElementById('tab-showdowns');
+    const total = Object.values(M.sdGrid).reduce((a, e) => a + e.seen, 0);
+    let html = '<div class="card"><h3>Pool showdown grid</h3>'
+      + '<div class="hint">' + fmtInt(total) + ' showdowns aggregated across every tracked opponent - a floor on ranges, not the whole of them; a pot that ends in a fold shows nothing.</div>'
+      + '<div class="seg" style="margin-bottom:12px"><button data-m="seen" class="active">Seen</button><button data-m="wonpct">Won %</button><button data-m="raisedpct">Raised %</button></div>'
+      + '<div class="sd-layout"><div><div class="sd-grid" id="sd-grid"></div><div class="sd-legend" id="sd-legend"></div></div>'
+      + '<div class="sd-detail" id="sd-detail"><h4>Click a cell</h4><div class="hint">See who showed which hand, and how often it was raised or won.</div></div></div></div>';
+    el.innerHTML = html;
+
+    document.querySelectorAll('#tab-showdowns .seg button').forEach((b) => {
+      b.addEventListener('click', () => { showdownMetric = b.dataset.m; document.querySelectorAll('#tab-showdowns .seg button').forEach((x) => x.classList.toggle('active', x === b)); drawShowdownGrid(); });
+    });
+    drawShowdownGrid();
+    if (showdownSel) showShowdownDetail(showdownSel);
+  }
+  function cellValue(cls) {
+    const e = M.sdGrid[cls];
+    if (!e) return null;
+    if (showdownMetric === 'seen') return e.seen;
+    if (showdownMetric === 'wonpct') return e.seen ? (100 * e.won) / e.seen : null;
+    return e.seen ? (100 * e.raised) / e.seen : null;
+  }
+  function drawShowdownGrid() {
+    const grid = document.getElementById('sd-grid');
+    const vals = RANKS.flatMap((_, i) => RANKS.map((__, j) => {
+      const i2 = i, j2 = j; const cls = i2 === j2 ? RANKS[i2] + RANKS[i2] : i2 < j2 ? RANKS[i2] + RANKS[j2] + 's' : RANKS[j2] + RANKS[i2] + 'o';
+      return cellValue(cls);
+    })).filter((v) => v != null);
+    const max = Math.max(...vals, 1), min = Math.min(...vals, 0);
+    grid.innerHTML = '';
+    for (let i = 0; i < 13; i++) {
+      for (let j = 0; j < 13; j++) {
+        const cls = i === j ? RANKS[i] + RANKS[i] : i < j ? RANKS[i] + RANKS[j] + 's' : RANKS[j] + RANKS[i] + 'o';
+        const v = cellValue(cls);
+        const cell = document.createElement('div');
+        cell.className = 'sd-cell' + (i === j ? ' pair' : '') + (showdownSel === cls ? ' sel' : '');
+        cell.textContent = cls;
+        if (v != null) {
+          const frac = showdownMetric === 'seen' ? v / max : v / 100;
+          cell.style.background = seqColor(Math.max(0, Math.min(1, frac)));
+          if (frac > 0.55) cell.style.color = '#fff';
+        }
+        cell.addEventListener('mouseenter', (e) => { if (v != null) showTip(e, cls, showdownMetric === 'seen' ? v + ' seen' : v.toFixed(0) + '%'); });
+        cell.addEventListener('mousemove', positionTip);
+        cell.addEventListener('mouseleave', hideTip);
+        cell.addEventListener('click', () => { showdownSel = cls; drawShowdownGrid(); showShowdownDetail(cls); });
+        grid.appendChild(cell);
+      }
+    }
+    const legend = document.getElementById('sd-legend');
+    legend.innerHTML = '<span>low</span>' + [0.15, 0.4, 0.65, 0.9].map((f) => '<span class="sw" style="background:' + seqColor(f) + '"></span>').join('') + '<span>high</span>';
+  }
+  function seqColor(frac) {
+    const steps = ['var(--seq-1)', 'var(--seq-2)', 'var(--seq-3)', 'var(--seq-4)'];
+    if (frac <= 0.01) return 'var(--surface-2)';
+    const idx = Math.min(steps.length - 1, Math.floor(frac * steps.length));
+    return steps[idx];
+  }
+  function showShowdownDetail(cls) {
+    const box = document.getElementById('sd-detail');
+    const list = (M.sdPlayers[cls] || []).slice().sort((a, b) => b.seen - a.seen).slice(0, 15);
+    const e = M.sdGrid[cls] || { seen: 0, raised: 0, won: 0 };
+    let html = '<h4>' + cls + '</h4><div class="hint">' + e.seen + ' seen - ' + e.raised + ' raised preflop - ' + e.won + ' won</div>';
+    if (list.length) {
+      html += '<table style="margin-top:8px;width:100%"><thead><tr><th>Player</th><th class="num">Seen</th><th class="num">Won</th></tr></thead><tbody>'
+        + list.map((r) => '<tr><td>' + esc(r.name) + '</td><td class="num">' + r.seen + '</td><td class="num">' + r.won + '</td></tr>').join('') + '</tbody></table>';
+    }
+    box.innerHTML = html;
+  }
+
+  // ---------------------------------------------------------------------
+  // Tab: Recent hands
+  // ---------------------------------------------------------------------
+  function renderRecent() {
+    const el = document.getElementById('tab-recent');
+    const n = M.handsArr.length;
+    let html = '<div class="tile-row">';
+    html += tile('Hand records stored', fmtInt(n), '', 'capped by historyLimit - recency/notability biased, not a pool sample');
+    html += tile('Span', M.tsSpan ? daysBetween(M.tsSpan.min, M.tsSpan.max) : '-', '', M.tsSpan ? fmtDate(M.tsSpan.min) + ' -> ' + fmtDate(M.tsSpan.max) : '');
+    html += tile('Pinned (notable)', n ? fmtPct1((100 * M.pinnedN) / n) : '-', '', M.pinnedN + ' of ' + n);
+    html += tile('Hero involved', n && HERO_XID ? fmtPct1((100 * M.heroInvolved) / n) : '-', '', M.heroInvolved + ' of ' + n);
+    html += '</div>';
+    if (n) {
+      html += '<div class="card"><h3>Blind-level mix</h3><div class="hint">Of the stored hand records only - not the pool.</div><div id="recent-bb"></div></div>';
+    }
+    el.innerHTML = html;
+    const wrap = document.getElementById('recent-bb');
+    if (wrap) {
+      const rows = Object.keys(M.bbMix).map((bb) => ({ bb: Number(bb), n: M.bbMix[bb] })).sort((a, b) => b.n - a.n);
+      barListRows(wrap, rows.map((r) => ({ label: fmtMoney(r.bb) + ' BB', value: r.n, display: fmtInt(r.n) })));
+    }
+  }
+  function daysBetween(a, b) { const d = Math.round((b - a) / 86400000); return d <= 0 ? '<1 day' : d + ' day' + (d === 1 ? '' : 's'); }
+
+  // ---------------------------------------------------------------------
+  // Render orchestration + tabs + health toggle
+  // ---------------------------------------------------------------------
+  function renderAll() {
+    renderHealth(); renderYou(); renderPool(); renderOpponents(); renderShowdowns(); renderRecent();
+  }
+  document.getElementById('health-head').addEventListener('click', () => {
+    document.getElementById('health-head').classList.toggle('open');
+    document.getElementById('health-body').classList.toggle('open');
+  });
+  document.getElementById('tabs').addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-tab]'); if (!btn) return;
+    document.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('active', b === btn));
+    document.querySelectorAll('section.tab').forEach((s) => s.classList.toggle('active', s.id === 'tab-' + btn.dataset.tab));
+  });
+
+  // ---------------------------------------------------------------------
+  // Loader
+  // ---------------------------------------------------------------------
+  const statusEl = document.getElementById('load-status');
+  function loadJson(text, label) {
+    let parsed;
+    try { parsed = JSON.parse(text); } catch (e) { statusEl.textContent = 'Could not parse JSON: ' + e.message; statusEl.className = 'load-status err'; return; }
+    if (!parsed || typeof parsed !== 'object' || !parsed.players || typeof parsed.players !== 'object' || !parsed.hero) {
+      statusEl.textContent = 'That JSON doesn\'t look like a HUD export (missing players/hero).'; statusEl.className = 'load-status err'; return;
+    }
+    STORE = parsed;
+    STORE.sessionHistory = STORE.sessionHistory || [];
+    STORE.plLedger = STORE.plLedger || [];
+    STORE.hands = STORE.hands || [];
+    IS_SAMPLE = false;
+    document.getElementById('sample-banner').hidden = true;
+    const versionNote = STORE.version === 3 ? '' : ' (schema v' + STORE.version + ', older than v3 - some fields may be missing)';
+    statusEl.textContent = 'Loaded ' + label + ': ' + Object.keys(STORE.players).length + ' players, ' + (STORE.hero.hands || 0) + ' hero hands' + versionNote;
+    statusEl.className = 'load-status';
+    computeAll(); renderAll();
+  }
+  document.getElementById('file-input').addEventListener('change', (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    const reader = new FileReader();
+    reader.onload = () => loadJson(String(reader.result), f.name);
+    reader.onerror = () => { statusEl.textContent = 'Could not read that file.'; statusEl.className = 'load-status err'; };
+    reader.readAsText(f);
+  });
+  document.getElementById('paste-toggle').addEventListener('click', () => {
+    document.getElementById('paste-wrap').classList.toggle('open');
+  });
+  document.getElementById('paste-load').addEventListener('click', () => {
+    const text = document.getElementById('paste-area').value.trim();
+    if (!text) { statusEl.textContent = 'Paste some JSON first.'; statusEl.className = 'load-status err'; return; }
+    loadJson(text, 'pasted JSON');
+  });
+
+  // ---------------------------------------------------------------------
+  // Boot
+  // ---------------------------------------------------------------------
+  STORE = buildSampleStore();
+  computeAll();
+  renderAll();
+})();
+</script>
