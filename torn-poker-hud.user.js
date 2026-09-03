@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.54.0
+// @version      1.55.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,59 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.55.0 - A per-hand P/L ledger that outlives the hand history cap. Asked
+ *          directly: "I want the P/L ledger to persist past the hand history
+ *          limit. is it possible to do that?" — designed with the user before
+ *          building: grain (per-hand), cap size (20,000), reset scope (goes
+ *          with everything else), export format (CSV) were all decided first.
+ *            - STORE.hands keeps full detail (actions, board, players) for
+ *              History, capped at historyLimit because that detail costs
+ *              ~1.3KB/hand. A ledger row keeps almost nothing — timestamp,
+ *              chip delta, blind level, game id — for ~35-45 bytes/entry.
+ *              That buys roughly two orders of magnitude more retention at
+ *              the same storage cost, which is what "past the hand history
+ *              limit" actually needs.
+ *            - BOUNDED, deliberately. This file already paid once for "grows
+ *              with every hand forever" (STORE.players before v0.40-0.41's
+ *              pruning). PL_LEDGER_CAP (20,000) tops out under 1MB — a
+ *              quarter of STORAGE_QUOTA_EST — covering years of normal play.
+ *              FIFO eviction, same shape as PRUNE_PLAYER_CAP/DEPARTED_MAX:
+ *              the cap is what makes the ceiling unreachable.
+ *            - hero.netChips/netBB remain the PERMANENT, EXACT lifetime
+ *              total regardless of what has aged out of the ledger — this is
+ *              a bounded audit trail layered on that number, never a
+ *              replacement for it. pushLedgerEntry() is called from the exact
+ *              same site in applyHandResults that already updates
+ *              hero.netChips/netBB, reusing the same heroDelta/bb — never
+ *              recomputed, so the two can never disagree.
+ *            - Tightened to !heroUnresolved() rather than the bare `heroXid`
+ *              that block was already gated on: a name: pseudo-id nets to a
+ *              harmless 0 in hero.netChips (nothing in contributions/winners
+ *              is keyed by a pseudo-id), which is fine as a no-op but would
+ *              otherwise fill the ledger with meaningless zero rows.
+ *            - NO BACKFILL. Starts empty, accrues going forward only — same
+ *              "no migration needed, a missing key reads as absent"
+ *              precedent as limpRaiseMade/r3/r4/lr elsewhere here.
+ *            - resetProfitLoss/resetHeroStats now clear STORE.plLedger too —
+ *              its rows sum to hero.netChips by construction, and leaving it
+ *              behind after zeroing that total would leave a ledger whose sum
+ *              silently disagreed with the number it exists to break down.
+ *            - mergeStores keeps plLedger LOCAL-ONLY, same status as
+ *              sessionHistory: no cross-device dedup key exists for a ledger
+ *              row the way gameId serves STORE.hands, so unioning two
+ *              devices' ledgers is a known gap, not solved here.
+ *            - CSV export (Settings ▸ P/L ledger), through the same three-
+ *              route machinery (Copy/Save/Gist+Email) every other export
+ *              here now uses. The running-total column is reconstructed
+ *              starting from hero.netChips MINUS the sum of rows still
+ *              present, so the LAST row always lands exactly on the real
+ *              lifetime total — evicted history is folded into the starting
+ *              point rather than silently making the total start from 0.
+ *            - 36 assertions in test/pl-ledger.test.js, checked against the
+ *              old behaviour first: reverting the heroUnresolved() gate, the
+ *              reset clears, or the running-total anchor each fails a
+ *              specific assertion, not the whole file.
  *
  * 1.54.0 - The player Report tab and the pool-tendencies footer get the same
  *          three-route export v1.53.0 gave History and the hand log. Asked
@@ -99,57 +152,6 @@
  *              restoring the bare backdrop click handler reproduces the pill
  *              symptom exactly.
  *
- * 1.52.0 - Hand history: checked-down pots dropped, tag filters that AND, a ME
- *          filter, and the action word coloured by what it is. All three asked
- *          for directly.
- *            - NO-AGGRESSION POTS. "Remove histories with no action preflop and
- *              became a check down pot." handHadNoAggression(h) tests for a bet
- *              or raise by ANYONE — not by the player being read. A pot with no
- *              bet in it never put anybody to a decision, so no fold, call or
- *              check in it carries information about anyone at the table. That
- *              is why it is one predicate over the hand rather than something
- *              folded into handNotability, which asks a per-player question.
- *            - An EMPTY action list is unknown, not passive (a hand joined
- *              mid-way, or recorded before actions were persisted), and
- *              survives. Dropping it would silently delete history the HUD
- *              merely failed to capture.
- *            - Applied to Played and Notable, NOT to All. "All" has to mean
- *              all, or the count line lies and there is no way left to look at
- *              a hand the filter has an opinion about. It is the escape hatch,
- *              so it stays honest — its tooltip now says what it alone keeps.
- *            - TAG CHIPS, ANDed. A second chip row (3B/4B/XR/RR/BIG/SD/WON),
- *              multi-select, every selected tag required. AND rather than OR
- *              because the question is "show me the spot I am thinking of" —
- *              3-bet OR showdown is most of the list, which is what the mode
- *              chips already do. Nothing selected = unconstrained. The chip IS
- *              the marker it selects for, dimmed when off, so the thing you tap
- *              and the thing it matches are one vocabulary and no per-key chip
- *              colour has to be maintained beside the marker colours.
- *            - ME. Hands hero played too, reusing handNotability's own
- *              `voluntary` against heroXid rather than a second definition of
- *              "involved" — a blind you had no choice about is not tangling
- *              with this villain, and two answers to that question in one file
- *              is how they drift. The chip is HIDDEN entirely when hero is
- *              unresolved: a control that silently matches nothing is worse
- *              than no control, which is the whole point of heroProblem().
- *            - ACTION COLOURS. "Highlight any betting action in the font color
- *              too." Aggression warm and split by degree (raise louder than
- *              bet), continuing cool, declining grey. NOT red/green — the same
- *              rule the deviation indicators follow: a raise is not "bad" and a
- *              fold is not "good". An unrecognised verb renders plain rather
- *              than being forced into a bucket.
- *            - The NAME carries the focus highlight and the VERB carries the
- *              action colour, in separate spans so neither overrides the other.
- *              Inline !important like the rest of HH, because two class-based
- *              attempts were reported unreadable on the live page.
- *            - formatHand (clipboard/export) is unchanged: colour is
- *              presentation, and the tab, the clipboard and the file must not
- *              drift into three descriptions of one hand. Pinned by a test.
- *            - 120 assertions in test/hand-notability.test.js (was 74) and 38
- *              in test/hand-render.test.js, checked against the old behaviour
- *              first — swapping every() for some(), or `voluntary` for `acted`,
- *              fails eight of them.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -211,7 +213,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.54.0';
+  const HUD_VERSION = '1.55.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -594,6 +596,15 @@
       // capped at SESSION_HISTORY_MAX for the same reason recentTables/
       // betSizes are bounded — this is stored forever otherwise.
       sessionHistory: [],
+      // Per-hand P/L ledger — see PL_LEDGER_CAP. Deliberately NOT the same
+      // thing as STORE.hands: that keeps full action/board detail for a few
+      // hundred hands so the History tab can render them; this keeps almost
+      // nothing (a timestamp, a delta, a blind level, a game id) so it can
+      // outlive that window by roughly two orders of magnitude at the same
+      // storage cost. hero.netChips/netBB stay the permanent lifetime total
+      // regardless of what has aged out of here — this is a bounded AUDIT
+      // TRAIL layered on top of that number, not a replacement for it.
+      plLedger: [],
       settings: settings || { ...DEFAULT_SETTINGS },
     };
   }
@@ -745,6 +756,7 @@
       parsed.hero = ensureHeroShape(parsed.hero);
       parsed.session = ensureSessionShape(parsed.session);
       parsed.sessionHistory = Array.isArray(parsed.sessionHistory) ? parsed.sessionHistory : [];
+      parsed.plLedger = Array.isArray(parsed.plLedger) ? parsed.plLedger : [];
       normalizePlayers(parsed);
       migrateStore(parsed);
       return parsed;
@@ -1088,6 +1100,7 @@
     parsed.hero = ensureHeroShape(parsed.hero);
     parsed.session = ensureSessionShape(parsed.session);
     parsed.sessionHistory = Array.isArray(parsed.sessionHistory) ? parsed.sessionHistory : [];
+    parsed.plLedger = Array.isArray(parsed.plLedger) ? parsed.plLedger : [];
     normalizePlayers(parsed); // imported JSON is hand-editable and often stale
     migrateStore(parsed);     // a backup taken before 0.20.0 carries frozen P/L
     STORE = parsed;
@@ -1120,6 +1133,11 @@
     STORE.hero.netBB = 0;
     STORE.hero.bbHands = 0;
     STORE.session.net = 0;
+    // The ledger's rows sum to hero.netChips by construction (see
+    // pushLedgerEntry's call site) — leaving it behind after zeroing that
+    // total would leave a ledger whose sum silently disagreed with the very
+    // number it exists to break down.
+    STORE.plLedger = [];
     saveStore();
   }
 
@@ -1158,6 +1176,9 @@
     // for the same reason: a split-identity or misattributed period should not
     // linger in the Trends chart after the counters that caused it are fixed.
     STORE.sessionHistory = [];
+    // Same reasoning again: the ledger is 100% hero data too, and its rows sum
+    // to the hero.netChips this function just zeroed.
+    STORE.plLedger = [];
     saveStore();
   }
 
@@ -1176,6 +1197,15 @@
       // rather than risk a merged chart with duplicated or interleaved
       // sessions. A real cross-device merge is a known gap, not solved here.
       sessionHistory: local.sessionHistory,
+      // Same call as sessionHistory, for the same reason: a "session" (or a
+      // per-hand ledger row) is tied to a physical sitting at THIS device.
+      // Unioning two devices' ledgers would need a real cross-device dedup
+      // key — gameId alone isn't enough here the way it is for STORE.hands,
+      // because a ledger row carries no way to tell "the same hand, recorded
+      // twice" from "two different hands that happen to share no id" once
+      // gameId is null on an older record. A real cross-device merge is a
+      // known gap, not solved here — same status as sessionHistory's.
+      plLedger: local.plLedger,
       settings: local.settings,
     };
     for (const xid of Object.keys(remote.players || {})) {
@@ -4004,6 +4034,16 @@
           STORE.hero.netBB += heroDeltaBB;
           STORE.hero.bbHands += 1; // denominator for bb/100, only over hands we could price
         }
+
+        // The per-hand ledger, from the exact same heroDelta/bb this just used
+        // to update hero.netChips/netBB — never recomputed, so the two can
+        // never disagree. Tightened to !heroUnresolved() rather than the bare
+        // `heroXid` this block is already gated on: a `name:` pseudo-id always
+        // nets to a harmless 0 here (nothing in hand.contributions/wonByXid is
+        // keyed by a pseudo-id), which is fine as a no-op but would otherwise
+        // fill the ledger with meaningless zero rows for a hero who was never
+        // actually resolved to a seat.
+        if (!heroUnresolved()) pushLedgerEntry(heroDelta, bb, hand.gameId || null);
 
         // P/L attribution, stored from HERO's perspective: positive plChipsEst
         // means you are up against that player.
@@ -7620,6 +7660,88 @@
   // a sparkline over a phone-width panel can usefully show at once, so the
   // chart itself decides how much of this history it actually plots.
   const SESSION_HISTORY_MAX = 60;
+
+  // --- Per-hand P/L ledger (v1.55.0) ----------------------------------------
+  //
+  // "I want the P/L ledger to persist past the hand history limit."
+  //
+  // STORE.hands keeps full per-hand detail (actions, board, players) for
+  // History's sake, capped at historyLimit (~200-300 with pinned notable
+  // hands) because that detail is expensive — roughly 1.3KB/hand at that cap
+  // (CLAUDE.md "Storage, and what it costs"). A ledger row is none of that:
+  // a timestamp, a chip delta, a blind level, a game id — nothing needed to
+  // RENDER a hand, only to say what it did to the bankroll. That buys roughly
+  // two orders of magnitude more retention at the same storage cost, which is
+  // what "persist past the hand history limit" actually needs.
+  //
+  // Bounded, not unbounded — this file has already paid once for "grows with
+  // every hand forever" (STORE.players before v0.40-0.41's pruning). At
+  // ~35-45 bytes/entry, PL_LEDGER_CAP (20,000) tops out under 1MB, a quarter
+  // of STORAGE_QUOTA_EST, while covering years of normal play. FIFO eviction,
+  // same shape as PRUNE_PLAYER_CAP/DEPARTED_MAX: the cap is what makes the
+  // ceiling unreachable, not smarter age logic.
+  //
+  // hero.netChips/netBB remain the permanent, exact lifetime total regardless
+  // of what has aged out of the ledger — an evicted row doesn't un-happen, it
+  // just can't be individually audited past this window any more. The ledger
+  // is a bounded audit trail layered on a number that was already permanent.
+  //
+  // Starts empty and accrues going forward only. No backfill from hands
+  // already in STORE.hands or from hero.netChips' existing total — those
+  // predate the ledger, and reconstructing per-hand deltas from stored hand
+  // records risks disagreeing with the real total by whatever this file's
+  // parsing has ever gotten wrong. Same "no migration needed, a missing key
+  // reads as absent" precedent as limpRaiseMade/r3/r4/lr elsewhere here.
+  const PL_LEDGER_CAP = 20000;
+
+  // One-letter keys, same convention as boardTex's b/r/c/k/f — this rides on
+  // every hand hero is dealt into, forever (up to the cap), so key names cost.
+  //   t: timestamp (ms)
+  //   d: chip delta this hand (signed)
+  //   b: blind level this hand was priced at, 0 if unpriced (BB display mode,
+  //      or no blind line seen) — same plausibleBB gate hero.netBB itself uses
+  //   g: Torn's own game id, or null — lets a still-present hand in STORE.hands
+  //      be cross-referenced while it lasts; not required once that ages out
+  function pushLedgerEntry(delta, bb, gameId) {
+    if (!Array.isArray(STORE.plLedger)) STORE.plLedger = [];
+    STORE.plLedger.push({ t: Date.now(), d: delta, b: bb || 0, g: gameId || null });
+    if (STORE.plLedger.length > PL_LEDGER_CAP) {
+      STORE.plLedger.splice(0, STORE.plLedger.length - PL_LEDGER_CAP);
+    }
+  }
+
+  // CSV, not the plain-text style every other export here uses — this is data
+  // meant for a spreadsheet ("for my analysis"), not prose meant for reading.
+  // A running total column is computed here rather than stored per-row: it
+  // would cost as much as the delta itself to keep updated on every eviction,
+  // and summing 20,000 numbers once per export is cheap next to that.
+  //
+  // The running total STARTS from hero.netChips MINUS the sum of every row
+  // still present, so the LAST row's running total always lands exactly on
+  // the current hero.netChips — the anchor is the permanent, exact figure;
+  // the ledger fills in the shape of how it got there, not the other way
+  // round. Anything evicted off the front is folded into that starting point
+  // rather than silently making the running total start from 0 and disagree
+  // with the real lifetime figure.
+  function plLedgerExportCsv() {
+    const rows = Array.isArray(STORE.plLedger) ? STORE.plLedger : [];
+    const sumPresent = rows.reduce((a, r) => a + (r.d || 0), 0);
+    let running = STORE.hero.netChips - sumPresent;
+    const lines = ['date,chips_delta,bb_delta,running_total,blind_level,game_id'];
+    rows.forEach((r) => {
+      running += r.d || 0;
+      const bbDelta = r.b > 0 ? (r.d / r.b).toFixed(2) : '';
+      lines.push([
+        new Date(r.t).toISOString(),
+        r.d,
+        bbDelta,
+        running.toFixed(0),
+        r.b || '',
+        r.g || '',
+      ].join(','));
+    });
+    return lines.join('\n') + '\n';
+  }
 
   // Snapshot a just-ended session into STORE.sessionHistory before touchSession
   // resets it for the next one. A session with zero hands (the HUD loaded, the
@@ -11440,6 +11562,12 @@
       <div class="tph-exp-lead">Every hand in the store as plain text, for offline analysis —
         ${(STORE.hands || []).length} hand(s). Not the JSON backup below; this is the readable log.</div>
       ${exportActionsHtml('handlog', `(${(STORE.hands || []).length})`)}
+      <h4>P/L ledger</h4>
+      <div class="tph-exp-lead">One row per hand's chip result, as CSV — a running total column, not just
+        the day's history. Survives long after a hand ages out of the log above: ${(STORE.plLedger || []).length}
+        of up to ${PL_LEDGER_CAP} row(s) kept. Your lifetime total (${fmtSignedMoney(STORE.hero.netChips)}) stays
+        exact regardless of what has aged out of this file.</div>
+      ${exportActionsHtml('ledger', `(${(STORE.plLedger || []).length})`)}
       <h4>Backup</h4>
       <textarea class="tph-export" readonly></textarea>
       <button class="tph-copy-export">Copy</button>
@@ -11697,6 +11825,11 @@
       text: fullHistoryExport,
       fileName: `torn-poker-hud-handlog-${new Date().toISOString().slice(0, 10)}.txt`,
       subject: 'Torn Poker HUD — full hand log',
+    });
+    wireExportActions(panel, 'ledger', {
+      text: plLedgerExportCsv,
+      fileName: `torn-poker-hud-pl-ledger-${new Date().toISOString().slice(0, 10)}.csv`,
+      subject: 'Torn Poker HUD — P/L ledger',
     });
     panel.querySelector('.tph-copy-export').addEventListener('click', async (e) => {
       // Passes the visible .tph-export textarea itself as copyText's
@@ -12465,6 +12598,9 @@
       handNotability,
       handHadNoAggression,
       fullHistoryExport,
+      pushLedgerEntry,
+      plLedgerExportCsv,
+      PL_LEDGER_CAP,
       openMailto,
       get lastShareResult() { return lastShareResult; },
       exportActionsHtml,

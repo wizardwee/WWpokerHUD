@@ -9,6 +9,90 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.55.0
+
+A per-hand P/L ledger that outlives the hand history cap.
+
+Asked directly: *"I want the P/L ledger to persist past the hand history
+limit. is it possible to do that?"* — designed with the user before building.
+Grain (per-hand), cap size (20,000 rows), reset scope (goes with everything
+else), export format (CSV) were all decided first.
+
+### Why STORE.hands couldn't just be uncapped
+
+`STORE.hands` keeps full detail — actions, board, players — for the History
+tab, capped at `historyLimit` because that detail costs roughly 1.3KB/hand
+(see "Storage, and what it costs"). A ledger row keeps almost nothing: a
+timestamp, a chip delta, a blind level, a game id. At ~35–45 bytes/entry, that
+buys roughly two orders of magnitude more retention at the same storage cost —
+which is what "past the hand history limit" actually needs, without carrying
+the History tab's storage bill along with it.
+
+### Bounded, deliberately
+
+This file has already paid once for "grows with every hand forever" —
+`STORE.players` before v0.40.0–v0.41.0's pruning. `PL_LEDGER_CAP` (20,000)
+tops out under 1MB, a quarter of `STORAGE_QUOTA_EST`, covering years of normal
+play. FIFO eviction, the same shape as `PRUNE_PLAYER_CAP`/`DEPARTED_MAX`
+elsewhere in this file: the cap is what makes the ceiling unreachable, not
+smarter age logic.
+
+### The permanent number is still the permanent number
+
+`hero.netChips`/`netBB` remain the exact lifetime total regardless of what has
+aged out of the ledger. `pushLedgerEntry()` is called from the exact same site
+in `applyHandResults` that already updates those totals, reusing the same
+`heroDelta`/`bb` — never recomputed, so the ledger and the lifetime total can
+never disagree.
+
+Tightened to `!heroUnresolved()` rather than the bare `heroXid` that block was
+already gated on: a `name:` pseudo-id nets to a harmless 0 in `hero.netChips`
+(nothing in `contributions`/`winners` is ever keyed by a pseudo-id), which is
+fine as a no-op but would otherwise fill the ledger with meaningless zero rows
+for a hero who was never actually resolved to a seat.
+
+### No backfill
+
+Starts empty, accrues going forward only — the same "no migration needed, a
+missing key reads as absent" precedent `limpRaiseMade`/`r3`/`r4`/`lr` already
+follow elsewhere here. Reconstructing per-hand deltas retroactively from
+`STORE.hands` risked disagreeing with the real lifetime total by whatever this
+file's parsing has ever gotten wrong.
+
+### Resets clear it too
+
+`resetProfitLoss`/`resetHeroStats` now clear `STORE.plLedger` alongside
+`hero.netChips`. Its rows sum to that total by construction — leaving it
+behind after zeroing the total would leave a ledger whose sum silently
+disagreed with the very number it exists to break down.
+
+### mergeStores keeps it local-only
+
+Same status as `sessionHistory`: no cross-device dedup key exists for a
+ledger row the way `gameId` serves `STORE.hands` (a row carries no way to
+tell "the same hand, recorded twice" from "two different hands that happen to
+share no id" once `gameId` is null on an older record). A real cross-device
+merge is a known gap, not solved here.
+
+### CSV export
+
+Settings ▸ **P/L ledger**, through the same three-route machinery
+(Copy/Save/Gist+Email) every other export here now uses. The running-total
+column is reconstructed starting from `hero.netChips` **minus** the sum of
+rows still present, so the **last** row always lands exactly on the real
+lifetime total — history that has aged out of the ledger is folded into the
+starting point rather than silently making the running total start from 0 and
+disagree with the real figure.
+
+### Tests
+
+36 assertions in `test/pl-ledger.test.js`, checked against the old behaviour
+first: reverting the `heroUnresolved()` gate, the reset clears, or the
+running-total anchor each fails a specific assertion rather than the whole
+file — the anchor test in particular reproduces the exact scenario it exists
+to catch (rows evicted by the cap, but their chips still baked into the
+lifetime total).
+
 ## 1.54.0
 
 The player Report tab and the pool-tendencies footer get the same three-route

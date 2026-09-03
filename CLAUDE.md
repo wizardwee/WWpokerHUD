@@ -731,6 +731,57 @@ than being forced into a bucket.
 `formatHand` (clipboard, export) is untouched by any of this. Colour is
 presentation; the content of the three renderings must stay identical.
 
+## The P/L ledger is a bounded audit trail, not a replacement for the total (v1.55.0)
+
+`STORE.plLedger` exists because `STORE.hands` cannot be uncapped for this
+purpose — it carries full per-hand detail (actions, board, players) at
+~1.3KB/hand, priced for History's needs. A ledger row carries almost nothing —
+`{t, d, b, g}`, ~35-45 bytes — buying roughly two orders of magnitude more
+retention at the same storage cost. That trade is the whole design: this
+answers "how did I get here", `STORE.hands` answers "what actually happened."
+
+**`hero.netChips`/`netBB` are the permanent, exact total. The ledger never is.**
+`pushLedgerEntry()` is called from inside `applyHandResults`, at the exact site
+that already updates those totals, reusing the same `heroDelta`/`bb` — never
+recomputed. Don't add a second place that computes a per-hand delta; the two
+must derive from one calculation or they will eventually disagree.
+
+**Bounded at `PL_LEDGER_CAP` (20,000), FIFO eviction — same shape as
+`PRUNE_PLAYER_CAP`/`DEPARTED_MAX`.** This file has already paid once for
+unbounded per-hand growth (`STORE.players` before v0.40.0-v0.41.0's pruning).
+An evicted row doesn't un-happen — it just stops being individually
+auditable. `plLedgerExportCsv`'s running-total column accounts for this
+correctly: it starts from `hero.netChips` **minus** the sum of rows still
+present, so the **last** row always lands exactly on the real lifetime total,
+whatever has aged out of the front. Starting the running total from 0 instead
+would silently disagree with the real figure the moment anything has been
+evicted.
+
+**Tightened to `!heroUnresolved()`, not the bare `heroXid` the surrounding
+block already checks.** A `name:` pseudo-id nets to a harmless 0 in
+`hero.netChips` (nothing in `contributions`/`winners` is ever keyed by a
+pseudo-id) — fine as a no-op, but it would otherwise fill the ledger with
+meaningless zero rows for a hero never actually resolved to a seat.
+
+**No backfill, ever.** Starts empty and accrues forward only, same precedent
+as `limpRaiseMade`/`r3`/`r4`/`lr`: reconstructing historical per-hand deltas
+from `STORE.hands` risks disagreeing with the real lifetime total by whatever
+this file's parsing has ever gotten wrong.
+
+**`resetProfitLoss`/`resetHeroStats` clear it too, and this is not optional.**
+The ledger's rows sum to `hero.netChips` by construction — zeroing the total
+without also clearing the ledger leaves a ledger whose sum silently disagrees
+with the number it exists to break down. Any future reset that touches
+`hero.netChips` needs to touch `STORE.plLedger` in the same breath.
+
+**`mergeStores` keeps it local-only, same status as `sessionHistory`.** No
+cross-device dedup key exists for a ledger row the way `gameId` serves
+`STORE.hands` — a real cross-device merge is a known gap, not solved here.
+
+Exported as CSV (not the plain-text style every other export here uses) —
+this is data for a spreadsheet, not prose for reading, and "for my analysis"
+was the actual request.
+
 ## Getting data off the phone (v1.53.0)
 
 Three routes, and the reason there are three is that each fails differently and
