@@ -289,6 +289,7 @@
         <label class="file-btn" for="file-input">Load export...</label>
         <input id="file-input" type="file" accept=".json,application/json">
         <button class="ghost" id="paste-toggle" type="button">Paste JSON instead</button>
+        <button class="ghost" id="forget-btn" type="button" hidden>Forget saved</button>
       </div>
       <div class="paste-wrap" id="paste-wrap">
         <textarea class="paste" id="paste-area" placeholder="Paste the exported JSON here..."></textarea>
@@ -1399,6 +1400,50 @@
   });
 
   // ---------------------------------------------------------------------
+  // Persistence
+  //
+  // IndexedDB rather than localStorage: a real export runs to several MB,
+  // which is at or past the localStorage cap in most browsers, and a
+  // multi-MB synchronous write would block the page. IDB is async and has
+  // room to spare.
+  //
+  // Per browser profile, never leaving the device - this is a convenience so
+  // you are not re-pasting the same file every visit, not a sync mechanism.
+  // A different browser, a private window, or cleared site data all start
+  // empty, so every read and write is wrapped: a page that cannot save must
+  // still work, just without remembering.
+  // ---------------------------------------------------------------------
+  const IDB_NAME = 'tph-analyzer', IDB_STORE = 'exports', IDB_KEY = 'current';
+
+  function idbOpen() {
+    return new Promise((resolve, reject) => {
+      let req;
+      try { req = indexedDB.open(IDB_NAME, 1); } catch (e) { reject(e); return; }
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE);
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+      req.onblocked = () => reject(new Error('blocked'));
+    });
+  }
+  function idbRun(mode, fn) {
+    return idbOpen().then((db) => new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, mode);
+      const req = fn(tx.objectStore(IDB_STORE));
+      tx.oncomplete = () => { db.close(); resolve(req ? req.result : undefined); };
+      tx.onerror = () => { db.close(); reject(tx.error); };
+      tx.onabort = () => { db.close(); reject(tx.error || new Error('aborted')); };
+    }));
+  }
+  function savedGet() { return idbRun('readonly', (s) => s.get(IDB_KEY)).catch(() => null); }
+  function savedPut(rec) { return idbRun('readwrite', (s) => s.put(rec, IDB_KEY)); }
+  function savedClear() { return idbRun('readwrite', (s) => s.delete(IDB_KEY)).catch(() => null); }
+
+  function setForgetVisible(on) { document.getElementById('forget-btn').hidden = !on; }
+
+  // ---------------------------------------------------------------------
   // Loader
   // ---------------------------------------------------------------------
   const statusEl = document.getElementById('load-status');
@@ -1408,15 +1453,32 @@
     if (!parsed || typeof parsed !== 'object' || !parsed.players || typeof parsed.players !== 'object' || !parsed.hero) {
       statusEl.textContent = 'That JSON doesn\'t look like a HUD export (missing players/hero).'; statusEl.className = 'load-status err'; return;
     }
+    adoptStore(parsed);
+    const versionNote = STORE.version === 3 ? '' : ' (schema v' + STORE.version + ', older than v3 - some fields may be missing)';
+    const summary = Object.keys(STORE.players).length + ' players, ' + (STORE.hero.hands || 0) + ' hero hands' + versionNote;
+    statusEl.textContent = 'Loaded ' + label + ': ' + summary;
+    statusEl.className = 'load-status';
+    // Save for next visit. A failure here costs the convenience, never the
+    // data already on screen, so it only downgrades the status line.
+    savedPut({ savedAt: Date.now(), label, store: parsed }).then(() => {
+      setForgetVisible(true);
+      statusEl.textContent = 'Loaded ' + label + ': ' + summary + ' - saved to this browser.';
+    }).catch((e) => {
+      statusEl.textContent = 'Loaded ' + label + ': ' + summary
+        + ' - could not save it for next time (' + (e && e.name ? e.name : 'storage unavailable') + ').';
+    });
+  }
+
+  // Take a parsed store as the live one and redraw. Shared by the file/paste
+  // loader and the restore path so a restored export cannot diverge from a
+  // freshly loaded one.
+  function adoptStore(parsed) {
     STORE = parsed;
     STORE.sessionHistory = STORE.sessionHistory || [];
     STORE.plLedger = STORE.plLedger || [];
     STORE.hands = STORE.hands || [];
     IS_SAMPLE = false;
     document.getElementById('sample-banner').hidden = true;
-    const versionNote = STORE.version === 3 ? '' : ' (schema v' + STORE.version + ', older than v3 - some fields may be missing)';
-    statusEl.textContent = 'Loaded ' + label + ': ' + Object.keys(STORE.players).length + ' players, ' + (STORE.hero.hands || 0) + ' hero hands' + versionNote;
-    statusEl.className = 'load-status';
     computeAll(); renderAll();
   }
   document.getElementById('file-input').addEventListener('change', (e) => {
@@ -1435,11 +1497,38 @@
     loadJson(text, 'pasted JSON');
   });
 
+  document.getElementById('forget-btn').addEventListener('click', () => {
+    savedClear().then(() => {
+      setForgetVisible(false);
+      STORE = buildSampleStore();
+      IS_SAMPLE = true;
+      document.getElementById('sample-banner').hidden = false;
+      statusEl.textContent = 'Saved export removed from this browser - showing sample data again.';
+      statusEl.className = 'load-status';
+      computeAll(); renderAll();
+    });
+  });
+
   // ---------------------------------------------------------------------
   // Boot
+  //
+  // The sample renders first and synchronously, so the page is never an empty
+  // shell waiting on storage; a saved export then replaces it when IDB
+  // answers. Restore failure is silent by design - it is indistinguishable
+  // from a first visit, and the sample is a correct thing to be showing.
   // ---------------------------------------------------------------------
   STORE = buildSampleStore();
   computeAll();
   renderAll();
+
+  savedGet().then((rec) => {
+    if (!rec || !rec.store || !rec.store.players || !rec.store.hero) return;
+    adoptStore(rec.store);
+    setForgetVisible(true);
+    const when = rec.savedAt ? new Date(rec.savedAt).toISOString().slice(0, 10) : null;
+    statusEl.textContent = 'Restored your saved export' + (when ? ' from ' + when : '')
+      + ': ' + Object.keys(STORE.players).length + ' players, ' + (STORE.hero.hands || 0) + ' hero hands.';
+    statusEl.className = 'load-status';
+  }).catch(() => { /* no saved copy, or storage blocked - sample stands */ });
 })();
 </script>
