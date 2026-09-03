@@ -9,6 +9,37 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.54.0
+
+The player Report tab and the pool-tendencies footer get the same three-route
+export v1.53.0 gave History and the hand log.
+
+Asked directly: *"where does the analysis of pool averages or players profile
+exist? can we export that out too?"*
+
+Both were still on the pre-v1.53.0 path: an off-screen `copyText()` fallback
+(the same iOS selection failure History hit) and, on pool tendencies, the same
+overclaiming "Sent ✓" from `downloadTextFile`.
+
+Both now render `exportActionsHtml`/`wireExportActions` — Copy (against a
+visible textarea), Save/share, and Upload to Gist + Email link — identical to
+History and Settings. One shared helper, four call sites now, so a future fix
+lands in all of them at once rather than needing to be found and repeated.
+
+No new analysis. `buildReport`/`buildReportSections` (per-player tendency
+report) and `poolTendencyExport`/`observedPoolAverages` (pool-wide averages)
+already existed and already had *some* export path — this closes the gap
+between "has a button" and "the button works on this device."
+
+### Tests
+
+8 assertions on `exportActionsHtml`'s markup shape in
+`test/clipboard-export.test.js`. `wireExportActions`' click handlers run
+against a real DOM and are not simulated by the class-matching test stub —
+the same limitation the stub documents about itself — so this checks the
+shape a renamed class would silently break instead of the click behaviour
+directly.
+
 ## 1.53.0
 
 The departure pill opens again, and there is now a route for the hand log that

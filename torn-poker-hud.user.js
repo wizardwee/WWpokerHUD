@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.53.0
+// @version      1.54.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,31 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.54.0 - The player Report tab and the pool-tendencies footer get the same
+ *          three-route export v1.53.0 gave History and the hand log. Asked
+ *          directly: "where does the analysis of pool averages or players
+ *          profile exist? can we export that out too?"
+ *            - Both were still on the pre-v1.53.0 path: an off-screen
+ *              copyText() fallback (the same iOS selection failure History
+ *              hit) and, on pool tendencies, the same overclaiming
+ *              "Sent ✓" downloadTextFile result.
+ *            - Both now render exportActionsHtml/wireExportActions — Copy
+ *              (against a visible textarea), Save/share, and Upload to
+ *              Gist + Email link, identical to History and Settings. One
+ *              helper, four call sites now, so a future fix lands in all
+ *              of them at once.
+ *            - No new data or analysis — buildReport/buildReportSections
+ *              (per-player) and poolTendencyExport/observedPoolAverages
+ *              (pool-wide) already existed and already had SOME export
+ *              path; this closes the gap between "has a button" and
+ *              "the button works on this device."
+ *            - 8 new assertions on exportActionsHtml's markup shape in
+ *              test/clipboard-export.test.js. wireExportActions' click
+ *              handlers run against a real DOM and are not simulated by
+ *              the class-matching test stub — same limitation the stub
+ *              documents for itself — so this checks the shape a renamed
+ *              class would silently break instead.
  *
  * 1.53.0 - The departure pill opens again, and there is now a route for the
  *          hand log that actually leaves the phone. Both reported directly.
@@ -125,61 +150,6 @@
  *              first — swapping every() for some(), or `voluntary` for `acted`,
  *              fails eight of them.
  *
- * 1.51.0 - Coaching advice: a stale-target bug, a ranking that ignored how far
- *          a player actually deviates, no memory of what it had already said,
- *          and one line where there was room for two. Reported directly: the
- *          advice "seems pretty stale and [...] repeats advice too much across
- *          player base."
- *            - THE BUG FIRST, because it is a bug and not a tuning question.
- *              hand.lastAggressor is written on every raise and NEVER cleared
- *              when that player folds. It carried a +1000 bonus in
- *              currentExploitTip and fed betFacing in buildCoachAdvice — so a
- *              villain who bet the flop and folded to hero's raise kept being
- *              the player the coach talked about for the rest of the hand, and
- *              the pot-odds line went on quoting a bet nobody was making.
- *              streetLeader() (biggest street contributor still in the hand)
- *              and liveAggressor() (last raiser, only while still in) replace
- *              it. handContextTokens' `facing` test is the same call now, so
- *              the token and the number cannot disagree.
- *            - MEASURED, NOT GUESSED. Over 400 synthetic players spread around
- *              POOL_AVG by a full POOL_SPREAD — WIDER than the real pool — two
- *              tips led for 45% of the field and four for 63%. The cause: gain
- *              is a constant per RULE, so a villain two points past the
- *              fold-to-c-bet threshold and one at 80% scored identically, and
- *              whichever rule carried the higher constant won for everybody.
- *            - `edge` (0..1) on each rule, scored at ±20 around neutral. It is
- *              a TIEBREAKER: the gain ladder encodes a real judgement
- *              (postflop reads beat preflop against this pool) and a span wide
- *              enough to overturn it would replace that judgement with an
- *              arbitrary one. Effect, measured: cross-player concentration
- *              45% -> 41% (small, as expected), but it changes the LEAD read
- *              for 29% of players who have more than one — which is where it
- *              was always going to matter.
- *            - TIP FATIGUE is the actual fix for repetition. Nothing
- *              remembered what it had said, so one sentence rendered every
- *              1.5s for a session. Now counted per (player, tag) per SPOT
- *              (hand + street), never per render, decaying after 10 minutes.
- *              THE INVARIANT: TIP_FATIGUE_MAX (54) is capped below
- *              EXPLOIT_RELEVANT_BONUS (60), so rotation can never swap a read
- *              matching the spot hero is in for one that does not. Pinned from
- *              both sides in test/coach-fatigue.test.js.
- *            - PER PLAYER ONLY, asked and answered. Global per-tag fatigue
- *              would flatten the cross-player concentration directly, but by
- *              suppressing a correct read on a new villain because you saw the
- *              same read on somebody else — accuracy traded for variety. Out.
- *            - TWO reads in the panel, one loud and one dim, the second in its
- *              short form. The runner-up was already being computed and thrown
- *              away. The collapsed pill stays at one; it has no room.
- *            - A DIAGNOSTIC in the players list: distinct lead reads across
- *              your tracked pool, and the top three with their shares. Same
- *              reason observedPoolAverages() exists — POOL_AVG sat on borrowed
- *              figures until something reported what this HUD had really seen.
- *              Memoised behind a 30s TTL: it runs buildExploitPlan per player,
- *              and renderPlayersList re-renders on every keystroke.
- *            - 56 assertions in test/coach-fatigue.test.js, checked against the
- *              old behaviour first — reverting the aggressor guard or zeroing
- *              the fatigue step fails four of them.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -241,7 +211,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.53.0';
+  const HUD_VERSION = '1.54.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -10722,12 +10692,16 @@
       // Screen gets the sectioned markup; the clipboard keeps the plain text,
       // both from buildReportSections so they cannot describe the same player
       // two different ways. Same rule the History tab follows.
-      const text = buildReport(openPlayerXid);
-      body.innerHTML = buildReportHtml(openPlayerXid)
-        + '<button class="tph-copy-report">Copy report</button>';
-      body.querySelector('.tph-copy-report').addEventListener('click', async (e) => {
-        const ok = await copyText(text);
-        e.target.textContent = ok ? 'Copied ✓' : 'Copy failed — see Settings ▸ Backup to export by hand';
+      //
+      // Same three-route export as History and the hand log (v1.54.0) — this
+      // tab's Copy button was still on the pre-v1.53.0 off-screen textarea path
+      // and would fail on this device the same way History's did.
+      body.innerHTML = buildReportHtml(openPlayerXid) + exportActionsHtml('report', '');
+      const who = playerDisplayName(openPlayerXid);
+      wireExportActions(body, 'report', {
+        text: () => buildReport(openPlayerXid),
+        fileName: `torn-poker-hud-report-${fileSafeName(who)}-${new Date().toISOString().slice(0, 10)}.txt`,
+        subject: `Torn Poker HUD — tendency report for ${who}`,
       });
     } else if (openPlayerTab === 'history') {
       const hands = handsInvolving(openPlayerXid);
@@ -11273,8 +11247,8 @@
           return `<span${cls}>${fmtBytes(s.chars)} stored (${s.pct.toFixed(0)}%)</span>`;
         })()}
         ${poolComparisonLine()}${tipSpreadLine()}<br>
-        <button class="tph-copy-pool">Copy pool tendencies</button>
-        <button class="tph-export-pool">${isPDA() ? 'Save / share' : 'Download'} pool tendencies</button>
+        <div class="tph-exp-lead">Pool tendencies (observed averages across your tracked opponents):</div>
+        ${exportActionsHtml('pool', '')}
       </div>
     `,
       wire: (panel) => {
@@ -11317,29 +11291,14 @@
         // PDA share-sheet detour. "Sent ✓" on the button below now means
         // downloadTextFile's native call actually resolved, not merely that
         // it was fired (v1.19.0), but a share sheet completing is still async
-        // OS UI outside this webview's visibility, so it still can't promise
-        // the user actually finished the share — hence this plain,
-        // unambiguous alternative existing at all. Same two-button split
-        // History already uses (Copy vs Save/share).
-        panel.querySelector('.tph-copy-pool').addEventListener('click', async (e) => {
-          const text = poolTendencyExport();
-          const ok = await copyText(text);
-          e.target.textContent = ok ? 'Copied ✓' : 'Copy failed — try Save / share instead';
-        });
-        panel.querySelector('.tph-export-pool').addEventListener('click', async (e) => {
-          const stamp = new Date().toISOString().slice(0, 10);
-          const file = `torn-poker-hud-pool-tendencies-${stamp}.txt`;
-          const text = poolTendencyExport();
-          // Same fallback as every other export button here: `<a download>`
-          // does nothing in some webviews, and a button that appears to work
-          // and produces no file is worse than one that says it can't.
-          const ok = await downloadTextFile(text, file, 'text/plain');
-          if (ok) {
-            e.target.textContent = 'Sent ✓';
-          } else {
-            const copied = await copyText(text);
-            e.target.textContent = copied ? 'Copied instead ✓' : 'Failed — use Copy above';
-          }
+        // Same three-route export as History, Settings and the Report tab
+        // (v1.53.0/v1.54.0) — this footer was still on the old two-button path,
+        // with the same off-screen-textarea copy bug and the same overclaiming
+        // "Sent ✓".
+        wireExportActions(panel, 'pool', {
+          text: poolTendencyExport,
+          fileName: `torn-poker-hud-pool-tendencies-${new Date().toISOString().slice(0, 10)}.txt`,
+          subject: 'Torn Poker HUD — observed pool tendencies',
         });
       },
     });

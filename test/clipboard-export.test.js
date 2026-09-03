@@ -145,6 +145,33 @@ const t = runner('clipboard-export');
   }
 
 
+  // --- exportActionsHtml: markup shape ---------------------------------
+  //
+  // wireExportActions' click handlers run against a REAL DOM (querySelector
+  // parsing real innerHTML), which this repo's class-matching test stub
+  // deliberately does not attempt to simulate — see test/harness.js's own
+  // note on refusing to guess at anything more complex than mount/teardown.
+  // What IS checked here, pure-function style: the markup it hands to that
+  // real DOM carries the right classes and the right data-exp key, since a
+  // renamed class here would silently break wireExportActions' own
+  // querySelector calls with no error, on a device nobody here can run this
+  // against.
+
+  {
+    const T = load();
+    const html = T.exportActionsHtml('hist', '(12)');
+    t.ok('carries the export container and its key', html.indexOf('data-exp="hist"') !== -1);
+    t.ok('has a Copy button', html.indexOf('tph-exp-copy') !== -1);
+    t.ok('has a Save/share button', html.indexOf('tph-exp-save') !== -1);
+    t.ok('has a Gist upload button', html.indexOf('tph-exp-gist') !== -1);
+    t.ok('has a message slot', html.indexOf('tph-exp-msg') !== -1);
+    // The VISIBLE textarea — this is the whole fix for the reported copy
+    // failure. An off-screen fallback element is exactly the bug this exists
+    // to not reintroduce.
+    t.ok('has a visible textarea to select into', html.indexOf('tph-exp-ta') !== -1);
+    t.ok('the save label is folded into the button text', html.indexOf('(12)') !== -1);
+  }
+
   // --- fullHistoryExport: the raw log, for offline analysis ----------------
   //
   // The per-player export answers "how does this villain play"; this one is
