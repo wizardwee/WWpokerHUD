@@ -218,6 +218,11 @@
   td.pos { color: var(--gold); font-weight: 600; } td.neg { color: var(--clay); font-weight: 600; }
 
   .toolbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+  #gist-id {
+    font: inherit; font-family: "IBM Plex Mono", monospace; font-size: 12px; padding: 8px 10px;
+    border-radius: 7px; border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink);
+    width: 260px; max-width: 100%;
+  }
   input[type=search], select {
     font: inherit; font-size: 13px; padding: 7px 10px; border-radius: 7px; border: 1px solid var(--line-strong);
     background: var(--surface); color: var(--ink);
@@ -290,6 +295,10 @@
         <input id="file-input" type="file" accept=".json,application/json">
         <button class="ghost" id="paste-toggle" type="button">Paste JSON instead</button>
         <button class="ghost" id="forget-btn" type="button" hidden>Forget saved</button>
+      </div>
+      <div class="loader-row" id="sync-row">
+        <input type="text" id="gist-id" placeholder="Gist ID (auto-filled after one load)" spellcheck="false">
+        <button id="sync-now" type="button">Sync from Gist</button>
       </div>
       <div class="paste-wrap" id="paste-wrap">
         <textarea class="paste" id="paste-area" placeholder="Paste the exported JSON here..."></textarea>
@@ -1444,23 +1453,93 @@
   function setForgetVisible(on) { document.getElementById('forget-btn').hidden = !on; }
 
   // ---------------------------------------------------------------------
+  // Gist sync
+  //
+  // The export is ALREADY in the cloud - the HUD syncs it to a secret Gist,
+  // and that gist is the one source of truth. So this reads that gist rather
+  // than introducing a second store the phone never writes to, which would
+  // start diverging the moment you played a hand.
+  //
+  // The gist id is not a secret worth protecting here: a "secret" gist is
+  // unlisted, not access-controlled, so an unauthenticated read by id works
+  // and no token is needed. The id is read out of the loaded export's own
+  // settings.gistId, so one manual paste teaches this page where to sync from.
+  //
+  // WILL NOT WORK inside the claude.ai artifact viewer: its content-security
+  // policy allows scripts from a short CDN allowlist and blocks fetch to
+  // everything else, GitHub included. It works when this file is opened from
+  // disk or served from anywhere you control (GitHub Pages, say). The failure
+  // is reported as exactly that rather than as a generic network error.
+  // ---------------------------------------------------------------------
+  const GIST_API = 'https://api.github.com/gists/';
+  const GIST_FILE = 'torn-poker-hud-data.json';
+
+  function fetchGist(id) {
+    return fetch(GIST_API + encodeURIComponent(id), { headers: { Accept: 'application/vnd.github+json' } })
+      .then((res) => {
+        if (res.status === 404) throw new Error('No gist with that id (or it was deleted).');
+        if (res.status === 403) throw new Error('GitHub rate-limited this browser - try again in a few minutes.');
+        if (!res.ok) throw new Error('GitHub returned ' + res.status + '.');
+        return res.json();
+      })
+      .then((meta) => {
+        const files = meta.files || {};
+        const name = files[GIST_FILE] ? GIST_FILE
+          : Object.keys(files).find((k) => /\.json$/i.test(k)) || Object.keys(files)[0];
+        const f = name && files[name];
+        if (!f) throw new Error('That gist has no JSON file in it.');
+        // A multi-MB export always comes back truncated, so the inline
+        // content is the exception, not the rule - fetch the raw blob.
+        if (f.content && !f.truncated) return f.content;
+        if (!f.raw_url) throw new Error('That gist file is too large to read and has no raw URL.');
+        return fetch(f.raw_url).then((r) => {
+          if (!r.ok) throw new Error('Could not read the gist file (' + r.status + ').');
+          return r.text();
+        });
+      });
+  }
+
+  function syncFromGist(id, opts) {
+    const quiet = opts && opts.quiet;
+    if (!quiet) { statusEl.textContent = 'Fetching gist...'; statusEl.className = 'load-status'; }
+    return fetchGist(id).then((text) => {
+      loadJson(text, 'gist ' + id.slice(0, 8), { gistId: id });
+      return true;
+    }).catch((e) => {
+      const blocked = e instanceof TypeError; // fetch itself refused: CSP or offline
+      const msg = blocked
+        ? 'Gist sync is blocked here. The claude.ai viewer does not allow this page to call GitHub - '
+          + 'open the file locally or host it yourself and it works. Paste still works everywhere.'
+        : 'Gist sync failed: ' + e.message;
+      if (!quiet) { statusEl.textContent = msg; statusEl.className = 'load-status err'; }
+      return false;
+    });
+  }
+
+  // ---------------------------------------------------------------------
   // Loader
   // ---------------------------------------------------------------------
   const statusEl = document.getElementById('load-status');
-  function loadJson(text, label) {
+  const gistInput = document.getElementById('gist-id');
+
+  function loadJson(text, label, opts) {
     let parsed;
     try { parsed = JSON.parse(text); } catch (e) { statusEl.textContent = 'Could not parse JSON: ' + e.message; statusEl.className = 'load-status err'; return; }
     if (!parsed || typeof parsed !== 'object' || !parsed.players || typeof parsed.players !== 'object' || !parsed.hero) {
       statusEl.textContent = 'That JSON doesn\'t look like a HUD export (missing players/hero).'; statusEl.className = 'load-status err'; return;
     }
     adoptStore(parsed);
+    // The export names its own sync source, so one manual load is enough to
+    // teach this page where to fetch from next time.
+    const gistId = (opts && opts.gistId) || (parsed.settings && parsed.settings.gistId) || gistInput.value.trim() || null;
+    if (gistId) gistInput.value = gistId;
     const versionNote = STORE.version === 3 ? '' : ' (schema v' + STORE.version + ', older than v3 - some fields may be missing)';
     const summary = Object.keys(STORE.players).length + ' players, ' + (STORE.hero.hands || 0) + ' hero hands' + versionNote;
     statusEl.textContent = 'Loaded ' + label + ': ' + summary;
     statusEl.className = 'load-status';
     // Save for next visit. A failure here costs the convenience, never the
     // data already on screen, so it only downgrades the status line.
-    savedPut({ savedAt: Date.now(), label, store: parsed }).then(() => {
+    savedPut({ savedAt: Date.now(), label, gistId, store: parsed }).then(() => {
       setForgetVisible(true);
       statusEl.textContent = 'Loaded ' + label + ': ' + summary + ' - saved to this browser.';
     }).catch((e) => {
@@ -1508,6 +1587,16 @@
       computeAll(); renderAll();
     });
   });
+  document.getElementById('sync-now').addEventListener('click', () => {
+    const id = gistInput.value.trim();
+    if (!id) {
+      statusEl.textContent = 'Enter a gist id first - it is in the HUD under Settings, GitHub Gist sync.';
+      statusEl.className = 'load-status err';
+      return;
+    }
+    syncFromGist(id);
+  });
+  gistInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') document.getElementById('sync-now').click(); });
 
   // ---------------------------------------------------------------------
   // Boot
@@ -1525,10 +1614,22 @@
     if (!rec || !rec.store || !rec.store.players || !rec.store.hero) return;
     adoptStore(rec.store);
     setForgetVisible(true);
+    const savedId = rec.gistId || (rec.store.settings && rec.store.settings.gistId);
+    if (savedId) gistInput.value = savedId;
     const when = rec.savedAt ? new Date(rec.savedAt).toISOString().slice(0, 10) : null;
     statusEl.textContent = 'Restored your saved export' + (when ? ' from ' + when : '')
       + ': ' + Object.keys(STORE.players).length + ' players, ' + (STORE.hero.hands || 0) + ' hero hands.';
     statusEl.className = 'load-status';
+
+    // Then quietly try the gist, so opening the page is enough to be current.
+    // Quiet on failure: the restored copy is already on screen and correct,
+    // and a red banner about CSP every time you open it in the artifact
+    // viewer would be noise, not news.
+    if (savedId) {
+      syncFromGist(savedId, { quiet: true }).then((ok) => {
+        if (ok) statusEl.textContent += ' Refreshed from gist.';
+      });
+    }
   }).catch(() => { /* no saved copy, or storage blocked - sample stands */ });
 })();
 </script>
