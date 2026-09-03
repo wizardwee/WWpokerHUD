@@ -87,10 +87,16 @@ no GitHub account needed.
 
 `analysis/pool-analyzer.html` is a standalone page (no build step, same as the
 userscript) that reads a Gist export — Settings → GitHub Gist sync, or
-Settings → Backup → Copy — and shows pool distributions, your win rate by
-stake, opponent P/L, and a showdown-range grid, entirely from stored counters.
-Nothing leaves the browser. Open the file directly, or publish it wherever you
-publish HTML.
+Settings → Backup → Copy — and shows a ranked **target list** (who to play
+against and why), pool distributions, your win rate by stake, opponent P/L,
+and a showdown-range grid, entirely from stored counters. Nothing leaves the
+browser. Open the file directly, or publish it wherever you publish HTML.
+
+The target ranking is **measured from the export you load**, not from the
+script's own constants: each opponent's distance from that file's own pool
+mean, in that file's own pool SDs, damped by the sample behind each stat, then
+weighted by how often you actually play them and how recently. The formula is
+printed on the page.
 
 For questions that need the app's own scoring logic (archetype classification,
 the coach's tip-concentration across your real pool, a measured `POOL_SPREAD`)

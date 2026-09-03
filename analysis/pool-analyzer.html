@@ -246,6 +246,14 @@
   .seg button { background: var(--surface); color: var(--ink-soft); border-radius: 0; padding: 6px 10px; font-size: 12px; }
   .seg button.active { background: var(--felt); color: var(--surface); }
 
+  /* --- target list ------------------------------------------------------*/
+  td.tg-leaks { white-space: normal; min-width: 300px; max-width: 420px; text-align: left; }
+  .tg-leak { padding: 3px 0; font-size: 12px; color: var(--ink-soft); }
+  .tg-leak + .tg-leak { border-top: 1px dashed var(--line); }
+  .tg-leak b { color: var(--ink); }
+  .tg-delta { color: var(--muted); font-family: "IBM Plex Mono", monospace; font-size: 11px; }
+  .tg-lever { color: var(--felt); font-weight: 600; }
+
   .lb-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
   .lb-list { display: flex; flex-direction: column; }
   .lb-row { display: flex; justify-content: space-between; gap: 10px; padding: 6px 0; border-bottom: 1px dashed var(--line); font-size: 12.5px; }
@@ -304,14 +312,16 @@
   </div>
 
   <nav class="tabs" id="tabs">
-    <button data-tab="you" class="active">You</button>
+    <button data-tab="targets" class="active">Targets</button>
+    <button data-tab="you">You</button>
     <button data-tab="pool">Pool</button>
     <button data-tab="opponents">Opponents</button>
     <button data-tab="showdowns">Showdowns</button>
     <button data-tab="recent">Recent hands</button>
   </nav>
 
-  <section class="tab active" id="tab-you"></section>
+  <section class="tab active" id="tab-targets"></section>
+  <section class="tab" id="tab-you"></section>
   <section class="tab" id="tab-pool"></section>
   <section class="tab" id="tab-opponents"></section>
   <section class="tab" id="tab-showdowns"></section>
@@ -627,6 +637,92 @@
       sampleSizeQ, handsAllCount: handsAll.length, stakesMix, stakesTotal, opponents, plSum, plBBSum,
       byStake, sdGrid, sdPlayers, bbMix, pinnedN, heroInvolved, tsSpan, handsArr,
     };
+    M.targets = computeTargets();
+  }
+
+  // ---------------------------------------------------------------------
+  // Targeting
+  //
+  // "Who should I play against" is a RANKING question, and the ranking is
+  // built from this export's own measured pool — mean and SD per stat over
+  // the qualifying players — never from constants lifted out of the
+  // userscript. So the baseline moves with your data instead of drifting
+  // against a copied POOL_AVG, and the whole formula is printed on screen.
+  //
+  // A stat contributes weight x |z| x confidence, where z is the player's
+  // distance from the pool mean in pool SDs (this file's own POOL_SPREAD,
+  // measured rather than assumed), and confidence damps a thin denominator
+  // toward zero rather than letting a 3-of-4 sample dominate. Direction is
+  // carried for the lever text, not the magnitude: unusual in EITHER
+  // direction is exploitable, the exploit just differs.
+  // ---------------------------------------------------------------------
+  const TARGET_STATS = [
+    // key, weight, denominator field (sample this rate is computed from),
+    // lever text when the player sits ABOVE / BELOW the pool.
+    { key: 'foldToCbet', w: 1.0, den: 'foldToCbetOpp', hi: 'c-bet them relentlessly', lo: 'stop bluffing flops, value bet' },
+    { key: 'foldTo3Bet', w: 0.7, den: 'foldTo3BetOpp', hi: '3-bet them light', lo: 'only 3-bet for value' },
+    { key: 'vpip', w: 0.6, den: 'hands', hi: 'plays too many hands - value bet wide', lo: 'very tight - respect their chips' },
+    { key: 'limpShareOfVpip', w: 0.5, den: 'vpip', hi: 'isolate their limps', lo: 'raises rather than limps' },
+    { key: 'cbet', w: 0.5, den: 'cbetOpp', hi: 'their c-bet means little', lo: 'their check is not weakness - float, stab turns' },
+    { key: 'wtsd', w: 0.5, den: 'hands', hi: 'calls down light - value bet, do not bluff', lo: 'overfolds - barrel them' },
+    { key: 'pfr', w: 0.4, den: 'hands', hi: 'raises a lot preflop', lo: 'passive preflop - attack their limps and blinds' },
+    { key: 'threeBet', w: 0.3, den: 'hands', hi: '3-bets often - their 3-bet is wider than it looks', lo: 'their 3-bet is the nuts' },
+  ];
+  const TARGET_CONF_K = 15;   // opportunities at which a stat carries half weight
+  const TARGET_Z_CAP = 3;     // beyond 3 pool-SDs, more distance buys no more score
+  const TARGET_MIN_HANDS = 25;
+  const TARGET_VOLUME_K = 150; // hands at which volume weight reaches 0.5
+  const TARGET_RECENCY_HALFLIFE_D = 45;
+  const TARGET_RECENCY_FLOOR = 0.3;
+  const BB100_THIN_HANDS = 100; // below this, a bb/100 against one player is noise
+
+  // Priority = edge x volume x recency, and the three are kept separate on
+  // screen because they answer different questions. A 29-hand stranger with a
+  // huge leak has a real EDGE and almost no expected value: you may never sit
+  // with them again. Ranking on edge alone put exactly that player above a
+  // 1,600-hand regular, which is the wrong answer to "who should I exploit".
+  function computeTargets() {
+    const rows = [];
+    const now = Date.now();
+    M.opponents.forEach((o) => {
+      const p = o.p, r = o.r;
+      if ((p.hands || 0) < TARGET_MIN_HANDS) return;
+      const parts = [];
+      let score = 0;
+      TARGET_STATS.forEach((s) => {
+        const val = r[s.key];
+        const ref = M.poolStats[s.key];
+        if (val == null || !ref || ref.mean == null || !ref.sd) return;
+        const den = s.den === 'hands' ? (p.hands || 0) : (p[s.den] || 0);
+        if (!den) return;
+        const z = (val - ref.mean) / ref.sd;
+        const conf = den / (den + TARGET_CONF_K);
+        const mag = Math.min(Math.abs(z), TARGET_Z_CAP);
+        const contrib = s.w * mag * conf;
+        score += contrib;
+        parts.push({
+          key: s.key, label: RATE_LABELS[s.key], val, poolMean: ref.mean,
+          diff: val - ref.mean, z, den, conf, contrib,
+          lever: z > 0 ? s.hi : s.lo,
+        });
+      });
+      parts.sort((a, b) => b.contrib - a.contrib);
+      const bb100 = p.hands ? (100 * (p.plBBEst || 0)) / p.hands : null;
+      const volume = (p.hands || 0) / ((p.hands || 0) + TARGET_VOLUME_K);
+      const days = p.lastSeen ? (now - p.lastSeen) / 86400000 : null;
+      const recency = days == null ? TARGET_RECENCY_FLOOR
+        : Math.max(TARGET_RECENCY_FLOOR, Math.exp(-days / TARGET_RECENCY_HALFLIFE_D));
+      rows.push({ p, r, score, parts, bb100, volume, recency, days });
+    });
+    const maxScore = Math.max(...rows.map((x) => x.score), 0.0001);
+    rows.forEach((x) => {
+      x.edge = (100 * x.score) / maxScore;
+      x.priorityRaw = x.edge * x.volume * x.recency;
+    });
+    const maxPriority = Math.max(...rows.map((x) => x.priorityRaw), 0.0001);
+    rows.forEach((x) => { x.norm = (100 * x.priorityRaw) / maxPriority; });
+    rows.sort((a, b) => b.norm - a.norm);
+    return rows;
   }
 
   // ---------------------------------------------------------------------
@@ -794,6 +890,171 @@
     pills.innerHTML = pillList.map((p) => '<span class="pill ' + p.cls + '">' + esc(p.label) + '</span>').join('');
     body.innerHTML = '<div class="health-grid">' + rows.map((r) =>
       '<div class="health-row"><span>' + esc(r[0]) + '</span><span>' + r[1] + '</span></div>').join('') + '</div>';
+  }
+
+  // ---------------------------------------------------------------------
+  // Tab: Targets
+  // ---------------------------------------------------------------------
+  let targetLimit = 20;
+  function renderTargets() {
+    const el = document.getElementById('tab-targets');
+    const rows = M.targets;
+    if (!rows.length) {
+      el.innerHTML = '<div class="card"><h3>No targets yet</h3><div class="hint">Nobody in this export has '
+        + TARGET_MIN_HANDS + '+ hands tracked, so there is nothing to rank.</div></div>';
+      return;
+    }
+    const leaking = rows.filter((x) => x.bb100 != null && x.bb100 < 0);
+    let html = '<div class="tile-row">';
+    const byEdge = rows.slice().sort((a, b) => b.edge - a.edge)[0];
+    html += tile('Ranked opponents', fmtInt(rows.length), '', TARGET_MIN_HANDS + '+ hands each');
+    html += tile('Top priority', esc(rows[0].p.name), '',
+      'edge ' + rows[0].edge.toFixed(0) + ' over ' + fmtInt(rows[0].p.hands) + ' hands');
+    html += tile('Biggest raw leak', esc(byEdge.p.name), '',
+      'edge ' + byEdge.edge.toFixed(0) + ' over ' + fmtInt(byEdge.p.hands) + ' hands');
+    // Ranked on total bb lost, not bb/100: a rate off 40 hands is variance,
+    // and "costing me most" is a question about money, not about a rate.
+    const worst = leaking.filter((x) => (x.p.hands || 0) >= BB100_THIN_HANDS)
+      .sort((a, b) => (a.p.plBBEst || 0) - (b.p.plBBEst || 0))[0];
+    html += tile('Costing you most', worst ? esc(worst.p.name) : '-', 'down',
+      worst ? fmtBB(worst.p.plBBEst) + ' over ' + fmtInt(worst.p.hands) + ' hands ('
+        + worst.bb100.toFixed(1) + ' bb/100)' : 'no losses over ' + BB100_THIN_HANDS + '+ hands');
+    html += '</div>';
+
+    html += '<div class="card"><h3>Exploitability vs your result</h3>'
+      + '<div class="hint">Each dot is an opponent you have played at least ' + BB100_THIN_HANDS + ' hands against '
+      + '(fewer and the bb/100 is variance, not a result). Right = more exploitable than the pool. Below the line = '
+      + 'they are currently taking money off you. <b>Bottom-right is where your money is</b>: players whose leaks you '
+      + 'have not been punishing.</div><div id="tg-scatter"></div></div>';
+
+    html += '<div class="card"><h3>Target list</h3>'
+      + '<div class="hint"><b>Edge</b> is how far a player sits from the pool, summed as '
+      + '<code>weight x |z| x confidence</code> over the stats below - <code>z</code> in <b>this export\'s own</b> '
+      + 'pool SDs, confidence <code>n / (n + ' + TARGET_CONF_K + ')</code> on that stat\'s own sample. Nothing is '
+      + 'imported from the HUD\'s internal thresholds; the baseline is measured from the ' + fmtInt(M.qual25.length)
+      + ' qualifying opponents in this file. <b>Priority</b> is <code>edge x volume x recency</code> - a huge leak in '
+      + 'someone you have seen 29 times is worth less than a moderate one in a regular you play weekly.</div>'
+      + '<div class="toolbar"><div class="seg" id="tg-sort">'
+      + '<button data-sort="priority" class="active">Sort by priority</button>'
+      + '<button data-sort="edge">Sort by raw edge</button></div></div>'
+      + '<div id="tg-list"></div>'
+      + '<div class="pager"><button id="tg-more">Show more</button><span id="tg-count"></span></div>'
+      + '<div class="stat-caption" style="margin-top:14px">Weights: '
+      + TARGET_STATS.map((s) => RATE_LABELS[s.key] + ' ' + s.w.toFixed(1)).join(' - ')
+      + '<br>|z| capped at ' + TARGET_Z_CAP + ' pool-SDs - volume = hands/(hands+' + TARGET_VOLUME_K + ')'
+      + ' - recency = exp(-days/' + TARGET_RECENCY_HALFLIFE_D + '), floor ' + TARGET_RECENCY_FLOOR
+      + '. Both scores are normalised so the leader reads 100. A bb/100 marked <code>?</code> is under '
+      + BB100_THIN_HANDS + ' hands: variance, not a result.</div>'
+      + '</div>';
+    el.innerHTML = html;
+
+    const scatterWrap = document.getElementById('tg-scatter');
+    if (scatterWrap) scatterWrap.appendChild(targetScatter(rows));
+    document.getElementById('tg-more').addEventListener('click', () => { targetLimit += 20; drawTargetList(); });
+    document.querySelectorAll('#tg-sort button').forEach((b) => {
+      b.addEventListener('click', () => {
+        targetSort = b.dataset.sort;
+        document.querySelectorAll('#tg-sort button').forEach((x) => x.classList.toggle('active', x === b));
+        drawTargetList();
+      });
+    });
+    drawTargetList();
+  }
+
+  let targetSort = 'priority';
+  function drawTargetList() {
+    const all = M.targets.slice().sort((a, b) => targetSort === 'edge' ? b.edge - a.edge : b.norm - a.norm);
+    const rows = all.slice(0, targetLimit);
+    let html = '<div class="table-wrap"><table><thead><tr><th>#</th><th>Player</th>'
+      + '<th class="num">Priority</th><th class="num">Edge</th>'
+      + '<th class="num">Hands</th><th class="num">Your bb/100</th><th>Biggest leaks vs pool</th>'
+      + '<th class="num">Last seen</th></tr></thead><tbody>';
+    rows.forEach((x, i) => {
+      const leaks = x.parts.slice(0, 3).map((pt) =>
+        '<div class="tg-leak"><b>' + esc(pt.label) + '</b> ' + fmtPct1(pt.val)
+        + ' <span class="tg-delta">(' + (pt.diff >= 0 ? '+' : '') + pt.diff.toFixed(0) + 'pp vs pool '
+        + fmtPct1(pt.poolMean) + ', n=' + fmtInt(pt.den) + ')</span><br><span class="tg-lever">'
+        + esc(pt.lever) + '</span></div>').join('');
+      const thin = (x.p.hands || 0) < BB100_THIN_HANDS;
+      html += '<tr><td class="num">' + (i + 1) + '</td>'
+        + '<td>' + esc(x.p.name) + '</td>'
+        + '<td class="num"><b>' + x.norm.toFixed(0) + '</b></td>'
+        + '<td class="num">' + x.edge.toFixed(0) + '</td>'
+        + '<td class="num">' + fmtInt(x.p.hands) + '</td>'
+        + '<td class="num ' + (x.bb100 == null || thin ? '' : x.bb100 >= 0 ? 'pos' : 'neg') + '"'
+        + (thin ? ' title="under ' + BB100_THIN_HANDS + ' hands - this is variance, not a result"' : '') + '>'
+        + (x.bb100 == null ? '-' : (x.bb100 >= 0 ? '+' : '') + x.bb100.toFixed(1) + (thin ? '?' : '')) + '</td>'
+        + '<td class="tg-leaks">' + leaks + '</td>'
+        + '<td class="num">' + fmtDate(x.p.lastSeen) + '</td></tr>';
+    });
+    html += '</tbody></table></div>';
+    document.getElementById('tg-list').innerHTML = html;
+    document.getElementById('tg-count').textContent = 'Showing ' + rows.length + ' of ' + fmtInt(M.targets.length);
+    document.getElementById('tg-more').disabled = rows.length >= M.targets.length;
+  }
+
+  function targetScatter(rows) {
+    const w = 640, h = 380, padL = 48, padB = 42, padT = 16, padR = 16;
+    const root = svg('svg', { class: 'chart', viewBox: '0 0 ' + w + ' ' + h, width: '100%', height: h });
+    // Only players you have enough hands against for a bb/100 to mean
+    // anything. Without this the axis is set by a +751 bb/100 read off 40
+    // hands, and every real regular collapses onto the zero line.
+    const pts = rows.filter((x) => x.bb100 != null && (x.p.hands || 0) >= BB100_THIN_HANDS);
+    if (!pts.length) return root;
+    const xMax = 100;
+    const ys = pts.map((x) => x.bb100);
+    const yLo = Math.min(...ys, 0), yHi = Math.max(...ys, 0);
+    const yPad = (yHi - yLo) * 0.08 || 1;
+    const plotW = w - padL - padR, plotH = h - padT - padB;
+    const sx = (v) => padL + (v / xMax) * plotW;
+    const sy = (v) => padT + plotH - ((v - (yLo - yPad)) / ((yHi + yPad) - (yLo - yPad))) * plotH;
+
+    // zero line for P/L, median line for exploitability
+    const medScore = median(rows.map((x) => x.edge));
+    root.appendChild(svg('line', { class: 'gridline', x1: padL, y1: sy(0), x2: w - padR, y2: sy(0), 'stroke-width': 1.5 }));
+    root.appendChild(svg('line', { class: 'gridline', x1: sx(medScore), y1: padT, x2: sx(medScore), y2: padT + plotH }));
+    root.appendChild(svg('line', { class: 'axis', x1: padL, y1: padT + plotH, x2: w - padR, y2: padT + plotH }));
+    root.appendChild(svg('line', { class: 'axis', x1: padL, y1: padT, x2: padL, y2: padT + plotH }));
+
+    const quad = (x, y, text, anchor) => {
+      const t = svg('text', { x, y, 'text-anchor': anchor, 'font-size': 9.5, 'font-weight': 600 });
+      t.textContent = text; root.appendChild(t);
+    };
+    quad(w - padR - 4, padT + 12, 'exploitable + you already win', 'end');
+    quad(w - padR - 4, padT + plotH - 6, 'exploitable + LOSING to them', 'end');
+    quad(padL + 4, padT + plotH - 6, 'solid + losing - avoid', 'start');
+
+    const xt = svg('text', { x: padL + plotW / 2, y: h - 8, 'text-anchor': 'middle' });
+    xt.textContent = 'Exploitability score (0-100)'; root.appendChild(xt);
+    const yt = svg('text', { x: 6, y: padT + 8, 'text-anchor': 'start' });
+    yt.textContent = 'Your bb/100 vs them'; root.appendChild(yt);
+    [yLo, 0, yHi].forEach((v) => {
+      const t = svg('text', { x: padL - 5, y: sy(v) + 3, 'text-anchor': 'end' });
+      t.textContent = v.toFixed(0); root.appendChild(t);
+    });
+
+    // Dot area carries VOLUME (hands played against them), so a big dot far
+    // right and below the line is both exploitable and someone you actually
+    // face - the two facts that make a target worth acting on.
+    pts.slice().sort((a, b) => b.p.hands - a.p.hands).forEach((x) => {
+      const hot = x.edge >= medScore && x.bb100 < 0;
+      const r = 2.5 + 5.5 * Math.sqrt(x.volume);
+      const c = svg('circle', {
+        cx: sx(x.edge), cy: sy(x.bb100), r,
+        fill: hot ? 'var(--gold)' : 'var(--felt)', 'fill-opacity': hot ? 0.85 : 0.45,
+        stroke: 'var(--surface)', 'stroke-width': 1.5,
+      });
+      c.addEventListener('pointermove', (e) => showTip(e, x.p.name,
+        'edge ' + x.edge.toFixed(0) + ' - priority ' + x.norm.toFixed(0) + ' - '
+        + x.bb100.toFixed(1) + ' bb/100 over ' + fmtInt(x.p.hands) + ' hands'
+        + (x.parts[0] ? ' - top leak: ' + x.parts[0].label : '')));
+      c.addEventListener('pointerleave', hideTip);
+      root.appendChild(c);
+    });
+    const key = svg('text', { x: w - padR - 4, y: padT + plotH - 20, 'text-anchor': 'end', 'font-size': 9 });
+    key.textContent = 'dot size = hands played against them';
+    root.appendChild(key);
+    return root;
   }
 
   // ---------------------------------------------------------------------
@@ -1125,7 +1386,7 @@
   // Render orchestration + tabs + health toggle
   // ---------------------------------------------------------------------
   function renderAll() {
-    renderHealth(); renderYou(); renderPool(); renderOpponents(); renderShowdowns(); renderRecent();
+    renderHealth(); renderTargets(); renderYou(); renderPool(); renderOpponents(); renderShowdowns(); renderRecent();
   }
   document.getElementById('health-head').addEventListener('click', () => {
     document.getElementById('health-head').classList.toggle('open');
