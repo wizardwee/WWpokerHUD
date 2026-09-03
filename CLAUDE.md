@@ -731,6 +731,59 @@ than being forced into a bucket.
 `formatHand` (clipboard, export) is untouched by any of this. Colour is
 presentation; the content of the three renderings must stay identical.
 
+## Getting data off the phone (v1.53.0)
+
+Three routes, and the reason there are three is that each fails differently and
+all of it runs **inside a webview**, where a failed route leaves you with
+nothing. `exportActionsHtml` / `wireExportActions` are shared by the History tab
+and Settings so a fix lands in both.
+
+1. **Copy, against a VISIBLE textarea.** `copyText` takes an `existingEl` for
+   exactly this. Passing nothing selects an element at `left:-9999px`, and iOS
+   WKWebView **cannot select what it has not laid out** — that, not payload
+   size, is why "copy doesn't work" was reported. A failed `execCommand` then
+   leaves the text selected on screen for a manual long-press.
+2. **Share sheet** (`downloadTextFile` → `flutter_inappwebview.callHandler`).
+   The handler name and its contract are both **unverified**. Treating a `null`
+   return as "not registered" was tried and backed out: it is indistinguishable
+   from a registered handler returning nothing. So the boolean is unchanged and
+   only the wording is honest — "requested", never "sent" — with the observed
+   return value in the deep scan so one report can settle it.
+3. **Gist** (`GistSync.uploadSnippet`). An authenticated HTTPS POST through
+   `pdaFetchJson`, the one transport confirmed working on the device. This is
+   the reliable route.
+
+**`uploadSnippet` must never touch `STORE.settings.gistId`.** That id is the
+whole-store backup this HUD syncs; writing a hand log over it destroys the thing
+it exists to protect. Always a new secret gist.
+
+**Email can only ever carry the LINK.** `mailto:` has no attachment parameter —
+the scheme, not the webview — and a body limit of a couple of thousand
+characters. `openMailto` hands off through an **anchor click, never
+`location.href`**: setting location on an unhandled scheme can navigate the page,
+and the page is the table you are sitting at.
+
+`fullHistoryExport()` is the whole store as text (Settings ▸ Hand log);
+`playerHistoryExport(xid)` is one opponent. Both go through `formatHand`.
+
+## renderPanel's backdrop arms on pointerdown (v1.53.0)
+
+The backdrop closes its panel only on a click whose **pointerdown also landed on
+it**. Not a refinement — without it, any control that opens a panel from a
+pointer event closes it again immediately.
+
+v1.49.0 made the departure pill draggable, moving its open from `click` to
+`makeDraggable`'s `pointerup`. The panel then mounted *before* the browser
+dispatched that tap's compatibility click, so the backdrop — freshly created
+under the finger — received that click and closed the panel inside one frame.
+Reported as "the pill can be moved around but can't open", which is what it
+looks like from outside.
+
+The old click-only pill never hit it: the backdrop did not exist when that
+event's propagation path was computed. So this belongs in `renderPanel`, not in
+any one control. `test/panel.test.js` pins both directions — a stray click must
+not close, a real tap must.
+
 ## Exporting the history (v0.42.0)
 
 `playerHistoryExport(xid)` writes **every** recorded hand against a player, not

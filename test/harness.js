@@ -53,6 +53,11 @@ function classDom() {
       addEventListener(ev, fn) { (el.listeners[ev] = el.listeners[ev] || []).push(fn); },
       // Test helper: fire a listener the way a tap would.
       _fire(ev) { (el.listeners[ev] || []).forEach((fn) => fn({ target: el })); },
+      // Real DOM API, not a test helper: the script calls el.click() to hand a
+      // URL to the webview (openMailto) and to trigger a download. Without it
+      // those paths threw here and reported failure, which looked like a bug in
+      // them rather than a gap in the stub.
+      click() { el._fire('click'); },
       classes() { return String(el.className || '').split(/\s+/).filter(Boolean); },
       // Backed by className rather than kept alongside it, so classes() and
       // the .foo selector match above always agree with what classList did.

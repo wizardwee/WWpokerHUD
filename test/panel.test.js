@@ -84,6 +84,10 @@ t.eq('settings still mounted after player panel closes', mountedWith('tph-settin
   t.ok('the panel itself is not swept up by the backdrop marker',
     !mountedWith('tph-beta').some((el) => el.classes().includes('tph-panel-backdrop')));
 
+  // A REAL tap fires pointerdown then click. The backdrop arms on pointerdown
+  // and only closes on a click that follows one, so both have to be fired here
+  // — see the regression case below for why that matters.
+  backdrops[0]._fire('pointerdown');
   backdrops[0]._fire('click');
   t.eq('tapping the backdrop fires onClose', closed, true);
 
@@ -138,6 +142,47 @@ t.eq('settings still mounted after player panel closes', mountedWith('tph-settin
   const p2 = T.renderPanel({ marker: 'tph-epsilon', open: true, html: 'x' });
   t.eq('default scrollKey (the marker) also survives close/reopen', p2.scrollTop, 15);
   T.renderPanel({ marker: 'tph-epsilon', open: false, html: '' });
+}
+
+// --- a click the backdrop did not START must not close the panel ----------
+//
+// v1.49.0 made the departure pill draggable, which moved its open from a
+// `click` handler to makeDraggable's `pointerup`. The panel therefore mounted
+// BEFORE the browser dispatched that tap's compatibility click — so the
+// backdrop, freshly created under the finger, received the click and closed
+// the panel instantly. Reported as "the pill can be moved around but can't
+// open", and it looked like a broken pill rather than a panel that had opened
+// and shut inside one frame.
+//
+// The old click-only pill never hit it: the backdrop did not exist when that
+// event's propagation path was computed. So this is not a pill bug at all, and
+// fixing it in the pill would leave the next pointer-driven control to
+// rediscover it.
+
+{
+  let closed = false;
+  T.renderPanel({ marker: 'tph-gamma', open: true, html: 'x', onClose: () => { closed = true; } });
+  const backdrop = mountedWith('tph-backdrop-tph-gamma')[0];
+  t.ok('the backdrop is there to be clicked', !!backdrop);
+
+  // The stray click: no pointerdown on the backdrop, because the gesture
+  // started on a pill that no longer exists.
+  backdrop._fire('click');
+  t.eq('a click with no pointerdown on the backdrop does NOT close', closed, false);
+
+  // ...and a genuine outside tap still does, so the fix has not simply
+  // disabled the backdrop.
+  backdrop._fire('pointerdown');
+  backdrop._fire('click');
+  t.eq('a real tap on the backdrop still closes', closed, true);
+
+  // Arming is consumed, not sticky: a second stray click after a real tap must
+  // not close a panel the user has since reopened.
+  closed = false;
+  backdrop._fire('click');
+  t.eq('the arming does not persist past the tap that used it', closed, false);
+
+  T.renderPanel({ marker: 'tph-gamma', open: false, html: '' });
 }
 
 process.exit(t.report());

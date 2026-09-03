@@ -9,6 +9,103 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.53.0
+
+The departure pill opens again, and there is now a route for the hand log that
+actually leaves the phone.
+
+Both reported directly: *"the attack pill can be moved around but can't open"*
+and *"the copy to clipboard still doesn't work (maybe length issue?) and the
+send function doesn't work too. Can we just email it?"*
+
+### The pill bug was mine, from v1.49.0
+
+Making the pill draggable moved its open from a `click` handler to
+`makeDraggable`'s `pointerup`. The panel therefore mounted **before** the browser
+dispatched that tap's compatibility click — and `renderPanel`'s backdrop,
+freshly created under the finger, caught that click and closed the panel inside
+one frame. It looked like a pill that would not open; it was a panel that opened
+and shut faster than the screen could show.
+
+The old click-only pill never hit it, because the backdrop did not exist when
+that event's propagation path was computed.
+
+So the fix is in `renderPanel`, not the pill: the backdrop now closes only on a
+click whose **pointerdown also landed on it**. That covers the whole class — any
+control that opens a panel from a pointer event was otherwise swallowed the same
+way — and a real outside tap always starts on the backdrop. Fixing it in the pill
+would have left the next pointer-driven control to rediscover it.
+
+### Copy: the problem was the off-screen textarea, not the length
+
+`copyText` has accepted an `existingEl` since v1.19.0 precisely so the fallback
+can select a **visible** element, and the history buttons never passed one. So
+`execCommand('copy')` was being asked to select a textarea parked at
+`left: -9999px` — and iOS WKWebView cannot select what it has not laid out. The
+suspected size limit was not the cause.
+
+The export block now renders a real on-screen textarea and copies into that. When
+`execCommand` still fails, the text is left **selected and readable** for a manual
+long-press — which is the entire point of the parameter.
+
+### Share: the boolean is unchanged, on purpose
+
+The obvious fix — treat a `null` return from the `shareFile` bridge as "handler
+not registered" — was tried and **backed out**. It cannot be told apart from a
+registered handler that simply returns nothing, which is what a Dart void handler
+does, and `test/clipboard-export.test.js` already pins resolve-means-sent. That
+would have broken a path that may well work, on a guess about a bridge nobody
+here can call.
+
+What changed is the **claim**. The button no longer says "Sent ✓" as a fact, and
+the deep scan now reports what the bridge actually returned — which is the only
+thing that can settle it from a distance.
+
+### Gist: the route that works
+
+`GistSync.uploadSnippet()` puts one text file in a **new secret gist** and hands
+back the URL, over `pdaFetchJson` — the one transport this file has confirmed
+working on the device (v1.38.0–v1.39.0). v1.20.0 already named the gist as the
+way out for a large export; this extends it from the whole-store backup to any
+export.
+
+**It must never touch `settings.gistId`.** That holds the backup this HUD syncs
+the whole store into, and writing a hand log over it would destroy the thing it
+exists to protect. Different objects, different lifetimes, never a shared id —
+pinned by a test.
+
+### Email, honestly
+
+`mailto:` has **no attachment parameter** — that is the scheme, not a webview
+limitation — and a practical body limit of a couple of thousand characters
+against an export running to hundreds of kilobytes. So "can we just email it"
+resolves to "upload it and email the **link**", which is what the Email button
+does.
+
+Handed off through an **anchor click**, never `window.location.href`. Setting
+location on a scheme the webview does not handle can navigate the page — and the
+page is the poker table you are sitting at. An unhandled anchor click does
+nothing instead. CLAUDE.md's rule about never coming between the user and the
+table applies here as much as to any overlay.
+
+### New: a full hand log export
+
+Settings ▸ **Hand log** — every hand in the store as readable text, with your own
+actions marked. The per-player export answers "how does this villain play"; this
+is the raw log for offline analysis, which is what was actually asked for. Reuses
+`formatHand` like every other rendering of a hand, so the tab, the clipboard and
+the file cannot drift into three descriptions of one hand.
+
+### Tests
+
+40 assertions in `test/clipboard-export.test.js` and 34 in `test/panel.test.js`.
+Checked against the old behaviour first: restoring the bare backdrop click
+handler reproduces the pill symptom exactly.
+
+`classDom()` in `test/harness.js` gained `click()` — a real DOM API the script
+calls for `openMailto` and for downloads, which threw here and made those paths
+look broken when the gap was in the stub.
+
 ## 1.52.0
 
 Hand history: checked-down pots dropped, tag filters that AND, a ME filter, and

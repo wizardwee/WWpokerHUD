@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.52.0
+// @version      1.53.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,62 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.53.0 - The departure pill opens again, and there is now a route for the
+ *          hand log that actually leaves the phone. Both reported directly.
+ *            - THE PILL BUG IS MINE, from v1.49.0. Making it draggable moved
+ *              its open from a `click` handler to makeDraggable's `pointerup`,
+ *              so the panel mounted BEFORE the browser dispatched that tap's
+ *              compatibility click — and renderPanel's backdrop, freshly
+ *              created under the finger, caught that click and closed the panel
+ *              inside one frame. "Can be moved around but can't open."
+ *            - The old click-only pill never hit it, because the backdrop did
+ *              not exist when that event's propagation path was computed. So
+ *              this is a renderPanel bug, not a pill bug: the backdrop now
+ *              closes only on a click whose POINTERDOWN also landed on it,
+ *              which fixes the whole class — any control opening a panel from a
+ *              pointer event was otherwise swallowed the same way.
+ *            - EXPORT: three routes now, because each fails differently and
+ *              all of it runs inside a webview where a failed route leaves you
+ *              with nothing. Shared between the History tab and Settings, so a
+ *              fix lands in both.
+ *            - COPY now selects a VISIBLE textarea. copyText has accepted an
+ *              `existingEl` for this since v1.19.0 and the history buttons
+ *              never passed one, so the fallback selected an element at
+ *              left:-9999px — iOS cannot select what it has not laid out, so
+ *              execCommand had nothing to copy. The failure was the off-screen
+ *              element, NOT the length. A failed copy now leaves the text
+ *              selected and readable for a manual long-press.
+ *            - SHARE: the boolean is unchanged on purpose. Treating a null
+ *              return as "handler not registered" was tried and BACKED OUT —
+ *              it cannot be told apart from a registered handler returning
+ *              nothing, which is what a Dart void handler does, and
+ *              test/clipboard-export.test.js already pins resolve-means-sent.
+ *              What changed is the CLAIM: no more "Sent ✓" as a fact, and the
+ *              deep scan now reports what the bridge actually returned.
+ *            - GIST is the reliable route, and the one v1.20.0 already named as
+ *              the way out for a large export. GistSync.uploadSnippet() puts
+ *              one text file in a NEW secret gist and hands back the URL, over
+ *              pdaFetchJson — the one transport confirmed working on the phone.
+ *              It must NEVER touch settings.gistId: that holds the whole-store
+ *              backup, and writing a hand log over it would destroy the thing
+ *              it exists to protect. Pinned by a test.
+ *            - EMAIL, honestly: mailto has no attachment parameter (the scheme,
+ *              not the webview) and a body limit of a couple of thousand
+ *              characters against an export in the hundreds of kilobytes. So
+ *              "email it" is "upload it and email the LINK", which is what the
+ *              Email button does. Handed off via an anchor click, never
+ *              `location.href` — setting location on an unhandled scheme can
+ *              navigate the page, and the page is the table you are sitting at.
+ *            - NEW: a full hand log export (Settings ▸ Hand log) — every hand
+ *              in the store as readable text, hero's actions marked. The
+ *              per-player export answers "how does this villain play"; this is
+ *              the raw log for offline analysis, which is what was asked for.
+ *              Reuses formatHand like every other rendering of a hand.
+ *            - 40 assertions in test/clipboard-export.test.js and 34 in
+ *              test/panel.test.js, checked against the old behaviour first —
+ *              restoring the bare backdrop click handler reproduces the pill
+ *              symptom exactly.
  *
  * 1.52.0 - Hand history: checked-down pots dropped, tag filters that AND, a ME
  *          filter, and the action word coloured by what it is. All three asked
@@ -124,45 +180,6 @@
  *              old behaviour first — reverting the aggressor guard or zeroing
  *              the fatigue step fails four of them.
  *
- * 1.50.0 - Moving tables no longer reports the whole old table as departures.
- *          Reported directly: "it should NOT mistakenly count players in when
- *          I move tables. currently all the players on the old table are shown
- *          as '8 left'."
- *            - WHY THE EXISTING GUARDS COULD NOT CATCH IT. Guard 1 ignores an
- *              unreadable (empty) sweep; guard 2 needs two consecutive misses.
- *              A table change is neither: the sweep is perfectly readable, and
- *              the old roster stays missing on every sweep after it. Both
- *              guards pass and the entire old table fires.
- *            - THERE IS NO TABLE IDENTITY TO KEY OFF. Nobody working on this
- *              can inspect the live DOM, so a table-id selector cannot be
- *              confirmed and one that is merely assumed fails silently. What
- *              CAN be relied on is the shape of the event: at a live table
- *              people leave one at a time, and several vanishing inside one 3s
- *              sweep is a roster being replaced.
- *            - GUARD 3, a burst cap. More than DEPARTURE_BURST_MAX (2) missing
- *              between two readable sweeps is read as a table change: the
- *              batch is dropped AND the pending set cleared, because a swap
- *              often renders in two steps and stragglers armed by the first
- *              would otherwise fire two sweeps later — the same bug, late.
- *              The new roster still becomes the baseline, so the next real
- *              departure from the new table is caught normally.
- *            - Deliberately asymmetric, same principle as attackReadiness.
- *              Being wrong costs one missed alert on a table that genuinely
- *              broke up. NOT having it costs eight false targets every time
- *              you sit down somewhere else.
- *            - GUARD 4, a blind change. noteBlindLevel already detects a
- *              stakes switch (it is what nulls currentTableBB); it now also
- *              disarms the watch. Certain rather than inferred, but only fires
- *              on a CROSS-STAKE move — Torn runs more than one table at
- *              several blind levels — so it complements guard 3, not replaces.
- *            - ALREADY-WATCHED DEPARTURES SURVIVE BOTH. Somebody who left the
- *              old table a minute before you did is still out there and still
- *              attackable; your move does not make them less of a target. Only
- *              the in-flight suspicion is dropped.
- *            - 47 assertions in test/departure-watch.test.js (was 33). Checked
- *              against the OLD behaviour first: with the cap lifted, the
- *              roster-swap case reports exactly the 8 the report described.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -224,7 +241,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.52.0';
+  const HUD_VERSION = '1.53.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -281,15 +298,39 @@
   // already confirmed (see above) to silently do nothing in this webview, so
   // trying it would just repeat the exact same false-positive failure mode
   // this fix exists to close. The caller falls back to copyText instead.
+  // What the PDA share bridge last returned, for the deep-scan diagnostic. The
+  // handler name and its contract are both unverified (see downloadTextFile),
+  // and a feature that cannot say why it was quiet is undebuggable at this
+  // distance — the same reasoning targetDiagnostic() exists for.
+  let lastShareResult = null;
+
   async function downloadTextFile(text, fileName, mimeType) {
     if (isPDA() && window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
       try {
         // base64 via unescape(encodeURIComponent(...)): btoa throws on any
         // non-Latin1 character, and player names are free text.
         const b64 = btoa(unescape(encodeURIComponent(text)));
-        await window.flutter_inappwebview.callHandler('shareFile', fileName, b64, mimeType || 'application/json');
+        const res = await window.flutter_inappwebview.callHandler('shareFile', fileName, b64, mimeType || 'application/json');
+        // Resolving without throwing is still counted as success, and that is
+        // deliberate rather than lazy.
+        //
+        // "The send function doesn't work" was reported live, and the obvious
+        // fix — treat a null return as "handler not registered" — was tried and
+        // BACKED OUT, because it cannot tell that apart from a registered
+        // handler that simply returns nothing, which is what a Dart void
+        // handler does. test/clipboard-export.test.js already pins the
+        // resolve-means-sent case, so tightening this would have broken a path
+        // that may well work in favour of a guess about a bridge nobody here
+        // can call.
+        //
+        // What changed instead is the CLAIM: the return value is recorded for
+        // the diagnostic, and the button no longer says "Sent ✓" as a fact —
+        // see wireExportActions. The reliable route off the phone is the gist
+        // upload, which runs over the one transport this file has confirmed.
+        lastShareResult = { at: Date.now(), returned: typeof res, value: res === undefined ? 'undefined' : String(res) };
         return true;
       } catch (e) {
+        lastShareResult = { at: Date.now(), returned: 'threw', value: String(e && e.message) };
         console.warn('[TornPokerHUD] PDA shareFile failed, falling back', e);
         return false;
       }
@@ -1332,6 +1373,42 @@
         headers: this.authHeaders(),
         body: JSON.stringify({ files: { [GIST_FILENAME]: { content: exportJson() } } }),
       });
+    },
+
+    // Put one text file in a NEW secret gist and hand back its URL.
+    //
+    // This is the reliable way off the phone. Both existing routes were
+    // reported broken — the clipboard (a permission an embedding app often
+    // never wires up) and the share sheet (a bridge handler that may not be
+    // registered at all) — and both fail INSIDE the webview, where there is
+    // nothing to fall back on. A gist upload is an ordinary authenticated HTTPS
+    // POST through pdaFetchJson, which is the one transport this file has
+    // confirmed working on the device (v1.38.0-v1.39.0).
+    //
+    // A NEW gist every time, and never STORE.settings.gistId: that one holds
+    // the backup this HUD syncs, and writing a hand history over it would
+    // destroy the store it is meant to protect. They are different objects with
+    // different lifetimes and must not share an id.
+    //
+    // Secret (public: false), because a hand history names real players.
+    // Returns the html_url, or null — callers must handle null rather than
+    // showing a link that is not there.
+    async uploadSnippet(fileName, content, description) {
+      if (!STORE.settings.githubToken) return null;
+      try {
+        const { json } = await pdaFetchJson('POST', `${GITHUB_API}/gists`, {
+          headers: this.authHeaders(),
+          body: JSON.stringify({
+            description: description || 'Torn Poker HUD export',
+            public: false,
+            files: { [fileName]: { content } },
+          }),
+        });
+        return (json && json.html_url) || null;
+      } catch (e) {
+        console.warn('[TornPokerHUD] gist upload failed', e);
+        return null;
+      }
     },
   };
 
@@ -4614,6 +4691,175 @@
     ].join('\n');
     if (!hands.length) return header + '(no hands recorded)\n';
     return header + hands.map((h) => formatHand(h, xid)).join('\n\n') + '\n';
+  }
+
+  // --- Getting an export off the phone (v1.53.0) ---------------------------
+  //
+  // Reported: the clipboard button "still doesn't work (maybe length issue?)"
+  // and "the send function doesn't work too. Can we just email it?"
+  //
+  // Three routes, because each fails in a way the others do not, and all of
+  // this runs inside a webview where a failed route leaves you with nothing:
+  //
+  //   1. COPY, against a VISIBLE textarea. copyText already accepted an
+  //      `existingEl` for exactly this and the history buttons never passed
+  //      one, so the fallback selected an element positioned at left:-9999px.
+  //      iOS WKWebView cannot select what it has not laid out on screen, so
+  //      execCommand('copy') had nothing to copy — the failure is the
+  //      off-screen element, not the length. With a real on-screen box, a
+  //      failed execCommand still leaves the text selected and readable for a
+  //      manual long-press copy, which is the whole point of the parameter.
+  //   2. SHARE SHEET, which may not exist — see downloadTextFile.
+  //   3. GIST, an ordinary authenticated HTTPS POST through pdaFetchJson: the
+  //      one transport confirmed working on this device. It produces a URL,
+  //      and the URL is what the mail app can carry.
+  //
+  // One helper for both places that need it (the History tab and Settings), so
+  // a fix to any route lands in both rather than in whichever was edited.
+  // `key` namespaces the classes, since both can be mounted at once.
+  function exportActionsHtml(key, saveLabel) {
+    return `<div class="tph-exp" data-exp="${key}">`
+      + `<button class="tph-exp-copy">Copy</button>`
+      + `<button class="tph-exp-save">${isPDA() ? 'Save / share' : 'Download'} ${escapeHtml(saveLabel || '')}</button>`
+      + `<button class="tph-exp-gist">Upload to Gist</button>`
+      + `<div class="tph-exp-msg"></div>`
+      + `<textarea class="tph-exp-ta" readonly placeholder="The export appears here — Copy, or long-press to select it by hand."></textarea>`
+      + `</div>`;
+  }
+
+  // opts: { text: () => string, fileName: string, subject: string }
+  // `text` is a THUNK, not a string: building a full history export on every
+  // panel render would run formatHand over hundreds of hands for a button
+  // nobody has pressed yet.
+  function wireExportActions(root, key, opts) {
+    const box = root.querySelector(`.tph-exp[data-exp="${key}"]`);
+    if (!box) return;
+    const ta = box.querySelector('.tph-exp-ta');
+    const msg = box.querySelector('.tph-exp-msg');
+    const say = (html) => { msg.innerHTML = html; pinTextColor(msg); };
+
+    box.querySelector('.tph-exp-copy').addEventListener('click', async (e) => {
+      const text = opts.text();
+      // The visible textarea IS the fallback target — see the note above.
+      const ok = await copyText(text, ta);
+      e.target.textContent = ok ? 'Copied ✓' : 'Copy';
+      say(ok
+        ? `<span class="tph-exp-ok">Copied ${fmtBytes(text.length)}.</span>`
+        : '<span class="tph-exp-bad">The clipboard refused. The text is selected in the box below — '
+          + 'long-press it and choose Copy, or use Upload to Gist.</span>');
+    });
+
+    box.querySelector('.tph-exp-save').addEventListener('click', async (e) => {
+      const text = opts.text();
+      const ok = await downloadTextFile(text, opts.fileName, 'text/plain');
+      e.target.textContent = ok ? 'Sent ✓' : e.target.textContent;
+      // Says "could not confirm", not "failed": downloadTextFile cannot tell an
+      // unregistered bridge handler from one that succeeded and returned null.
+      // Claiming either is what made the old "Sent ✓" useless.
+      // "Requested", not "Sent". The bridge resolves the same way whether it
+      // opened a share sheet or was never registered at all, so claiming the
+      // file arrived is a claim this code cannot support — and the old "Sent ✓"
+      // is exactly what made the failure impossible to diagnose from here.
+      say(ok ? '<span class="tph-exp-ok">Share sheet requested.</span> '
+          + '<span class="tph-exp-bad">If nothing opened, this webview has no share bridge — '
+          + 'use Upload to Gist.</span>'
+        : '<span class="tph-exp-bad">The share bridge refused. Use Upload to Gist, or Copy.</span>');
+    });
+
+    box.querySelector('.tph-exp-gist').addEventListener('click', async (e) => {
+      if (!STORE.settings.githubToken) {
+        say('<span class="tph-exp-bad">Not connected — Settings ▸ Sync ▸ Connect first.</span>');
+        return;
+      }
+      e.target.textContent = 'Uploading…';
+      const url = await GistSync.uploadSnippet(opts.fileName, opts.text(), opts.subject);
+      e.target.textContent = 'Upload to Gist';
+      if (!url) {
+        say('<span class="tph-exp-bad">Upload failed. Check Settings ▸ Sync is still connected.</span>');
+        return;
+      }
+      // The link is rendered as selectable text as well as behind the buttons,
+      // because both of those depend on things already reported broken here.
+      say(`<span class="tph-exp-ok">Uploaded (secret gist):</span>`
+        + `<div class="tph-exp-url">${escapeHtml(url)}</div>`
+        + `<button class="tph-exp-copyurl">Copy link</button>`
+        + `<button class="tph-exp-mail">Email link</button>`);
+      const copyUrl = msg.querySelector('.tph-exp-copyurl');
+      if (copyUrl) {
+        copyUrl.addEventListener('click', async (ev) => {
+          const ok = await copyText(url);
+          ev.target.textContent = ok ? 'Copied ✓' : 'Copy the link above by hand';
+        });
+      }
+      const mail = msg.querySelector('.tph-exp-mail');
+      if (mail) {
+        mail.addEventListener('click', () => {
+          openMailto(opts.subject, `${opts.subject}\n\n${url}\n\n`
+            + 'Secret gist — anyone with the link can read it. Delete it from '
+            + 'gist.github.com when you are done.');
+          // Whether a mail app opened happens outside this page, so the message
+          // does not claim it did — and the link stays on screen above, which
+          // is the part that matters if it didn't.
+          mail.textContent = 'Mail app asked';
+        });
+      }
+    });
+  }
+
+  // Every hand in the store, not just the ones involving one player. The
+  // per-player export answers "how does this villain play"; this one is the
+  // raw log for offline analysis, which is what was actually asked for.
+  // Reuses formatHand like every other rendering of a hand, so the file, the
+  // clipboard and the tab cannot drift into three descriptions of one hand.
+  function fullHistoryExport() {
+    const hands = STORE.hands || [];
+    const limit = STORE.settings.historyLimit || 200;
+    const header = [
+      'Torn Poker HUD — full hand log',
+      `Exported ${new Date().toISOString()}`,
+      `${hands.length} hand(s), newest first.`,
+      `Only the most recent ${limit} are kept, plus notable ones held longer.`,
+      heroUnresolved() ? 'Hero not identified — no hand is marked as yours.'
+        : `* marks your own actions (${playerDisplayName(heroXid)}).`,
+      '',
+    ].join('\n');
+    if (!hands.length) return header + '(no hands recorded)\n';
+    return header + hands.map((h) => formatHand(h, heroUnresolved() ? null : heroXid)).join('\n\n') + '\n';
+  }
+
+  // Hand a short piece of text to the phone's mail app.
+  //
+  // ONLY EVER A LINK, never the export itself. mailto has no attachment
+  // parameter — that is not a webview limitation, the scheme has no such field
+  // — and the practical body limit is a couple of thousand characters against
+  // an export that runs to hundreds of kilobytes. So "email me the history"
+  // resolves to "upload it and email the link", which is what these two
+  // functions do between them.
+  // Handed off through an anchor click, NOT `window.location.href = ...`.
+  //
+  // Setting location on a scheme the webview does not handle can navigate the
+  // page — and the page is the poker table you are sitting at. CLAUDE.md's rule
+  // is absolute about not coming between the user and the table, and losing
+  // your seat to a mail link that failed to open would be the worst version of
+  // breaking it. An unhandled anchor click does nothing instead.
+  //
+  // Returns whether the click was DISPATCHED, which is all this can honestly
+  // know — whether a mail app actually opened happens outside the page. The
+  // caller's message says so, and leaves the link on screen either way.
+  function openMailto(subject, body) {
+    const url = 'mailto:?subject=' + encodeURIComponent(subject) + '&body=' + encodeURIComponent(body);
+    try {
+      const a = document.createElement('a');
+      a.href = url;
+      a.target = '_blank';
+      a.rel = 'noopener';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      return true;
+    } catch (e) {
+      return false;
+    }
   }
 
   // Safe for a filename on any platform the share sheet might hand this to:
@@ -8891,6 +9137,24 @@
     .tph-depart-x { margin-left: auto; color: #8d959c !important; cursor: pointer; padding: 0 4px; }
     /* History filter chips. Own colours throughout — pinTextColor skips tph-
        elements, so anything here declaring none renders dark-on-dark. */
+    /* The export block. Every tph- element holding text declares its own
+       colour — pinTextColor skips tph- elements, so an undeclared one renders
+       dark-on-dark (the v0.18.2 bug). */
+    .tph-exp { margin: 4px 0 10px; }
+    .tph-exp-lead { color: #a8b2bd !important; font-size: 11px; margin: 6px 0 4px; }
+    .tph-exp-msg { color: #cfd6dd !important; font-size: 11px; margin: 5px 0 0; }
+    .tph-exp-ok { color: #7ee0a6 !important; }
+    .tph-exp-bad { color: #f0c674 !important; }
+    /* Selectable, and wrapping: a gist URL is longer than the panel is wide,
+       and a link you cannot see all of is one you cannot copy by hand — which
+       is the fallback this whole block exists to preserve. */
+    .tph-exp-url { color: #8ec5f0 !important; font-size: 11px; word-break: break-all;
+      user-select: text; -webkit-user-select: text; margin: 3px 0; }
+    /* Short, because it is a fallback rather than something to read — but it
+       must be ON SCREEN and laid out, or execCommand('copy') has nothing to
+       select. That is the bug it fixes, not the height. */
+    .tph-exp-ta { width: 100%; height: 54px; background: #111 !important; color: #ddd !important;
+      border: 1px solid #444; font-size: 10px; }
     .tph-hf-bar { display: flex; gap: 5px; margin: 0 0 8px; flex-wrap: wrap; }
     .tph-hf { font-size: 11px; padding: 3px 9px; border-radius: 10px; cursor: pointer;
       border: 1px solid #3d3d48; background: rgba(255,255,255,.04);
@@ -9383,7 +9647,28 @@
     if (opts.onClose) {
       const backdrop = document.createElement('div');
       backdrop.className = 'tph-panel-backdrop tph-backdrop-' + opts.marker;
-      backdrop.addEventListener('click', opts.onClose);
+      // The backdrop closes on a tap that STARTED on it, not on any click that
+      // happens to land on it.
+      //
+      // v1.49.0 made the departure pill draggable, which moved its open from a
+      // `click` handler to makeDraggable's `pointerup`. That opened the panel
+      // BEFORE the browser dispatched the tap's compatibility click — so the
+      // backdrop, freshly mounted under the finger, received that click and
+      // closed the panel instantly. Reported as "the pill can be moved around
+      // but can't open". The old click handler never hit it, because the
+      // backdrop did not exist when that event's propagation path was computed.
+      //
+      // Arming on pointerdown fixes the whole class rather than this one pill:
+      // any control that opens a panel from a pointer event is otherwise
+      // swallowed the same way, and a real outside tap always starts on the
+      // backdrop.
+      let armed = false;
+      backdrop.addEventListener('pointerdown', () => { armed = true; });
+      backdrop.addEventListener('click', (e) => {
+        if (!armed) return;
+        armed = false;
+        opts.onClose(e);
+      });
       document.body.appendChild(backdrop);
     }
 
@@ -10509,8 +10794,8 @@
               + '<button class="tph-hh-replay">▶ Replay this hand</button></div>';
           }).join('')
           + (shown.length ? `<button class="tph-copy-hist">Copy shown (${shown.length})</button>` : '')
-          + `<button class="tph-export-hist">${isPDA() ? 'Save / share all' : 'Download all'}`
-          + ` (${hands.length})</button>`;
+          + `<div class="tph-exp-lead">All ${hands.length} hand(s) with this player:</div>`
+          + exportActionsHtml('hist', `(${hands.length})`);
         body.querySelectorAll('[data-hf]').forEach((chip) => {
           chip.addEventListener('click', () => {
             historyFilter = chip.dataset.hf;
@@ -10537,26 +10822,22 @@
         const copyBtn = body.querySelector('.tph-copy-hist');
         if (copyBtn) {
           copyBtn.addEventListener('click', async (e) => {
-            const ok = await copyText(text);
-            e.target.textContent = ok ? 'Copied ✓' : 'Copy failed — try Save / share instead';
+            // Selects into the visible export box rather than an off-screen
+            // element — the reason the old one failed on this device. See
+            // exportActionsHtml.
+            const ok = await copyText(text, body.querySelector('.tph-exp-ta'));
+            e.target.textContent = ok ? 'Copied ✓' : 'Copy failed — the box below is selected, copy it by hand';
           });
         }
-        body.querySelector('.tph-export-hist').addEventListener('click', async (e) => {
-          const stamp = new Date().toISOString().slice(0, 10);
-          const file = `torn-poker-hud-history-${fileSafeName(playerDisplayName(openPlayerXid))}-${stamp}.txt`;
-          const full = playerHistoryExport(openPlayerXid);
-          // Same fallback as the Backup button: `<a download>` does nothing in
-          // some webviews, and a button that appears to work and produces no
-          // file is worse than one that says it can't. copyText (not the raw
-          // Clipboard API) because that has also been reported failing on its
-          // own — see downloadTextFile/copyText.
-          const ok = await downloadTextFile(full, file, 'text/plain');
-          if (ok) {
-            e.target.textContent = 'Sent ✓';
-          } else {
-            const copied = await copyText(full);
-            e.target.textContent = copied ? 'Copied instead ✓' : 'Failed — use Copy shown above';
-          }
+        // The three routes, shared with Settings — see exportActionsHtml. The
+        // export is built lazily: formatHand over every hand with this player
+        // is not work to do for a button nobody has pressed.
+        const stamp = new Date().toISOString().slice(0, 10);
+        const who = playerDisplayName(openPlayerXid);
+        wireExportActions(body, 'hist', {
+          text: () => playerHistoryExport(openPlayerXid),
+          fileName: `torn-poker-hud-history-${fileSafeName(who)}-${stamp}.txt`,
+          subject: `Torn Poker HUD — hand history vs ${who}`,
         });
       }
     } else if (openPlayerTab === 'notes') {
@@ -11196,6 +11477,10 @@
       <div class="tph-sync-status">${escapeHtml(syncStatusText())}</div>
       ${gistUrl() ? '<button class="tph-copy-gist-link">Copy gist link</button>' : ''}
       ${storageSettingsHtml()}
+      <h4>Hand log</h4>
+      <div class="tph-exp-lead">Every hand in the store as plain text, for offline analysis —
+        ${(STORE.hands || []).length} hand(s). Not the JSON backup below; this is the readable log.</div>
+      ${exportActionsHtml('handlog', `(${(STORE.hands || []).length})`)}
       <h4>Backup</h4>
       <textarea class="tph-export" readonly></textarea>
       <button class="tph-copy-export">Copy</button>
@@ -11449,6 +11734,11 @@
         e.target.textContent = ok ? 'Copied ✓' : 'Copy failed — select the link in the status line above';
       });
     }
+    wireExportActions(panel, 'handlog', {
+      text: fullHistoryExport,
+      fileName: `torn-poker-hud-handlog-${new Date().toISOString().slice(0, 10)}.txt`,
+      subject: 'Torn Poker HUD — full hand log',
+    });
     panel.querySelector('.tph-copy-export').addEventListener('click', async (e) => {
       // Passes the visible .tph-export textarea itself as copyText's
       // existingEl — if even execCommand fails, the JSON is left selected on
@@ -11750,6 +12040,16 @@
     L.push('stacks read: ' + Object.keys(stacks).length + ' -> '
       + (Object.keys(stacks).map((x) => x + '=' + fmtMoney(stacks[x])).join(' ') || '(none)'));
     L.push('isPDA: ' + isPDA() + '  (flutter bridge: ' + (typeof window.flutter_inappwebview !== 'undefined') + ')');
+    // The share bridge is the one unverified handler left here. Its contract is
+    // unknown (see downloadTextFile), so the scan reports what it actually
+    // returned rather than whether we think it worked — that is the only thing
+    // that can settle it from a distance.
+    L.push('shareFile bridge: ' + (typeof window.flutter_inappwebview !== 'undefined'
+      && window.flutter_inappwebview && typeof window.flutter_inappwebview.callHandler === 'function'
+      ? 'callHandler present' : 'NO callHandler')
+      + (lastShareResult
+        ? `  last call: returned ${lastShareResult.returned} (${lastShareResult.value})`
+        : '  (not called this session — press Save / share once, then re-scan)'));
     L.push('table: ' + (tableLabel(lastSeenBB) || 'blind level not read yet')
       + (bbDisplayModeSuspected ? '  <-- BB DISPLAY MODE SUSPECTED, P/L is being withheld' : ''));
     const withShowdowns = Object.keys(STORE.players)
@@ -12205,6 +12505,11 @@
       repairAffiliationCache,
       handNotability,
       handHadNoAggression,
+      fullHistoryExport,
+      openMailto,
+      get lastShareResult() { return lastShareResult; },
+      exportActionsHtml,
+      wireExportActions,
       heroPlayedHand,
       HISTORY_TAG_ME,
       HISTORY_TAG_TITLES,
