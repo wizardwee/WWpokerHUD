@@ -9,6 +9,52 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.56.0
+
+Settings collapses to its headings. Reported directly: *"the page is too long
+with a lot of descriptions. i want each of this to be hideable and default to
+hide mode."*
+
+Every `<h4>` becomes a tappable heading and everything beneath it collapses,
+closed on every fresh open. The explanations are not removed or shortened —
+they sit one tap away, because they are needed once and then never again,
+which is what made the panel long rather than what made it useful. Anything
+above the first heading (your username, the minimum-hands field, the two
+navigation buttons) stays visible: that is the part you open Settings for.
+
+Built by walking the mounted panel in `wireSettingsPanel` rather than wrapping
+fifteen sections in the template. The markup stays as it reads, and a section
+added later is collapsible without anyone remembering to wrap it — the same
+reasoning that put every panel through `renderPanel` instead of three
+hand-written builders. Nodes are re-parented rather than replaced, so every
+handler below still finds its control by class, and `pinTextColor` (which runs
+after `wire()`) still walks the moved content.
+
+**The open set is module-level and deliberately not persisted, and that is the
+load-bearing detail.** Six paths in `wireSettingsPanel` re-render the whole
+panel — importing a backup, both resets, and toggling the two features that
+change what the panel shows. A section that slammed shut every time you ticked
+a checkbox inside it would be worse than no collapsing at all. It is cleared
+when the panel closes, including the two paths that leave it for the stats and
+players panels, so "default to hidden" holds on every fresh open rather than
+only the first.
+
+`.tph-set-h` declares its own colour, or Torn's bare rules render it
+dark-on-dark — the v0.18.2 trap, which this panel would hit hardest because it
+is nearly all text. The chevron is an `::after` pseudo-element so the heading
+*text* stays exactly what the open-set keys on; a glyph in the markup would
+make the key drift with the arrow.
+
+One testing note worth recording. The harness DOM has no tag selectors, no
+`nextSibling` and no `insertBefore`, so the collapser safely no-ops there and
+`node test/run.js` cannot exercise it — a suite that passes says nothing about
+this change. It was verified instead against a real browser DOM: correct
+grouping per section, collapsed by default, the username field above the first
+heading still visible, controls still resolving by class after re-parenting,
+toggling both ways, and a remembered section reopening across a re-render.
+Whether the headings are comfortable to tap on a phone is still the usual
+open question, and needs one report back.
+
 ## 1.55.0
 
 A per-hand P/L ledger that outlives the hand history cap.

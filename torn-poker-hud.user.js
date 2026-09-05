@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.55.0
+// @version      1.56.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,43 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.56.0 - Settings collapses to its headings. Reported directly: "the page
+ *          is too long with a lot of descriptions. i want each of this to be
+ *          hideable and default to hide mode."
+ *            - Every <h4> becomes a tappable heading and everything under it
+ *              collapses, closed on every fresh open. The explanations stay
+ *              exactly where they were, one tap away — they are needed once
+ *              and then never again, which is what made the panel long
+ *              rather than what made it useful.
+ *            - Done by walking the mounted panel in wireSettingsPanel rather
+ *              than wrapping fifteen sections in the template. The markup
+ *              stays as it reads, and a section added later is collapsible
+ *              without anyone remembering to wrap it — the same reason
+ *              renderPanel exists rather than three hand-written builders.
+ *              Nodes are re-parented, not replaced, so every handler below
+ *              still finds its control by class, and pinTextColor (which runs
+ *              after wire) still walks the moved content.
+ *            - The open set is module-level and NOT persisted, which is the
+ *              load-bearing detail: six paths in wireSettingsPanel re-render
+ *              the whole panel (importing a backup, the two resets, toggling
+ *              the features that change what the panel shows), and a section
+ *              that slammed shut every time you ticked a checkbox inside it
+ *              would be worse than no collapsing at all. Cleared when the
+ *              panel closes — including the two paths that leave it for the
+ *              stats and players panels — so "default to hidden" holds.
+ *            - .tph-set-h declares its own colour, or Torn's bare rules
+ *              render it dark-on-dark (the v0.18.2 trap). The chevron is a
+ *              ::after pseudo-element so the heading TEXT stays exactly what
+ *              the open-set keys on; a glyph in the markup would make the key
+ *              drift with the arrow.
+ *            - The harness DOM has no tag selectors, nextSibling or
+ *              insertBefore, so the collapser safely no-ops there and the
+ *              suite cannot exercise it. Verified instead against a real
+ *              browser DOM: correct grouping per section, collapsed by
+ *              default, the username field above the first heading still
+ *              visible, controls still resolving by class after re-parenting,
+ *              and a remembered section reopening across a re-render.
  *
  * 1.55.0 - A per-hand P/L ledger that outlives the hand history cap. Asked
  *          directly: "I want the P/L ledger to persist past the hand history
@@ -96,62 +133,6 @@
  *              documents for itself — so this checks the shape a renamed
  *              class would silently break instead.
  *
- * 1.53.0 - The departure pill opens again, and there is now a route for the
- *          hand log that actually leaves the phone. Both reported directly.
- *            - THE PILL BUG IS MINE, from v1.49.0. Making it draggable moved
- *              its open from a `click` handler to makeDraggable's `pointerup`,
- *              so the panel mounted BEFORE the browser dispatched that tap's
- *              compatibility click — and renderPanel's backdrop, freshly
- *              created under the finger, caught that click and closed the panel
- *              inside one frame. "Can be moved around but can't open."
- *            - The old click-only pill never hit it, because the backdrop did
- *              not exist when that event's propagation path was computed. So
- *              this is a renderPanel bug, not a pill bug: the backdrop now
- *              closes only on a click whose POINTERDOWN also landed on it,
- *              which fixes the whole class — any control opening a panel from a
- *              pointer event was otherwise swallowed the same way.
- *            - EXPORT: three routes now, because each fails differently and
- *              all of it runs inside a webview where a failed route leaves you
- *              with nothing. Shared between the History tab and Settings, so a
- *              fix lands in both.
- *            - COPY now selects a VISIBLE textarea. copyText has accepted an
- *              `existingEl` for this since v1.19.0 and the history buttons
- *              never passed one, so the fallback selected an element at
- *              left:-9999px — iOS cannot select what it has not laid out, so
- *              execCommand had nothing to copy. The failure was the off-screen
- *              element, NOT the length. A failed copy now leaves the text
- *              selected and readable for a manual long-press.
- *            - SHARE: the boolean is unchanged on purpose. Treating a null
- *              return as "handler not registered" was tried and BACKED OUT —
- *              it cannot be told apart from a registered handler returning
- *              nothing, which is what a Dart void handler does, and
- *              test/clipboard-export.test.js already pins resolve-means-sent.
- *              What changed is the CLAIM: no more "Sent ✓" as a fact, and the
- *              deep scan now reports what the bridge actually returned.
- *            - GIST is the reliable route, and the one v1.20.0 already named as
- *              the way out for a large export. GistSync.uploadSnippet() puts
- *              one text file in a NEW secret gist and hands back the URL, over
- *              pdaFetchJson — the one transport confirmed working on the phone.
- *              It must NEVER touch settings.gistId: that holds the whole-store
- *              backup, and writing a hand log over it would destroy the thing
- *              it exists to protect. Pinned by a test.
- *            - EMAIL, honestly: mailto has no attachment parameter (the scheme,
- *              not the webview) and a body limit of a couple of thousand
- *              characters against an export in the hundreds of kilobytes. So
- *              "email it" is "upload it and email the LINK", which is what the
- *              Email button does. Handed off via an anchor click, never
- *              `location.href` — setting location on an unhandled scheme can
- *              navigate the page, and the page is the table you are sitting at.
- *            - NEW: a full hand log export (Settings ▸ Hand log) — every hand
- *              in the store as readable text, hero's actions marked. The
- *              per-player export answers "how does this villain play"; this is
- *              the raw log for offline analysis, which is what was asked for.
- *              Reuses formatHand like every other rendering of a hand.
- *            - 40 assertions in test/clipboard-export.test.js and 34 in
- *              test/panel.test.js, checked against the old behaviour first —
- *              restoring the bare backdrop click handler reproduces the pill
- *              symptom exactly.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -213,7 +194,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.55.0';
+  const HUD_VERSION = '1.56.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -9520,6 +9501,19 @@
     .tph-replay-acts { background: #24242b !important; border-radius: 5px; padding: 6px 9px; }
     .tph-replay-act { color: #d5dbe1 !important; font-size: 12.5px; line-height: 1.6; }
     .tph-close { position: absolute; top: 8px; right: 10px; cursor: pointer; }
+    /* Collapsible settings headings. Declares its own colour like every other
+       tph- element that holds text, or Torn's bare rules render it dark on
+       dark (the v0.18.2 trap). The chevron is a pseudo-element so the heading
+       text stays exactly what collapseSettingsSections keys the open-set on —
+       putting a glyph in the markup would make the key drift with the arrow. */
+    .tph-set-h { color: #f2f4f6 !important; cursor: pointer; user-select: none;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 9px 2px; margin: 2px 0 0; border-top: 1px solid #33333c;
+      touch-action: manipulation; }
+    .tph-set-h::after { content: '▾'; color: #9aa4ae !important; font-size: 11px;
+      transition: transform .12s; }
+    .tph-set-h[data-open="1"]::after { transform: rotate(180deg); }
+    .tph-set-body { padding-bottom: 4px; }
     .tph-warn { background: #4a2c12 !important; color: #ffd9a0 !important; border: 1px solid #8a5a24;
       border-radius: 5px; padding: 7px 9px; margin: 6px 0 10px; font-size: 12px; line-height: 1.45; }
     .tph-ok { color: #7ed957 !important; font-size: 12px; margin: 2px 0 10px; }
@@ -11428,11 +11422,55 @@
 
   let settingsOpen = false;
 
+  // Settings is fifteen sections deep and most of its bulk is explanation you
+  // need once and then never again. Each <h4> becomes a tappable heading and
+  // everything under it collapses, closed by default.
+  //
+  // Done by walking the mounted panel rather than wrapping fifteen sections in
+  // the template: the markup stays as it reads, and a section added later is
+  // collapsible without anyone remembering to wrap it. That is the same reason
+  // renderPanel exists rather than three hand-written panel builders.
+  //
+  // The open set is module-level and deliberately NOT persisted. Six paths in
+  // wireSettingsPanel re-render the whole panel (importing a backup, resetting
+  // stats, toggling the two features that change what the panel shows), and a
+  // section that slammed shut every time you ticked a checkbox inside it would
+  // be worse than no collapsing at all. Cleared when the panel closes, so
+  // "default to hidden" holds on every fresh open.
+  const settingsSectionsOpen = new Set();
+
+  function collapseSettingsSections(panel) {
+    if (!panel || !panel.querySelectorAll) return;
+    const heads = panel.querySelectorAll('h4');
+    if (!heads || !heads.length) return; // inert harness DOM, or no sections
+    Array.prototype.forEach.call(heads, (h) => {
+      const key = (h.textContent || '').trim();
+      const body = document.createElement('div');
+      body.className = 'tph-set-body';
+      // Everything between this heading and the next one belongs to it.
+      let n = h.nextSibling;
+      while (n && !(n.nodeType === 1 && n.tagName === 'H4')) {
+        const next = n.nextSibling;
+        body.appendChild(n);
+        n = next;
+      }
+      if (h.parentNode) h.parentNode.insertBefore(body, h.nextSibling);
+      h.className = (h.className ? h.className + ' ' : '') + 'tph-set-h';
+      const setOpen = (open) => {
+        body.style.display = open ? '' : 'none';
+        h.setAttribute('data-open', open ? '1' : '0');
+        if (open) settingsSectionsOpen.add(key); else settingsSectionsOpen.delete(key);
+      };
+      setOpen(settingsSectionsOpen.has(key));
+      h.addEventListener('click', () => setOpen(body.style.display === 'none'));
+    });
+  }
+
   function renderSettingsPanel() {
     renderPanel({
       marker: 'tph-settings',
       open: settingsOpen,
-      onClose: () => { settingsOpen = false; renderSettingsPanel(); },
+      onClose: () => { settingsOpen = false; settingsSectionsOpen.clear(); renderSettingsPanel(); },
       wire: wireSettingsPanel,
       html: !settingsOpen ? '' : `
       <span class="tph-close">✕</span>
@@ -11632,6 +11670,10 @@
   }
 
   function wireSettingsPanel(panel) {
+    // First, so every handler below still finds its control by class — the
+    // nodes are re-parented, not replaced — and so pinTextColor (which runs
+    // after wire) still walks the moved content.
+    collapseSettingsSections(panel);
     // .value (not innerHTML) so exported JSON — which contains opponent display
     // names — can't break out of the textarea.
     panel.querySelector('.tph-export').value = exportJson();
@@ -11639,11 +11681,13 @@
     panel.querySelector('.tph-open-self').addEventListener('click', () => {
       if (heroUnresolved()) return;
       settingsOpen = false;
+      settingsSectionsOpen.clear();
       renderSettingsPanel();
       openPlayerPanel(heroXid);
     });
     panel.querySelector('.tph-open-players').addEventListener('click', () => {
       settingsOpen = false;
+      settingsSectionsOpen.clear();
       renderSettingsPanel();
       playersListOpen = true;
       renderPlayersList();
