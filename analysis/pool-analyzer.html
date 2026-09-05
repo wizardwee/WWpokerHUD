@@ -264,6 +264,75 @@
   .lb-row { display: flex; justify-content: space-between; gap: 10px; padding: 6px 0; border-bottom: 1px dashed var(--line); font-size: 12.5px; }
   .lb-row .n { color: var(--muted); width: 1.4em; }
 
+  /* --- lookup -----------------------------------------------------------*/
+  .lookup { position: relative; margin-bottom: 14px; }
+  #lookup {
+    width: 100%; font: inherit; font-size: 13.5px; padding: 10px 12px; border-radius: 9px;
+    border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink);
+  }
+  .lookup-hits {
+    position: absolute; z-index: 30; left: 0; right: 0; top: 100%; margin-top: 4px;
+    background: var(--surface); border: 1px solid var(--line-strong); border-radius: 9px;
+    box-shadow: var(--shadow); max-height: 320px; overflow-y: auto;
+  }
+  .lookup-hits[hidden] { display: none; }
+  .lookup-hit {
+    display: flex; justify-content: space-between; gap: 12px; padding: 9px 12px; cursor: pointer; font-size: 13px;
+    border-bottom: 1px solid var(--line);
+  }
+  .lookup-hit:last-child { border-bottom: none; }
+  .lookup-hit:hover, .lookup-hit.sel { background: var(--surface-2); }
+  .lookup-hit .meta { color: var(--muted); font-family: "IBM Plex Mono", monospace; font-size: 11.5px; }
+
+  /* --- dossier ----------------------------------------------------------*/
+  .dossier {
+    position: fixed; inset: 0; z-index: 40; background: rgba(20,24,21,0.55);
+    display: flex; align-items: flex-start; justify-content: center; padding: 24px 16px;
+    overflow-y: auto; -webkit-overflow-scrolling: touch;
+  }
+  .dossier[hidden] { display: none; }
+  .dossier-inner {
+    background: var(--paper); border: 1px solid var(--line-strong); border-radius: 14px;
+    box-shadow: 0 20px 60px -12px rgba(0,0,0,0.4); width: 100%; max-width: 860px; margin: auto 0;
+  }
+  .dossier-body { padding: 18px; }
+  .dsr-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 16px; }
+  .dsr-name { font-family: "IBM Plex Serif", Georgia, serif; font-size: 22px; font-weight: 600; }
+  .dsr-you {
+    font-family: "IBM Plex Sans", sans-serif; font-size: 11px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.06em; background: var(--gold-soft); color: var(--gold); padding: 2px 7px; border-radius: 999px;
+    vertical-align: middle;
+  }
+  .dsr-sub { color: var(--muted); font-size: 12.5px; margin-top: 3px; }
+  .dsr-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 10px; margin-bottom: 16px; }
+  .dsr-tile { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  .dsr-tile .label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; }
+  .dsr-tile .value { font-family: "IBM Plex Mono", monospace; font-size: 19px; font-weight: 600; margin-top: 2px; }
+  .dsr-tile .foot { font-size: 10.5px; color: var(--muted); margin-top: 2px; }
+  .dsr-card {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin-bottom: 14px;
+  }
+  .dsr-card h3 { font-size: 14.5px; margin-bottom: 4px; }
+  .dsr-card .hint { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
+  .dsr-plan { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 10px; font-size: 13px; }
+  .dsr-plan li::marker { color: var(--felt); font-weight: 700; }
+  .dsr-detail { color: var(--ink-soft); font-size: 12.5px; }
+  .dsr-sizes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 10px; }
+  .dsr-size { background: var(--surface-2); border-radius: 9px; padding: 10px; text-align: center; }
+  .dsr-size .label { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); font-weight: 600; }
+  .dsr-size .value { font-family: "IBM Plex Mono", monospace; font-size: 20px; font-weight: 600; }
+  .dsr-size .foot { font-size: 10.5px; color: var(--muted); }
+  .dsr-flag { font-size: 12.5px; color: var(--ink-soft); padding: 8px 10px; background: var(--surface-2); border-radius: 8px; }
+  .dsr-flag.hot { background: var(--gold-soft); color: var(--gold); font-weight: 600; }
+  .dsr-row { display: flex; justify-content: space-between; gap: 12px; font-size: 12.5px; padding-top: 10px; margin-top: 10px; border-top: 1px solid var(--line); }
+  .dsr-vs { color: var(--muted); font-weight: 400; }
+  .dsr-dim { opacity: 0.55; }
+  .dsr-grid { max-width: 460px; }
+  .dsr-seg { margin-bottom: 10px; }
+  .clickable { cursor: pointer; }
+  .clickable:hover { text-decoration: underline; text-decoration-color: var(--felt); }
+  @media (max-width: 620px) { .dossier { padding: 0; } .dossier-inner { border-radius: 0; min-height: 100%; } }
+
   .tooltip {
     position: fixed; pointer-events: none; background: var(--ink); color: var(--paper); font-size: 11.5px;
     padding: 6px 9px; border-radius: 6px; box-shadow: var(--shadow); z-index: 50; max-width: 240px;
@@ -321,6 +390,11 @@
     <div class="health-body" id="health-body"></div>
   </div>
 
+  <div class="lookup">
+    <input type="search" id="lookup" placeholder="Look up any tracked player by name..." autocomplete="off" spellcheck="false">
+    <div class="lookup-hits" id="lookup-hits" hidden></div>
+  </div>
+
   <nav class="tabs" id="tabs">
     <button data-tab="targets" class="active">Targets</button>
     <button data-tab="you">You</button>
@@ -343,6 +417,12 @@
     functions), see <code>analysis/pool-report.js</code> in the repo, run over the same export via
     <code>node test/harness.js</code>. Formula for every stat is printed under its chart.
   </footer>
+</div>
+
+<div class="dossier" id="dossier" hidden>
+  <div class="dossier-inner">
+    <div class="dossier-body" id="dossier-body"></div>
+  </div>
 </div>
 
 <div class="tooltip" id="tooltip" hidden></div>
@@ -647,7 +727,253 @@
       sampleSizeQ, handsAllCount: handsAll.length, stakesMix, stakesTotal, opponents, plSum, plBBSum,
       byStake, sdGrid, sdPlayers, bbMix, pinnedN, heroInvolved, tsSpan, handsArr,
     };
+    M.poolTex = computePoolTexture();
     M.targets = computeTargets();
+  }
+
+  // ---------------------------------------------------------------------
+  // Behavioural reads: the per-player fields nothing above touches
+  //
+  // streetActions, boardTex, texture and betSizes are the most directly
+  // exploitable things in the store and none of them are pool statistics -
+  // they are answers to "how do I beat THIS player". Two rate shapes recur,
+  // and they are kept apart for the reason boardTexRates keeps them apart in
+  // the userscript: postflop, bet and check are only reachable when nobody
+  // has bet yet, and call/fold/raise only when facing one. Blending them
+  // averages two unrelated situations into a number about neither.
+  // ---------------------------------------------------------------------
+  // The two sources spell the same five counters differently - streetActions
+  // uses full words, boardTex uses single letters to keep a per-player field
+  // that rides on every record forever down to a couple of bytes. Read both
+  // spellings rather than duplicating this function, since silently reading
+  // zeros is the failure mode: an empty table looks like "no data yet"
+  // rather than like a bug.
+  function cellRates(c) {
+    if (!c) return { lead: null, foldToBet: null, raiseWhenFacing: null, nLead: 0, nFacing: 0 };
+    const pick = (short, long) => (c[short] != null ? c[short] : c[long]) || 0;
+    const b = pick('b', 'bet'), r = pick('r', 'raise'), cl = pick('c', 'call'),
+      k = pick('k', 'check'), f = pick('f', 'fold');
+    const nLead = b + k, nFacing = f + cl + r;
+    return {
+      lead: nLead ? (100 * b) / nLead : null,
+      foldToBet: nFacing ? (100 * f) / nFacing : null,
+      raiseWhenFacing: nFacing ? (100 * r) / nFacing : null,
+      nLead, nFacing,
+    };
+  }
+  const STREETS = ['flop', 'turn', 'river'];
+  const BOARD_FLAGS = [
+    { key: 'dry', label: 'Dry' }, { key: 'pair', label: 'Paired' },
+    { key: 'str4', label: '4-straight' }, { key: 'fl3', label: '3-flush' }, { key: 'fl4', label: '4-flush' },
+  ];
+
+  function streetRatesOf(p) {
+    const out = {};
+    STREETS.forEach((s) => { out[s] = cellRates((p.streetActions || {})[s]); });
+    return out;
+  }
+  function boardRatesOf(p) {
+    const out = {};
+    BOARD_FLAGS.forEach((f) => { out[f.key] = cellRates((p.boardTex || {})[f.key]); });
+    return out;
+  }
+  // Median of a bounded sample window, same shape the userscript stores these in.
+  function medOf(a) { return Array.isArray(a) && a.length ? median(a) : null; }
+  function sizingOf(p) {
+    const t = p.texture || {};
+    const made = medOf(t.madeSizes), bluff = medOf(t.bluffSizes), draw = medOf(t.drawSizes);
+    const nMade = (t.madeSizes || []).length, nBluff = (t.bluffSizes || []).length, nDraw = (t.drawSizes || []).length;
+    const slowN = (t.checkMade || 0) + (t.madeBets || 0);
+    return {
+      made, bluff, draw, nMade, nBluff, nDraw,
+      gap: (made != null && bluff != null) ? made - bluff : null,
+      slowplay: slowN ? (100 * (t.checkMade || 0)) / slowN : null,
+      slowN, checkMade: t.checkMade || 0, madeBets: t.madeBets || 0,
+      medianBet: medOf(p.betSizes), nBets: (p.betSizes || []).length,
+    };
+  }
+
+  // Pool baselines for all of the above, so a player's number is always shown
+  // against what this export's own pool does in the same spot.
+  function computePoolTexture() {
+    const ps = M.qual25 || [];
+    const avg = (f) => { const v = ps.map(f).filter((x) => x != null && !Number.isNaN(x)); return v.length ? mean(v) : null; };
+    const street = {}, board = {};
+    STREETS.forEach((s) => {
+      street[s] = { lead: avg((p) => streetRatesOf(p)[s].lead), foldToBet: avg((p) => streetRatesOf(p)[s].foldToBet) };
+    });
+    BOARD_FLAGS.forEach((f) => {
+      board[f.key] = { lead: avg((p) => boardRatesOf(p)[f.key].lead), foldToBet: avg((p) => boardRatesOf(p)[f.key].foldToBet) };
+    });
+    return {
+      street, board,
+      slowplay: avg((p) => sizingOf(p).slowplay),
+      medianBet: avg((p) => sizingOf(p).medianBet),
+    };
+  }
+
+  // ---------------------------------------------------------------------
+  // The game plan
+  //
+  // Every line is a measured comparison against this export's own pool, and
+  // every line carries its own sample gate rather than one outer gate on the
+  // player - the thin-sample reads (a sizing tell, a slowplay habit) are
+  // exactly the ones worth surfacing early, so each rule states the n it
+  // needs and prints the n it had.
+  //
+  // These are NOT the userscript's exploit rules. Its gain ladder and
+  // thresholds are its own judgement calls; re-implementing them here would
+  // be the copy CLAUDE.md warns about, silently drifting from the coach on
+  // the phone. This says what the numbers are and what they imply, and where
+  // the two disagree the phone is the one giving live advice.
+  // ---------------------------------------------------------------------
+  const SIZING_TELL_MIN_PP = 20;   // pot-percentage gap worth calling a tell
+  const SIZING_MIN_MADE = 4, SIZING_MIN_BLUFF = 3;
+  const SLOWPLAY_MIN_N = 10;
+  const STREET_MIN_N = 12;
+  const BOARD_MIN_N = 8;
+
+  function buildGamePlan(p, r, sz, sr, br, isHero) {
+    const out = [];
+    const pool = M.poolStats, ptx = M.poolTex;
+    // Villain voice and hero voice are separate arguments to the same call,
+    // exactly as exploitText/leakText are in the userscript - the same fact
+    // ("reaches showdown 7%") is an instruction to barrel when it is about
+    // them and an instruction to stop folding when it is about you, and a
+    // single string cannot be both. A rule with no hero text is one where
+    // the voice does not invert.
+    const add = (rank, head, detail, heroHead, heroDetail) => out.push({
+      rank,
+      head: isHero && heroHead ? heroHead : head,
+      detail: isHero && heroDetail ? heroDetail : detail,
+    });
+
+    // --- sizing tells: the strongest single read in the store -------------
+    //
+    // Ranked on the THINNER of the two samples, not on the size of the gap.
+    // A 30pp gap off three bluffs and off thirty is the same effect and very
+    // different evidence, and this list is read top-down - letting effect
+    // size alone lead would put the least-supported line first.
+    if (sz.gap != null && sz.nMade >= SIZING_MIN_MADE && sz.nBluff >= SIZING_MIN_BLUFF) {
+      const nMin = Math.min(sz.nMade, sz.nBluff);
+      const conf = nMin / (nMin + 6);          // 3 -> 0.33, 8 -> 0.57, 20 -> 0.77
+      const rank = 60 + Math.round(55 * conf); // 80 at n=3, 115 at n=20
+      if (sz.gap >= SIZING_TELL_MIN_PP) {
+        add(rank, 'Size tell: big bet = real hand',
+          'Bets ' + sz.made.toFixed(0) + '% pot with made hands (n=' + sz.nMade + ') but only '
+          + sz.bluff.toFixed(0) + '% when bluffing (n=' + sz.nBluff + '). Fold to their big bets, call the small ones.');
+      } else if (sz.gap <= -SIZING_TELL_MIN_PP) {
+        add(rank, 'Reverse size tell: big bet = bluff',
+          'Bets ' + sz.bluff.toFixed(0) + '% pot bluffing (n=' + sz.nBluff + ') but only '
+          + sz.made.toFixed(0) + '% with made hands (n=' + sz.nMade + '). Their overbet is air more often than not; their small bet is value.');
+      }
+    }
+    // --- slowplay: their check is not weakness ----------------------------
+    if (sz.slowplay != null && sz.slowN >= SLOWPLAY_MIN_N && ptx.slowplay != null) {
+      if (sz.slowplay >= ptx.slowplay + 15) {
+        add(92, 'Their check is a trap as often as not',
+          'Checks made hands ' + sz.slowplay.toFixed(0) + '% of the time vs a ' + ptx.slowplay.toFixed(0)
+          + '% pool (' + sz.slowN + ' spots). Do not auto-stab when they check - and their check-raise is real.',
+          'You slowplay more than the pool does',
+          'You check a made hand ' + sz.slowplay.toFixed(0) + '% of the time vs a ' + ptx.slowplay.toFixed(0)
+          + '% pool (' + sz.slowN + ' spots). Every check gives a free card - make sure the trap is the better '
+          + 'line and not just habit.');
+      } else if (sz.slowplay <= ptx.slowplay - 15) {
+        add(70, 'Their check means they missed',
+          'Only checks made hands ' + sz.slowplay.toFixed(0) + '% vs a ' + ptx.slowplay.toFixed(0)
+          + '% pool (' + sz.slowN + ' spots). When they check, take it away.');
+      }
+    }
+    // --- fold to c-bet: the biggest postflop lever -------------------------
+    if (r.foldToCbet != null && (p.foldToCbetOpp || 0) >= 8 && pool.foldToCbet.mean != null) {
+      const d = r.foldToCbet - pool.foldToCbet.mean;
+      if (d >= 12) add(95, 'C-bet them relentlessly', 'Folds to c-bets ' + fmtPct1(r.foldToCbet)
+        + ' vs a ' + fmtPct1(pool.foldToCbet.mean) + ' pool (' + p.foldToCbetOpp + ' spots). Fire every flop you lead in.',
+        'You over-fold to c-bets', 'You fold to c-bets ' + fmtPct1(r.foldToCbet) + ' vs a '
+        + fmtPct1(pool.foldToCbet.mean) + ' pool (' + p.foldToCbetOpp + ' spots). You are the player this tool tells '
+        + 'everyone else to fire every flop at - defend more, especially in position.');
+      else if (d <= -12) add(88, 'Do not bluff their flop', 'Folds to c-bets only ' + fmtPct1(r.foldToCbet)
+        + ' vs a ' + fmtPct1(pool.foldToCbet.mean) + ' pool (' + p.foldToCbetOpp + ' spots). Value bet, check your air.',
+        'You do not fold enough on the flop', 'You fold to c-bets only ' + fmtPct1(r.foldToCbet) + ' vs a '
+        + fmtPct1(pool.foldToCbet.mean) + ' pool (' + p.foldToCbetOpp + ' spots). Good players will stop bluffing you '
+        + 'and value-bet you relentlessly instead.');
+    }
+    // --- street shape: fires and gives up ---------------------------------
+    const fl = sr.flop, tn = sr.turn, rv = sr.river;
+    if (fl.lead != null && tn.lead != null && fl.nLead >= STREET_MIN_N && tn.nLead >= STREET_MIN_N && fl.lead - tn.lead >= 20) {
+      add(85, 'Fires the flop, gives up on the turn',
+        'Leads ' + fl.lead.toFixed(0) + '% on the flop (n=' + fl.nLead + ') but ' + tn.lead.toFixed(0)
+        + '% on the turn (n=' + tn.nLead + '). Float the flop and take it away on the turn.',
+        'You fire the flop and give up on the turn',
+        'You lead ' + fl.lead.toFixed(0) + '% on the flop (n=' + fl.nLead + ') but ' + tn.lead.toFixed(0)
+        + '% on the turn (n=' + tn.nLead + '). Anyone floating you gets the pot on the turn for free - '
+        + 'pick flops you can barrel twice.');
+    }
+    if (rv.lead != null && rv.nLead >= STREET_MIN_N && ptx.street.river.lead != null && rv.lead >= ptx.street.river.lead + 18) {
+      add(72, 'Their river bet is not always value',
+        'Leads the river ' + rv.lead.toFixed(0) + '% vs a ' + ptx.street.river.lead.toFixed(0)
+        + '% pool (n=' + rv.nLead + '). Widen your calls against them there.');
+    }
+    STREETS.forEach((s) => {
+      const c = sr[s], ref = ptx.street[s];
+      if (c.foldToBet != null && c.nFacing >= STREET_MIN_N && ref.foldToBet != null && c.foldToBet >= ref.foldToBet + 18) {
+        add(80, 'Overfolds the ' + s, 'Folds ' + c.foldToBet.toFixed(0) + '% when bet into on the ' + s
+          + ' vs a ' + ref.foldToBet.toFixed(0) + '% pool (n=' + c.nFacing + '). Barrel that street.',
+          'You over-fold the ' + s, 'You fold ' + c.foldToBet.toFixed(0) + '% when bet into on the ' + s
+          + ' vs a ' + ref.foldToBet.toFixed(0) + '% pool (n=' + c.nFacing + '). That is a street opponents can '
+          + 'take away from you cheaply.');
+      }
+    });
+    // --- board texture ----------------------------------------------------
+    BOARD_FLAGS.forEach((f) => {
+      const c = br[f.key], ref = ptx.board[f.key];
+      if (!ref) return;
+      if (c.foldToBet != null && c.nFacing >= BOARD_MIN_N && ref.foldToBet != null && c.foldToBet >= ref.foldToBet + 20) {
+        add(66, 'Folds on ' + f.label.toLowerCase() + ' boards', 'Folds ' + c.foldToBet.toFixed(0)
+          + '% facing a bet there vs a ' + ref.foldToBet.toFixed(0) + '% pool (n=' + c.nFacing + '). Bluff that texture.');
+      }
+      if (c.lead != null && c.nLead >= BOARD_MIN_N && ref.lead != null && c.lead <= ref.lead - 20) {
+        add(60, 'Gives up on ' + f.label.toLowerCase() + ' boards', 'Leads only ' + c.lead.toFixed(0)
+          + '% there vs a ' + ref.lead.toFixed(0) + '% pool (n=' + c.nLead + '). Take the betting lead.');
+      }
+    });
+    // --- preflop ----------------------------------------------------------
+    if (r.foldTo3Bet != null && (p.foldTo3BetOpp || 0) >= 8 && pool.foldTo3Bet.mean != null
+        && r.foldTo3Bet >= pool.foldTo3Bet.mean + 15) {
+      add(78, '3-bet them light', 'Folds to 3-bets ' + fmtPct1(r.foldTo3Bet) + ' vs a '
+        + fmtPct1(pool.foldTo3Bet.mean) + ' pool (' + p.foldTo3BetOpp + ' spots).',
+        'You fold to 3-bets too often', 'You fold to 3-bets ' + fmtPct1(r.foldTo3Bet) + ' vs a '
+        + fmtPct1(pool.foldTo3Bet.mean) + ' pool (' + p.foldTo3BetOpp + ' spots). Opening and folding is the '
+        + 'cheapest thing to exploit - defend or 4-bet more.');
+    }
+    if (r.limpShareOfVpip != null && (p.vpip || 0) >= 25 && pool.limpShareOfVpip.mean != null
+        && r.limpShareOfVpip >= pool.limpShareOfVpip.mean + 15) {
+      add(64, 'Isolate their limps', 'Limps ' + fmtPct1(r.limpShareOfVpip) + ' of hands they enter vs a '
+        + fmtPct1(pool.limpShareOfVpip.mean) + ' pool. Raise them wide in position.',
+        'You limp too much', 'You limp ' + fmtPct1(r.limpShareOfVpip) + ' of the hands you enter vs a '
+        + fmtPct1(pool.limpShareOfVpip.mean) + ' pool. Limping forfeits the pot you could have taken preflop - '
+        + 'raise or fold.');
+    }
+    if (r.wtsd != null && (p.hands || 0) >= 50 && pool.wtsd.mean != null) {
+      if (r.wtsd <= pool.wtsd.mean - 5) add(74, 'Overfolds before showdown', 'Reaches showdown '
+        + fmtPct1(r.wtsd) + ' vs a ' + fmtPct1(pool.wtsd.mean) + ' pool. Keep barrelling; they will let it go.',
+        'You are folding too much before showdown', 'You reach showdown ' + fmtPct1(r.wtsd) + ' vs a '
+        + fmtPct1(pool.wtsd.mean) + ' pool. Anyone paying attention can barrel you off pots - call down wider, '
+        + 'or take the betting lead yourself instead of folding the river.');
+      else if (r.wtsd >= pool.wtsd.mean + 8) add(76, 'Calls down light - value bet, never bluff',
+        'Reaches showdown ' + fmtPct1(r.wtsd) + ' vs a ' + fmtPct1(pool.wtsd.mean) + ' pool.',
+        'You call down too light', 'You reach showdown ' + fmtPct1(r.wtsd) + ' vs a ' + fmtPct1(pool.wtsd.mean)
+        + ' pool. You are paying off value bets - find more folds on the river.');
+    }
+    if ((p.limpRaiseMade || 0) >= 2) {
+      add(58, 'Has a limp-reraise trap', 'Limped then re-raised ' + p.limpRaiseMade
+        + ' time(s). Their limp is not automatically weakness.',
+        'You have a limp-reraise in your game', 'You limped then re-raised ' + p.limpRaiseMade
+        + ' time(s). Almost nobody does that light, so sharp opponents fold everything to it - it only pays '
+        + 'against players who call too wide.');
+    }
+    out.sort((a, b) => b.rank - a.rank);
+    return out;
   }
 
   // ---------------------------------------------------------------------
@@ -903,6 +1229,207 @@
   }
 
   // ---------------------------------------------------------------------
+  // The dossier: one player, everything the store knows
+  //
+  // Hero is just another player record, so the same view answers "how do I
+  // beat them" and "what am I doing wrong" - pointed at your own xid it is a
+  // self-audit, and that is deliberate rather than a coincidence worth
+  // building twice.
+  // ---------------------------------------------------------------------
+  function openDossier(xid) {
+    const p = STORE.players[String(xid)];
+    if (!p) return;
+    const isHero = String(xid) === String(HERO_XID);
+    const r = playerRates(p), sz = sizingOf(p), sr = streetRatesOf(p), br = boardRatesOf(p);
+    const plan = buildGamePlan(p, r, sz, sr, br, isHero);
+    const tgt = (M.targets || []).find((t) => String(t.p.xid) === String(xid));
+    const bb100 = p.hands ? (100 * (p.plBBEst || 0)) / p.hands : null;
+    const thin = (p.hands || 0) < BB100_THIN_HANDS;
+
+    let h = '<div class="dsr-head"><div>'
+      + '<div class="dsr-name">' + esc(p.name) + (isHero ? ' <span class="dsr-you">you</span>' : '') + '</div>'
+      + '<div class="dsr-sub">' + fmtInt(p.hands) + ' hands tracked'
+      + (p.lastSeen ? ' - last seen ' + fmtDate(p.lastSeen) : '')
+      + (tgt ? ' - edge ' + tgt.edge.toFixed(0) + '/100' : '') + '</div></div>'
+      + '<button class="ghost" id="dsr-close" type="button">Close</button></div>';
+
+    // headline numbers
+    h += '<div class="dsr-tiles">';
+    h += dsrTile('VPIP', fmtPct1(r.vpip), poolDelta(r.vpip, M.poolStats.vpip.mean));
+    h += dsrTile('PFR', fmtPct1(r.pfr), poolDelta(r.pfr, M.poolStats.pfr.mean));
+    h += dsrTile('AFq', fmtPct1(r.afq), poolDelta(r.afq, M.poolStats.afq.mean));
+    h += dsrTile('WTSD', fmtPct1(r.wtsd), poolDelta(r.wtsd, M.poolStats.wtsd.mean));
+    if (!isHero) {
+      h += dsrTile('Your bb/100', bb100 == null ? '-' : (bb100 >= 0 ? '+' : '') + bb100.toFixed(1),
+        thin ? 'under ' + BB100_THIN_HANDS + ' hands' : fmtBB(p.plBBEst) + ' total');
+    }
+    h += '</div>';
+
+    // the punchline
+    h += '<div class="dsr-card"><h3>' + (isHero ? 'What to fix' : 'Game plan') + '</h3>';
+    if (!plan.length) {
+      h += '<div class="hint">Nothing stands out past its sample gate yet. '
+        + 'The reads that need fewest hands are the sizing and slowplay tells below - play more hands with them.</div>';
+    } else {
+      h += '<ol class="dsr-plan">' + plan.map((x) =>
+        '<li><b>' + esc(x.head) + '</b><br><span class="dsr-detail">' + esc(x.detail) + '</span></li>').join('') + '</ol>';
+    }
+    h += '</div>';
+
+    // bet sizing
+    h += '<div class="dsr-card"><h3>Bet sizing</h3>'
+      + '<div class="hint">Median bet as a share of the pot, split by what they were holding at showdown. '
+      + 'A gap between these is the most directly exploitable thing in the store. Showdowns only, so a bluff '
+      + 'that always worked never appears here.</div>';
+    if (sz.nMade || sz.nBluff || sz.nDraw) {
+      h += '<div class="dsr-sizes">'
+        + dsrSize('Made hand', sz.made, sz.nMade)
+        + dsrSize('Draw', sz.draw, sz.nDraw)
+        + dsrSize('Bluff', sz.bluff, sz.nBluff)
+        + '</div>';
+      if (sz.gap != null && sz.nMade >= SIZING_MIN_MADE && sz.nBluff >= SIZING_MIN_BLUFF) {
+        h += '<div class="dsr-flag ' + (Math.abs(sz.gap) >= SIZING_TELL_MIN_PP ? 'hot' : '') + '">'
+          + (Math.abs(sz.gap) >= SIZING_TELL_MIN_PP
+            ? (sz.gap > 0 ? 'Tell: ' + sz.gap.toFixed(0) + 'pp BIGGER with made hands.'
+              : 'Reverse tell: ' + (-sz.gap).toFixed(0) + 'pp bigger when bluffing.')
+            : 'No sizing tell - ' + Math.abs(sz.gap).toFixed(0) + 'pp apart, inside the noise.') + '</div>';
+      } else {
+        h += '<div class="dsr-flag">Not enough categorised bets yet for a tell (need '
+          + SIZING_MIN_MADE + ' made and ' + SIZING_MIN_BLUFF + ' bluffs).</div>';
+      }
+    } else {
+      h += '<div class="hint">No showdown-categorised bets recorded.</div>';
+    }
+    if (sz.slowN) {
+      h += '<div class="dsr-row"><span>Checks a made hand instead of betting</span><span class="num"><b>'
+        + fmtPct1(sz.slowplay) + '</b> of ' + sz.slowN + ' spots'
+        + (M.poolTex.slowplay != null ? ' <span class="dsr-vs">pool ' + fmtPct1(M.poolTex.slowplay) + '</span>' : '')
+        + '</span></div>';
+    }
+    h += '</div>';
+
+    // street shape
+    h += '<div class="dsr-card"><h3>By street</h3>'
+      + '<div class="hint">Two different situations, kept apart: <b>leads</b> is how often they bet when nobody has, '
+      + '<b>folds</b> is how often they fold facing a bet. Pool figure beside each.</div>'
+      + '<div class="table-wrap"><table><thead><tr><th>Street</th><th class="num">Leads</th><th class="num">Pool</th>'
+      + '<th class="num">n</th><th class="num">Folds to bet</th><th class="num">Pool</th><th class="num">n</th>'
+      + '<th class="num">Raises</th></tr></thead><tbody>';
+    STREETS.forEach((s) => {
+      const c = sr[s], ref = M.poolTex.street[s];
+      h += '<tr><td>' + s + '</td>'
+        + '<td class="num">' + fmtPct1(c.lead) + '</td><td class="num dsr-vs">' + fmtPct1(ref.lead) + '</td>'
+        + '<td class="num dsr-vs">' + c.nLead + '</td>'
+        + '<td class="num">' + fmtPct1(c.foldToBet) + '</td><td class="num dsr-vs">' + fmtPct1(ref.foldToBet) + '</td>'
+        + '<td class="num dsr-vs">' + c.nFacing + '</td>'
+        + '<td class="num">' + fmtPct1(c.raiseWhenFacing) + '</td></tr>';
+    });
+    h += '</tbody></table></div></div>';
+
+    // board texture
+    const anyBoard = BOARD_FLAGS.some((f) => br[f.key].nLead || br[f.key].nFacing);
+    if (anyBoard) {
+      h += '<div class="dsr-card"><h3>By board texture</h3>'
+        + '<div class="hint">A board can be paired <i>and</i> flushy, so these are flags, not a breakdown - '
+        + '<b>the rows do not sum</b>.</div>'
+        + '<div class="table-wrap"><table><thead><tr><th>Board</th><th class="num">Leads</th><th class="num">Pool</th>'
+        + '<th class="num">n</th><th class="num">Folds to bet</th><th class="num">Pool</th><th class="num">n</th>'
+        + '</tr></thead><tbody>';
+      BOARD_FLAGS.forEach((f) => {
+        const c = br[f.key], ref = M.poolTex.board[f.key] || {};
+        if (!c.nLead && !c.nFacing) return;
+        const dim = (c.nLead + c.nFacing) < BOARD_MIN_N ? ' class="dsr-dim"' : '';
+        h += '<tr' + dim + '><td>' + f.label + '</td>'
+          + '<td class="num">' + fmtPct1(c.lead) + '</td><td class="num dsr-vs">' + fmtPct1(ref.lead) + '</td>'
+          + '<td class="num dsr-vs">' + c.nLead + '</td>'
+          + '<td class="num">' + fmtPct1(c.foldToBet) + '</td><td class="num dsr-vs">' + fmtPct1(ref.foldToBet) + '</td>'
+          + '<td class="num dsr-vs">' + c.nFacing + '</td></tr>';
+      });
+      h += '</tbody></table><div class="stat-caption">Rows under ' + BOARD_MIN_N
+        + ' observations are dimmed rather than hidden.</div></div></div>';
+    }
+
+    // their actual range
+    const shown = p.shownHands || {};
+    const classes = Object.keys(shown);
+    if (classes.length) {
+      const totalSeen = classes.reduce((a, k) => a + (shown[k].seen || 0), 0);
+      const raisedN = classes.reduce((a, k) => a + (shown[k].raised || 0), 0);
+      h += '<div class="dsr-card"><h3>What they show up with</h3>'
+        + '<div class="hint">' + fmtInt(totalSeen) + ' showdowns across ' + classes.length + ' hand classes'
+        + (raisedN ? ' - ' + fmtInt(raisedN) + ' after raising preflop' : '')
+        + '. A <b>floor</b> on their range, never the whole of it: a pot that ends in a fold shows nothing.</div>'
+        + '<div class="seg dsr-seg"><button data-sd="seen" class="active">All</button>'
+        + '<button data-sd="raised">Raised</button><button data-sd="called">Called</button></div>'
+        + '<div class="sd-grid dsr-grid" id="dsr-grid"></div></div>';
+    }
+
+    const box = document.getElementById('dossier');
+    document.getElementById('dossier-body').innerHTML = h;
+    box.hidden = false;
+    document.body.style.overflow = 'hidden';
+    document.getElementById('dsr-close').addEventListener('click', closeDossier);
+    if (classes.length) {
+      let mode = 'seen';
+      const draw = () => {
+        const g = document.getElementById('dsr-grid');
+        g.innerHTML = '';
+        const val = (cls) => {
+          const e = shown[cls]; if (!e) return null;
+          if (mode === 'seen') return e.seen || 0;
+          if (mode === 'raised') return e.raised || 0;
+          return Math.max(0, (e.seen || 0) - (e.raised || 0));
+        };
+        let max = 0; RANKS.forEach((_, i) => RANKS.forEach((__, j) => {
+          const cls = i === j ? RANKS[i] + RANKS[i] : i < j ? RANKS[i] + RANKS[j] + 's' : RANKS[j] + RANKS[i] + 'o';
+          max = Math.max(max, val(cls) || 0);
+        }));
+        for (let i = 0; i < 13; i++) for (let j = 0; j < 13; j++) {
+          const cls = i === j ? RANKS[i] + RANKS[i] : i < j ? RANKS[i] + RANKS[j] + 's' : RANKS[j] + RANKS[i] + 'o';
+          const v = val(cls);
+          const cell = document.createElement('div');
+          cell.className = 'sd-cell' + (i === j ? ' pair' : '');
+          cell.textContent = cls;
+          if (v) {
+            const frac = max ? v / max : 0;
+            cell.style.background = seqColor(Math.max(0.05, Math.min(1, frac)));
+            if (frac > 0.55) cell.style.color = '#fff';
+            cell.title = cls + ': ' + v + (mode === 'seen' ? ' shown' : mode === 'raised' ? ' after raising' : ' after calling');
+          }
+          g.appendChild(cell);
+        }
+      };
+      document.querySelectorAll('#dossier .dsr-seg button').forEach((b) => {
+        b.addEventListener('click', () => {
+          mode = b.dataset.sd;
+          document.querySelectorAll('#dossier .dsr-seg button').forEach((x) => x.classList.toggle('active', x === b));
+          draw();
+        });
+      });
+      draw();
+    }
+    document.getElementById('dossier-body').scrollTop = 0;
+  }
+  function closeDossier() {
+    document.getElementById('dossier').hidden = true;
+    document.body.style.overflow = '';
+  }
+  function dsrTile(label, value, foot) {
+    return '<div class="dsr-tile"><div class="label">' + esc(label) + '</div><div class="value">' + value + '</div>'
+      + (foot ? '<div class="foot">' + esc(foot) + '</div>' : '') + '</div>';
+  }
+  function poolDelta(v, poolMean) {
+    if (v == null || poolMean == null) return '';
+    const d = v - poolMean;
+    return (d >= 0 ? '+' : '') + d.toFixed(0) + 'pp vs pool';
+  }
+  function dsrSize(label, v, n) {
+    return '<div class="dsr-size"><div class="label">' + esc(label) + '</div>'
+      + '<div class="value">' + (v == null ? '-' : v.toFixed(0) + '%') + '</div>'
+      + '<div class="foot">' + (n ? 'n=' + n : 'no sample') + '</div></div>';
+  }
+
+  // ---------------------------------------------------------------------
   // Tab: Targets
   // ---------------------------------------------------------------------
   let targetLimit = 20;
@@ -987,7 +1514,7 @@
         + esc(pt.lever) + '</span></div>').join('');
       const thin = (x.p.hands || 0) < BB100_THIN_HANDS;
       html += '<tr><td class="num">' + (i + 1) + '</td>'
-        + '<td>' + esc(x.p.name) + '</td>'
+        + '<td class="clickable" data-xid="' + esc(x.p.xid) + '">' + esc(x.p.name) + '</td>'
         + '<td class="num"><b>' + x.norm.toFixed(0) + '</b></td>'
         + '<td class="num">' + x.edge.toFixed(0) + '</td>'
         + '<td class="num">' + fmtInt(x.p.hands) + '</td>'
@@ -1083,6 +1610,10 @@
 
     if (M.heroRecord) {
       const r = playerRates(M.heroRecord);
+      html += '<div class="card"><h3>Your own dossier</h3>'
+        + '<div class="hint">The same view your opponents get - bet-sizing tells, slowplay rate, per-street shape '
+        + 'and what you show down, each against the pool. Read it as the table reads you.</div>'
+        + '<button data-xid="' + esc(M.heroRecord.xid) + '" type="button">Audit my game</button></div>';
       html += '<div class="card"><h3>Your raw rates</h3><div class="hint">Same field-ratios as the pool figures below - see the formula under each.</div><div class="grid-3">';
       RATE_KEYS.forEach((k) => {
         html += '<div><div class="label" style="font-size:11px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.05em">' + RATE_LABELS[k] + '</div>'
@@ -1251,7 +1782,7 @@
     let html = '<div class="card"><h3>' + title + '</h3><div class="lb-list">';
     list.forEach((o, i) => {
       const v = o.p[key];
-      html += '<div class="lb-row"><span class="n">' + (i + 1) + '</span><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(o.p.name) + '</span>'
+      html += '<div class="lb-row"><span class="n">' + (i + 1) + '</span><span class="clickable" data-xid="' + esc(o.p.xid) + '" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(o.p.name) + '</span>'
         + '<span class="' + (v >= 0 ? 'pos' : 'neg') + '">' + fmt(v) + '</span></div>';
     });
     if (!list.length) html += '<div class="hint">No data.</div>';
@@ -1282,7 +1813,7 @@
     const tbody = document.getElementById('opp-tbody');
     tbody.innerHTML = page.map((o) => {
       const p = o.p, r = o.r;
-      return '<tr><td>' + esc(p.name) + '</td><td class="num">' + fmtInt(p.hands) + '</td>'
+      return '<tr><td class="clickable" data-xid="' + esc(p.xid) + '">' + esc(p.name) + '</td><td class="num">' + fmtInt(p.hands) + '</td>'
         + '<td class="num">' + fmtPct1(r.vpip) + '</td><td class="num">' + fmtPct1(r.pfr) + '</td>'
         + '<td class="num">' + fmtPct1(r.threeBet) + '</td><td class="num">' + fmtPct1(r.wtsd) + '</td>'
         + '<td class="num ' + (p.plChipsEst >= 0 ? 'pos' : 'neg') + '">' + fmtSignedMoney(p.plChipsEst) + '</td>'
@@ -1406,6 +1937,48 @@
     const btn = e.target.closest('button[data-tab]'); if (!btn) return;
     document.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('active', b === btn));
     document.querySelectorAll('section.tab').forEach((s) => s.classList.toggle('active', s.id === 'tab-' + btn.dataset.tab));
+  });
+
+  // Lookup: every tracked player is reachable, not just the ones a list
+  // happens to be showing. The strongest single read in this export belongs
+  // to a player who appears in none of the default views.
+  const lookupEl = document.getElementById('lookup');
+  const hitsEl = document.getElementById('lookup-hits');
+  function runLookup() {
+    const q = lookupEl.value.trim().toLowerCase();
+    if (!q) { hitsEl.hidden = true; return; }
+    const hits = Object.keys(STORE.players)
+      .map((x) => STORE.players[x])
+      .filter((p) => p && (p.name || '').toLowerCase().includes(q))
+      .sort((a, b) => (b.hands || 0) - (a.hands || 0))
+      .slice(0, 12);
+    if (!hits.length) {
+      hitsEl.innerHTML = '<div class="lookup-hit"><span>No tracked player matches that.</span></div>';
+      hitsEl.hidden = false; return;
+    }
+    hitsEl.innerHTML = hits.map((p) => '<div class="lookup-hit" data-xid="' + esc(p.xid) + '">'
+      + '<span>' + esc(p.name) + (String(p.xid) === String(HERO_XID) ? ' (you)' : '') + '</span>'
+      + '<span class="meta">' + fmtInt(p.hands) + ' hands</span></div>').join('');
+    hitsEl.hidden = false;
+  }
+  lookupEl.addEventListener('input', runLookup);
+  lookupEl.addEventListener('focus', runLookup);
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.lookup')) hitsEl.hidden = true;
+  });
+
+  // One delegated handler for every player name anywhere on the page, so a
+  // new table of players is clickable without wiring anything.
+  document.addEventListener('click', (e) => {
+    const el = e.target.closest('[data-xid]');
+    if (!el || !document.getElementById('dossier').hidden) return;
+    openDossier(el.dataset.xid);
+  });
+  document.getElementById('dossier').addEventListener('click', (e) => {
+    if (e.target.id === 'dossier') closeDossier();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !document.getElementById('dossier').hidden) closeDossier();
   });
 
   // ---------------------------------------------------------------------
