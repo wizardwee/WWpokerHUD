@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.57.0
+// @version      1.58.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,46 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.58.0 - The bet-sizing tells become a picture, and a count that was
+ *          overstating itself gets fixed. Reported directly: "i also want to
+ *          know the bluffing frequency, and bet tells in a more succint way.
+ *          Its hard to see it from the numbers alone."
+ *            - Exactly right, and the reason is structural: the READ is the
+ *              GAP between two medians, and a gap is the one thing a column
+ *              of figures cannot show. Four numeric rows made you do the
+ *              comparison yourself. sizingScaleHtml puts bluff / draw / made
+ *              on ONE axis so the separation is seen, and states the
+ *              conclusion underneath — "Big bet = made hand. 84pp apart."
+ *            - Letters ride the dots, figures sit in the legend below.
+ *              Labelling in place would collide exactly when the medians are
+ *              close, which is the case the picture most needs to render
+ *              honestly: a player with no separation should LOOK like one.
+ *            - Not red/green, same rule as the deviation indicators. Which
+ *              hand they are holding is information, not good or bad news.
+ *              Hue separates the poles and the letter carries identity, so
+ *              neither is doing the job alone.
+ *            - isHero flips the VOICE, not the numbers. The Stats tab is the
+ *              same panel for an opponent and for you, and "their bet size
+ *              tells you nothing" is nonsense about yourself — the same
+ *              exploitText/leakText split buildTendencyEntries already makes.
+ *              Your own record reads "No separation — your size gives nothing
+ *              away", which over 25/25/25 spots is the good outcome.
+ *            - THE BUG THIS SURFACED, and it is v1.26.0's rule broken again:
+ *              betMadePct is the median of a BOUNDED window (25 sizes) while
+ *              betMadeCount is the LIFETIME count of such bets. Quoting them
+ *              together said "113% pot, 140 spots" when 25 sizes produced
+ *              that median, and gating on the count let one stored size stand
+ *              in for a median — v1.57.0's brand-new per-pole gate was
+ *              checking the wrong number and passed a player holding exactly
+ *              one. computeRates now exposes betMadeSample/betBluffSample/
+ *              betDrawSample (the array lengths), and every median-adjacent
+ *              count and gate reads those instead. The lifetime counts stay
+ *              for bluffRate, which genuinely is a rate over them.
+ *            - Bluff frequency and slowplay keep their own rows and their
+ *              floor caveat: a bluff good enough to take the pot never
+ *              reaches a showdown to be counted, so the real rate is at least
+ *              the figure shown.
  *
  * 1.57.0 - A live sizing read: what THIS bet looks like, not how often they
  *          bet. Asked for after the standing tell was found to be computed,
@@ -96,59 +136,6 @@
  *              visible, controls still resolving by class after re-parenting,
  *              and a remembered section reopening across a re-render.
  *
- * 1.55.0 - A per-hand P/L ledger that outlives the hand history cap. Asked
- *          directly: "I want the P/L ledger to persist past the hand history
- *          limit. is it possible to do that?" — designed with the user before
- *          building: grain (per-hand), cap size (20,000), reset scope (goes
- *          with everything else), export format (CSV) were all decided first.
- *            - STORE.hands keeps full detail (actions, board, players) for
- *              History, capped at historyLimit because that detail costs
- *              ~1.3KB/hand. A ledger row keeps almost nothing — timestamp,
- *              chip delta, blind level, game id — for ~35-45 bytes/entry.
- *              That buys roughly two orders of magnitude more retention at
- *              the same storage cost, which is what "past the hand history
- *              limit" actually needs.
- *            - BOUNDED, deliberately. This file already paid once for "grows
- *              with every hand forever" (STORE.players before v0.40-0.41's
- *              pruning). PL_LEDGER_CAP (20,000) tops out under 1MB — a
- *              quarter of STORAGE_QUOTA_EST — covering years of normal play.
- *              FIFO eviction, same shape as PRUNE_PLAYER_CAP/DEPARTED_MAX:
- *              the cap is what makes the ceiling unreachable.
- *            - hero.netChips/netBB remain the PERMANENT, EXACT lifetime
- *              total regardless of what has aged out of the ledger — this is
- *              a bounded audit trail layered on that number, never a
- *              replacement for it. pushLedgerEntry() is called from the exact
- *              same site in applyHandResults that already updates
- *              hero.netChips/netBB, reusing the same heroDelta/bb — never
- *              recomputed, so the two can never disagree.
- *            - Tightened to !heroUnresolved() rather than the bare `heroXid`
- *              that block was already gated on: a name: pseudo-id nets to a
- *              harmless 0 in hero.netChips (nothing in contributions/winners
- *              is keyed by a pseudo-id), which is fine as a no-op but would
- *              otherwise fill the ledger with meaningless zero rows.
- *            - NO BACKFILL. Starts empty, accrues going forward only — same
- *              "no migration needed, a missing key reads as absent"
- *              precedent as limpRaiseMade/r3/r4/lr elsewhere here.
- *            - resetProfitLoss/resetHeroStats now clear STORE.plLedger too —
- *              its rows sum to hero.netChips by construction, and leaving it
- *              behind after zeroing that total would leave a ledger whose sum
- *              silently disagreed with the number it exists to break down.
- *            - mergeStores keeps plLedger LOCAL-ONLY, same status as
- *              sessionHistory: no cross-device dedup key exists for a ledger
- *              row the way gameId serves STORE.hands, so unioning two
- *              devices' ledgers is a known gap, not solved here.
- *            - CSV export (Settings ▸ P/L ledger), through the same three-
- *              route machinery (Copy/Save/Gist+Email) every other export
- *              here now uses. The running-total column is reconstructed
- *              starting from hero.netChips MINUS the sum of rows still
- *              present, so the LAST row always lands exactly on the real
- *              lifetime total — evicted history is folded into the starting
- *              point rather than silently making the total start from 0.
- *            - 36 assertions in test/pl-ledger.test.js, checked against the
- *              old behaviour first: reverting the heroUnresolved() gate, the
- *              reset clears, or the running-total anchor each fails a
- *              specific assertion, not the whole file.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -210,7 +197,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.57.0';
+  const HUD_VERSION = '1.58.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -5655,6 +5642,15 @@
       betMadePct: median(tex.madeSizes),
       betDrawCount: tex.drawBets || 0,
       betMadeCount: tex.madeBets || 0,
+      // The number each MEDIAN is actually computed from, which is not the
+      // count above: the size arrays are bounded windows
+      // (TEXTURE_BET_HISTORY_MAX), and a record migrated in v1.29.0 got empty
+      // arrays while keeping its lifetime counts. Quoting the lifetime count
+      // beside a median overstates the evidence behind that specific figure,
+      // and gating on it lets a single stored size stand in for a median —
+      // v1.26.0's rule, which this file broke again here.
+      betDrawSample: (tex.drawSizes || []).length,
+      betMadeSample: (tex.madeSizes || []).length,
       // BLUFF = showed down with worse than a pair and no draw either, after
       // betting or raising. bluffRate is a share of texBetSample, so it reads
       // "of the times we saw what they had after a bet, how often was it
@@ -5663,6 +5659,7 @@
       // structurally invisible to this. Say so wherever this is shown.
       betBluffPct: median(tex.bluffSizes),
       betBluffCount: tex.bluffBets || 0,
+      betBluffSample: (tex.bluffSizes || []).length,
       bluffRate: texBetSample ? pct(tex.bluffBets || 0, texBetSample) : null,
       bluffSample: texBetSample,
       // Slowplay/trap rate: of the times they were already sitting on two
@@ -7910,7 +7907,7 @@
     const r = computeRates(p);
     if (r.betMadePct == null || r.betBluffPct == null) return null;
     if ((r.betMadeCount + r.betBluffCount) < TEXTURE_MIN) return null;
-    if (r.betMadeCount < SIZING_LIVE_MIN_POLE || r.betBluffCount < SIZING_LIVE_MIN_POLE) return null;
+    if (r.betMadeSample < SIZING_LIVE_MIN_POLE || r.betBluffSample < SIZING_LIVE_MIN_POLE) return null;
     const gap = r.betMadePct - r.betBluffPct;
     if (Math.abs(gap) < SIZING_LIVE_MIN_GAP) return null;
     const mid = (r.betMadePct + r.betBluffPct) / 2;
@@ -7923,7 +7920,7 @@
     return {
       pct, gap, looksMade,
       made: r.betMadePct, bluff: r.betBluffPct,
-      madeN: r.betMadeCount, bluffN: r.betBluffCount,
+      madeN: r.betMadeSample, bluffN: r.betBluffSample,
     };
   }
 
@@ -8487,27 +8484,27 @@
     // --- Sizing by hand strength, and slowplay — both from showdowns only ---
     // Never fires for hero, same shownHands gap as the range rule below: hero's
     // own cards are never harvested as a showdown, so p.texture stays empty.
-    if ((r.betDrawCount + r.betMadeCount) >= TEXTURE_MIN
+    if ((r.betDrawSample + r.betMadeSample) >= TEXTURE_MIN
         && r.betDrawPct != null && r.betMadePct != null
         && Math.abs(r.betMadePct - r.betDrawPct) >= 20) {
       if (r.betMadePct > r.betDrawPct) {
         add(50, 'Sizing',
-          `Sizes up with a made hand (${r.betMadePct.toFixed(0)}% pot, ${r.betMadeCount} spots) vs a `
-            + `draw (${r.betDrawPct.toFixed(0)}%, ${r.betDrawCount} spots) — their bet SIZE tells you which `
+          `Sizes up with a made hand (${r.betMadePct.toFixed(0)}% pot, ${r.betMadeSample} spots) vs a `
+            + `draw (${r.betDrawPct.toFixed(0)}%, ${r.betDrawSample} spots) — their bet SIZE tells you which `
             + 'one you\'re facing. A bigger-than-usual bet from them is the goods; call their small ones down '
             + 'lighter and give the big ones more respect.',
-          `You size up with a made hand (${r.betMadePct.toFixed(0)}% pot, ${r.betMadeCount} spots) vs a draw `
-            + `(${r.betDrawPct.toFixed(0)}%, ${r.betDrawCount} spots) — a sharp opponent can read your size `
+          `You size up with a made hand (${r.betMadePct.toFixed(0)}% pot, ${r.betMadeSample} spots) vs a draw `
+            + `(${r.betDrawPct.toFixed(0)}%, ${r.betDrawSample} spots) — a sharp opponent can read your size `
             + 'and play accordingly. Mix your sizing so a big bet doesn\'t always mean the same thing.',
           'read their bet size', 'randomize your sizing', ['facing'],
           thresholdEdge(r.betMadePct - r.betDrawPct, 20, 60));
       } else {
         add(50, 'Sizing',
-          `Sizes UP on a draw (${r.betDrawPct.toFixed(0)}% pot, ${r.betDrawCount} spots) vs down with a made `
-            + `hand (${r.betMadePct.toFixed(0)}%, ${r.betMadeCount} spots) — backwards from the pool norm. `
+          `Sizes UP on a draw (${r.betDrawPct.toFixed(0)}% pot, ${r.betDrawSample} spots) vs down with a made `
+            + `hand (${r.betMadePct.toFixed(0)}%, ${r.betMadeSample} spots) — backwards from the pool norm. `
             + 'A big bet from them is more likely a draw than the nuts; their small ones are where the value is.',
-          `You size UP on a draw (${r.betDrawPct.toFixed(0)}% pot, ${r.betDrawCount} spots) vs down with a `
-            + `made hand (${r.betMadePct.toFixed(0)}%, ${r.betMadeCount} spots) — backwards from the norm, and `
+          `You size UP on a draw (${r.betDrawPct.toFixed(0)}% pot, ${r.betDrawSample} spots) vs down with a `
+            + `made hand (${r.betMadePct.toFixed(0)}%, ${r.betMadeSample} spots) — backwards from the norm, and `
             + 'exploitable the same way. Even out your sizing across both.',
           'their big bet = draw', 'randomize your sizing', ['facing'],
           thresholdEdge(r.betDrawPct - r.betMadePct, 20, 60));
@@ -8520,26 +8517,26 @@
     // bluff ends in a fold and never reaches showdown, so this is a FLOOR
     // biased low by exactly the bluffs that succeeded — never phrase it as
     // their true bluffing rate.
-    if ((r.betBluffCount + r.betMadeCount) >= TEXTURE_MIN
+    if ((r.betBluffSample + r.betMadeSample) >= TEXTURE_MIN
         && r.betBluffPct != null && r.betMadePct != null
         && Math.abs(r.betMadePct - r.betBluffPct) >= 20) {
       if (r.betMadePct > r.betBluffPct) {
         add(55, 'Bluff',
-          `Bets smaller when caught bluffing (${r.betBluffPct.toFixed(0)}% pot, ${r.betBluffCount} spots) `
-            + `than with a made hand (${r.betMadePct.toFixed(0)}%, ${r.betMadeCount} spots) — a small bet `
+          `Bets smaller when caught bluffing (${r.betBluffPct.toFixed(0)}% pot, ${r.betBluffSample} spots) `
+            + `than with a made hand (${r.betMadePct.toFixed(0)}%, ${r.betMadeSample} spots) — a small bet `
             + 'from them leans toward air. Call their small bets down lighter and give the big ones more respect.',
-          `You bet smaller bluffing (${r.betBluffPct.toFixed(0)}% pot, ${r.betBluffCount} spots) than with a `
-            + `made hand (${r.betMadePct.toFixed(0)}%, ${r.betMadeCount} spots) — a sharp opponent can read `
+          `You bet smaller bluffing (${r.betBluffPct.toFixed(0)}% pot, ${r.betBluffSample} spots) than with a `
+            + `made hand (${r.betMadePct.toFixed(0)}%, ${r.betMadeSample} spots) — a sharp opponent can read `
             + 'your size and fold only the bluffs. Match your bluff sizing to your value sizing.',
           'their small bet = air', 'match bluff/value sizing', ['facing'],
           thresholdEdge(r.betMadePct - r.betBluffPct, 20, 60));
       } else {
         add(55, 'Bluff',
-          `Bets BIGGER when caught bluffing (${r.betBluffPct.toFixed(0)}% pot, ${r.betBluffCount} spots) `
-            + `than with a made hand (${r.betMadePct.toFixed(0)}%, ${r.betMadeCount} spots) — backwards from `
+          `Bets BIGGER when caught bluffing (${r.betBluffPct.toFixed(0)}% pot, ${r.betBluffSample} spots) `
+            + `than with a made hand (${r.betMadePct.toFixed(0)}%, ${r.betMadeSample} spots) — backwards from `
             + 'the pool norm. Their overbet is more likely to be air than the nuts; their smaller bets are where the value is.',
-          `You bet BIGGER bluffing (${r.betBluffPct.toFixed(0)}% pot, ${r.betBluffCount} spots) than with a `
-            + `made hand (${r.betMadePct.toFixed(0)}%, ${r.betMadeCount} spots) — backwards, and exploitable `
+          `You bet BIGGER bluffing (${r.betBluffPct.toFixed(0)}% pot, ${r.betBluffSample} spots) than with a `
+            + `made hand (${r.betMadePct.toFixed(0)}%, ${r.betMadeSample} spots) — backwards, and exploitable `
             + 'the same way. Even out your sizing across both.',
           'their overbet = air', 'match bluff/value sizing', ['facing'],
           thresholdEdge(r.betBluffPct - r.betMadePct, 20, 60));
@@ -9408,6 +9405,22 @@
        panel is read mid-decision and a pair of equally weighted lines is two
        things to take in where there is time for one. Both declare their own
        colour — mandatory for a tph- element that holds text, see above. */
+    /* The sizing scale. One axis so the GAP between the medians is seen rather
+       than worked out from a column of figures. Every element declares its own
+       colour (the v0.18.2 trap), and the three poles are separated by hue AND
+       by the letter on the dot, so colour is never carrying identity alone. */
+    .tph-sz-track { position: relative; height: 20px; margin: 8px 0 6px;
+      background: #24242b !important; border-radius: 10px; }
+    .tph-sz-dot { position: absolute; top: 2px; width: 16px; height: 16px; margin-left: -8px;
+      border-radius: 50%; font-size: 9px; font-weight: 700; line-height: 16px; text-align: center;
+      color: #16161a !important; }
+    .tph-sz-b { background: #8fb8d8 !important; color: #8fb8d8; }
+    .tph-sz-d { background: #c8b88a !important; color: #c8b88a; }
+    .tph-sz-m { background: #ffd9a0 !important; color: #ffd9a0; }
+    .tph-sz-dot.tph-sz-b, .tph-sz-dot.tph-sz-d, .tph-sz-dot.tph-sz-m { color: #16161a !important; }
+    .tph-sz-legend { color: #b9c1c9 !important; font-size: 11px; margin-bottom: 3px; }
+    .tph-sz-read { color: #ffd9a0 !important; font-size: 11.5px; display: block; line-height: 1.45; }
+    .tph-sz-none { color: #98a2ac !important; font-size: 11.5px; display: block; line-height: 1.45; }
     /* The live sizing read. Its own colour like every tph- element that holds
        text (the v0.18.2 trap), and amber rather than the tip colours because
        it is a different KIND of claim: about the bet in front of you, not a
@@ -10593,6 +10606,66 @@
     };
   }
 
+  // Four rows of medians made you do the comparison yourself — reported as
+  // "hard to see it from the numbers alone", which is exactly right: the READ
+  // is the gap between two of them, and a gap is the one thing a column of
+  // figures cannot show. This puts all three on one axis so the separation is
+  // seen rather than computed, and states the conclusion underneath.
+  //
+  // The letters sit ON the dots and the figures live in the legend line below.
+  // Labelling the dots in place would collide exactly when the medians are
+  // close together, which is the case the picture most needs to render
+  // honestly — a player with no separation should LOOK like one.
+  //
+  // Not red/green, same rule as the deviation indicators: which hand they hold
+  // is not good news or bad news, it is information. Colour separates the
+  // three poles and the letter carries the identity, so neither is alone.
+  // isHero flips the voice, not the numbers. The Stats tab is the same panel
+  // for an opponent and for you (Settings -> Your own stats), and "their bet
+  // size tells you nothing" is nonsense about yourself — the same
+  // exploitText/leakText split buildTendencyEntries already makes.
+  function sizingScaleHtml(r, isHero) {
+    const poles = [
+      { k: 'B', label: 'bluff', v: r.betBluffPct, n: r.betBluffSample, cls: 'tph-sz-b' },
+      { k: 'D', label: 'draw', v: r.betDrawPct, n: r.betDrawSample, cls: 'tph-sz-d' },
+      { k: 'M', label: 'made', v: r.betMadePct, n: r.betMadeSample, cls: 'tph-sz-m' },
+    ].filter((p) => p.v != null);
+    if (!poles.length) return '';
+    // Headroom for an overbet, so a 300% shove median still lands on the track.
+    const max = Math.max(150, ...poles.map((p) => p.v)) * 1.05;
+    const dots = poles.map((p) => `<span class="tph-sz-dot ${p.cls}" `
+      + `style="left:${Math.max(0, Math.min(100, (p.v / max) * 100)).toFixed(1)}%" `
+      + `title="${p.label}: ${p.v.toFixed(0)}% of pot over ${p.n} spot${p.n === 1 ? '' : 's'}">${p.k}</span>`).join('');
+    const legend = poles.map((p) => `<span class="${p.cls}">${p.k}</span> ${p.label} `
+      + `<b>${p.v.toFixed(0)}%</b> <span class="tph-stat-norm">(${p.n})</span>`).join(' · ');
+
+    // The verdict, on the same bar the live read uses, so the Stats tab and
+    // the coach panel can never disagree about whether there is a tell.
+    let verdict = '';
+    if (r.betMadePct != null && r.betBluffPct != null
+        && r.betMadeSample >= SIZING_LIVE_MIN_POLE && r.betBluffSample >= SIZING_LIVE_MIN_POLE) {
+      const gap = r.betMadePct - r.betBluffPct;
+      verdict = Math.abs(gap) < SIZING_LIVE_MIN_GAP
+        ? (isHero
+          ? `<span class="tph-sz-none">No separation — your size gives nothing away (${Math.abs(gap).toFixed(0)}pp apart). This is the good outcome.</span>`
+          : `<span class="tph-sz-none">No separation — their bet size tells you nothing (${Math.abs(gap).toFixed(0)}pp apart).</span>`)
+        : (gap > 0
+          ? (isHero
+            ? `<span class="tph-sz-read"><b>You size up with a made hand.</b> ${gap.toFixed(0)}pp apart — anyone watching can fold to your big bets and call the small ones. Even your sizing out.</span>`
+            : `<span class="tph-sz-read"><b>Big bet = made hand.</b> ${gap.toFixed(0)}pp apart — fold to their big bets, call the small ones.</span>`)
+          : (isHero
+            ? `<span class="tph-sz-read"><b>You bet bigger when bluffing.</b> ${(-gap).toFixed(0)}pp apart — backwards, and readable. Match your bluff sizing to your value sizing.</span>`
+            : `<span class="tph-sz-read"><b>Reverse: bigger when bluffing.</b> ${(-gap).toFixed(0)}pp apart — their overbet is air more often than the nuts.</span>`));
+    } else {
+      verdict = `<span class="tph-sz-none">Not enough showdowns on both sides to call a tell yet.${
+        isHero ? ' Your own cards are only categorised when you show them down.' : ''}</span>`;
+    }
+
+    return '<tr class="tph-stat-head"><td colspan="3"><b>Bet sizing</b> — median % of pot by what they held</td></tr>'
+      + `<tr><td colspan="3"><div class="tph-sz-track">${dots}</div>`
+      + `<div class="tph-sz-legend">${legend}</div>${verdict}</td></tr>`;
+  }
+
   function statRow(label, rawValue, shrunkValue, key, recent) {
     const norm = key ? POOL_AVG[key] : null;
     const dev = deviation(shrunkValue, norm, key ? POOL_SPREAD[key] : null);
@@ -10789,25 +10862,16 @@
             <td class="tph-stat-v"><b>${r.medianBetPct != null ? r.medianBetPct.toFixed(0) + '%' : '—'}</b></td>
             <td class="tph-stat-n tph-stat-wrap"><span class="tph-stat-norm">of pot${szN ? ` · ${szN} bet${szN === 1 ? '' : 's'}` : ''}${szN && szN < BET_SIZE_MIN ? ', low' : ''}${szLifetime > szN ? ` · ${szLifetime} lifetime` : ''}</span></td>
           </tr>
-          <tr title="Median bet/raise as % of pot, split by what they actually had at showdown: DRAW = no made hand yet but a four-flush or an open/gutshot straight draw on the board; MADE = two pair or better already. Flop and turn only for draw — no draw left to hold on the river. From showdowns only, a floor on their range, same caveat as the Range tab.">
-            <td class="tph-stat-l">Size: draw/made</td>
-            <td class="tph-stat-v"><b>${fmtPct(r.betDrawPct)}</b> / <b>${fmtPct(r.betMadePct)}</b></td>
-            <td class="tph-stat-n"><span class="tph-stat-norm">${r.betDrawCount}d · ${r.betMadeCount}m${(r.betDrawCount + r.betMadeCount) < TEXTURE_MIN ? ', low' : ''}</span></td>
-          </tr>
-          <tr title="Median bet/raise as % of pot when they had NOTHING at showdown (worse than a pair, no draw either) vs when they had two pair+. A lone pair with no draw counts as neither and is excluded from both. From showdowns only, and the BLUFF side specifically is a floor biased low — a bluff good enough to win the pot never reaches a showdown to be counted here.">
-            <td class="tph-stat-l">Size: bluff/made</td>
-            <td class="tph-stat-v"><b>${fmtPct(r.betBluffPct)}</b> / <b>${fmtPct(r.betMadePct)}</b></td>
-            <td class="tph-stat-n"><span class="tph-stat-norm">${r.betBluffCount}b · ${r.betMadeCount}m${(r.betBluffCount + r.betMadeCount) < TEXTURE_MIN ? ', low' : ''}</span></td>
-          </tr>
-          <tr title="Of the times we saw their actual cards after a bet or raise, how often it was worse than a pair with no draw either — genuinely nothing. This is a FLOOR, not their true bluffing rate: a bluff good enough to take the pot uncontested never reaches showdown, so the real rate is at least this, and probably higher.">
+          ${sizingScaleHtml(r, isHeroRecord(p.xid))}
+          <tr title="Of the times we saw their actual cards after a bet or raise, how often it was worse than a pair with no draw either — genuinely nothing. A FLOOR, not their true bluffing rate: a bluff good enough to take the pot uncontested never reaches a showdown to be counted, so the real figure is at least this and probably higher.">
             <td class="tph-stat-l">Bluff freq</td>
             <td class="tph-stat-v"><b>${fmtPct(r.bluffRate)}</b></td>
-            <td class="tph-stat-n"><span class="tph-stat-norm">${r.bluffSample} spot${r.bluffSample === 1 ? '' : 's'}${r.bluffSample < TEXTURE_MIN ? ', low' : ''}</span></td>
+            <td class="tph-stat-n tph-stat-wrap"><span class="tph-stat-norm">${r.bluffSample} spot${r.bluffSample === 1 ? '' : 's'}${r.bluffSample < TEXTURE_MIN ? ', low' : ''} · floor</span></td>
           </tr>
           <tr title="How often they check a hand that's already two pair or better instead of betting it — the slowplay/trap rate. From showdowns only, so a small sample is normal; the count is shown beside the percentage for that reason.">
             <td class="tph-stat-l">Slowplay</td>
             <td class="tph-stat-v"><b>${fmtPct(r.trapRate)}</b></td>
-            <td class="tph-stat-n"><span class="tph-stat-norm">${r.trapSample} made-hand spot${r.trapSample === 1 ? '' : 's'}${r.trapSample < TEXTURE_MIN ? ', low' : ''}</span></td>
+            <td class="tph-stat-n"><span class="tph-stat-norm">${r.trapSample} spot${r.trapSample === 1 ? '' : 's'}${r.trapSample < TEXTURE_MIN ? ', low' : ''}</span></td>
           </tr>
           <tr><td colspan="3" class="tph-stat-legend">Bet size = median bet/raise as a share of the pot before it, over their last ${BET_SIZE_HISTORY_MAX} sized bets; 100% is pot-sized. A median rather than an average, so a single oversized all-in shove cannot skew it the way it used to.
             Tick = pool average (reference figures, not measured here).
@@ -12876,6 +12940,7 @@
       POOL_SPREAD,
       deviation,
       statRow,
+      sizingScaleHtml,
       plShort,
       isHeroRecord,
       playersSortValue,

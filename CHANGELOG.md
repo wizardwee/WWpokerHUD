@@ -9,6 +9,65 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.58.0
+
+The bet-sizing tells become a picture, and a count that had been overstating
+itself gets fixed. Reported directly: *"i also want to know the bluffing
+frequency, and bet tells in a more succint way. Its hard to see it from the
+numbers alone."*
+
+That is exactly right, and the reason is structural rather than cosmetic. The
+**read is the gap between two medians**, and a gap is the one thing a column of
+figures cannot show — four numeric rows (`Size: draw/made`, `Size: bluff/made`,
+`Bluff freq`, `Slowplay`) left the comparison to be done in your head every
+time. `sizingScaleHtml` puts bluff, draw and made on one axis so the separation
+is *seen*, and states the conclusion underneath: "Big bet = made hand. 84pp
+apart — fold to their big bets, call the small ones."
+
+The letters ride the dots and the figures sit in the legend below. Labelling the
+dots in place would collide exactly when the medians are close together, which
+is the case the picture most needs to render honestly: a player with no
+separation should *look* like one. Not red/green, same rule as the deviation
+indicators — which hand they are holding is information, not good or bad news —
+and hue separates the poles while the letter carries identity, so neither
+channel is doing the job alone.
+
+`isHero` flips the **voice, not the numbers**. The Stats tab is the same panel
+for an opponent and for you (Settings → Your own stats), and "their bet size
+tells you nothing" is nonsense about yourself. The same `exploitText`/`leakText`
+split `buildTendencyEntries` already makes. Your own record now reads "No
+separation — your size gives nothing away", which over 25/25/25 spots is the
+good outcome and worth saying so.
+
+### The bug this surfaced
+
+Building the picture made a pre-existing error visible, and it is v1.26.0's rule
+broken a second time: **gate on the number the figure is actually computed
+from, never a larger neighbouring count.**
+
+`betMadePct` is the median of a *bounded window* — `TEXTURE_BET_HISTORY_MAX` is
+25 — while `betMadeCount` is the *lifetime* count of made-hand bets. Printed
+together they claimed "113% pot, 140 spots" when 25 stored sizes produced that
+median. Worse, v1.57.0's brand-new `SIZING_LIVE_MIN_POLE` gate — added one
+version ago specifically to stop a single observation standing in for a median —
+was checking that same lifetime count, and passed a player holding exactly one
+stored size. A record migrated in v1.29.0 makes it sharper still: those get empty
+size arrays while keeping their lifetime counts.
+
+`computeRates` now exposes `betMadeSample` / `betBluffSample` / `betDrawSample`
+(the array lengths), and every median-adjacent count and gate reads those —
+the live read, the scale's legend and verdict, and the two standing sizing
+entries in `buildTendencyEntries`. The lifetime counts stay where they are
+correct: `bluffRate` genuinely is a rate over them.
+
+Both surfaces now agree figure for figure. `test/sizing-read.test.js` grew four
+assertions covering the window-versus-lifetime distinction, including a record
+with a large lifetime count and a single stored size.
+
+Bluff frequency and slowplay keep their own rows, and their floor caveat: a
+bluff good enough to take the pot uncontested never reaches a showdown to be
+counted, so the real rate is at least the figure shown.
+
 ## 1.57.0
 
 A live sizing read: what *this* bet looks like, rather than how often they bet.

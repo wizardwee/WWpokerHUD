@@ -175,6 +175,42 @@ function handWith(actions, street) {
   ok('and the read reports that pole\'s real count', r && r.bluffN === 2);
 }
 
+
+{
+  // The count beside a median must be the WINDOW the median came from, not the
+  // lifetime count of such bets. The size arrays are bounded, and a record
+  // migrated in v1.29.0 keeps its lifetime counts while its arrays start
+  // empty — so gating on the count lets one stored size stand in for a median.
+  const p = T.emptyPlayer('998', 'Capped');
+  p.hands = 400;
+  p.texture.madeSizes = [100, 100, 100];
+  p.texture.bluffSizes = [20];      // ONE stored size...
+  p.texture.madeBets = 90;          // ...against a large lifetime count
+  p.texture.bluffBets = 40;
+  T.STORE.players['998'] = p;
+  const h = handWith([{ x: '998', a: 'bet', amt: 1, s: 'flop', p: 95 }]);
+  ok('a big lifetime count cannot stand in for a thin median window',
+    T.liveSizingRead(h, '998') === null);
+
+  const r = T.computeRates(p);
+  ok('computeRates reports the median window separately from the lifetime count',
+    r.betBluffSample === 1 && r.betBluffCount === 40);
+  ok('and does the same for made-hand bets',
+    r.betMadeSample === 3 && r.betMadeCount === 90);
+}
+
+{
+  // The window is bounded, so a very long history still reports the window.
+  const p = T.emptyPlayer('997', 'Longrun');
+  p.hands = 5000;
+  for (let i = 0; i < 200; i++) T.pushTextureSize(p.texture.madeSizes, 100);
+  p.texture.madeBets = 200;
+  const r = T.computeRates(p);
+  ok('the reported sample never exceeds the stored window',
+    r.betMadeSample === T.TEXTURE_BET_HISTORY_MAX,
+    'got ' + r.betMadeSample + ' cap ' + T.TEXTURE_BET_HISTORY_MAX);
+}
+
 // --- the thresholds are pinned from both sides ---------------------------
 
 {

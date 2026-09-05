@@ -317,11 +317,28 @@
   .dsr-plan { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 10px; font-size: 13px; }
   .dsr-plan li::marker { color: var(--felt); font-weight: 700; }
   .dsr-detail { color: var(--ink-soft); font-size: 12.5px; }
-  .dsr-sizes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 10px; }
-  .dsr-size { background: var(--surface-2); border-radius: 9px; padding: 10px; text-align: center; }
-  .dsr-size .label { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); font-weight: 600; }
-  .dsr-size .value { font-family: "IBM Plex Mono", monospace; font-size: 20px; font-weight: 600; }
-  .dsr-size .foot { font-size: 10.5px; color: var(--muted); }
+  /* Sizing scale: three medians on one axis, so the GAP is seen rather than
+     worked out from three separate figures. Colour separates the poles and the
+     letter on the dot carries the identity, so neither is alone - and it is
+     not red/green, because which hand they hold is information, not good or
+     bad news. */
+  .sz-track {
+    position: relative; height: 26px; margin: 4px 0 20px; border-radius: 13px;
+    background: var(--surface-2); border: 1px solid var(--line);
+  }
+  .sz-dot {
+    position: absolute; top: 4px; width: 18px; height: 18px; margin-left: -9px; border-radius: 50%;
+    font-size: 10px; font-weight: 700; line-height: 18px; text-align: center; color: #16161a;
+    font-family: "IBM Plex Sans", sans-serif;
+  }
+  .sz-tick {
+    position: absolute; top: 100%; margin-top: 2px; transform: translateX(-50%);
+    font-size: 9.5px; color: var(--muted); font-family: "IBM Plex Mono", monospace;
+  }
+  .sz-key { display: inline-block; width: 15px; height: 15px; border-radius: 50%; color: #16161a;
+    font-size: 9.5px; font-weight: 700; line-height: 15px; text-align: center; vertical-align: middle; }
+  .sz-b { background: #8fb8d8; } .sz-d { background: #c8b88a; } .sz-m { background: #e0a93b; }
+  .sz-legend { font-size: 12px; color: var(--ink-soft); margin: 12px 0 8px; }
   .dsr-flag { font-size: 12.5px; color: var(--ink-soft); padding: 8px 10px; background: var(--surface-2); border-radius: 8px; }
   .dsr-flag.hot { background: var(--gold-soft); color: var(--gold); font-weight: 600; }
   .dsr-row { display: flex; justify-content: space-between; gap: 12px; font-size: 12.5px; padding-top: 10px; margin-top: 10px; border-top: 1px solid var(--line); }
@@ -784,13 +801,48 @@
     const made = medOf(t.madeSizes), bluff = medOf(t.bluffSizes), draw = medOf(t.drawSizes);
     const nMade = (t.madeSizes || []).length, nBluff = (t.bluffSizes || []).length, nDraw = (t.drawSizes || []).length;
     const slowN = (t.checkMade || 0) + (t.madeBets || 0);
+    // Bluff frequency is a share of every showdown-categorised bet, so it is
+    // gated on THAT total rather than on the bluff count alone - the v1.26.0
+    // rule, gate on the number the figure is computed from.
+    const betSample = (t.madeBets || 0) + (t.drawBets || 0) + (t.bluffBets || 0);
     return {
       made, bluff, draw, nMade, nBluff, nDraw,
       gap: (made != null && bluff != null) ? made - bluff : null,
       slowplay: slowN ? (100 * (t.checkMade || 0)) / slowN : null,
       slowN, checkMade: t.checkMade || 0, madeBets: t.madeBets || 0,
+      bluffRate: betSample ? (100 * (t.bluffBets || 0)) / betSample : null,
+      betSample,
       medianBet: medOf(p.betSizes), nBets: (p.betSizes || []).length,
     };
+  }
+
+  // The three medians on one axis. The read is the GAP between two of them,
+  // and a gap is the one thing three separate figures cannot show - which is
+  // why the dossier's three tiles were hard to read even though every number
+  // was right there. Letters ride the dots and the figures sit in the legend,
+  // so nothing collides exactly when the medians are close together, the case
+  // the picture most needs to render honestly.
+  function sizingScale(sz) {
+    const poles = [
+      { k: 'B', label: 'bluff', v: sz.bluff, n: sz.nBluff, cls: 'sz-b' },
+      { k: 'D', label: 'draw', v: sz.draw, n: sz.nDraw, cls: 'sz-d' },
+      { k: 'M', label: 'made', v: sz.made, n: sz.nMade, cls: 'sz-m' },
+    ].filter((x) => x.v != null);
+    if (!poles.length) return '';
+    const max = Math.max(150, ...poles.map((x) => x.v)) * 1.05;
+    const dots = poles.map((x) => '<span class="sz-dot ' + x.cls + '" style="left:'
+      + Math.max(0, Math.min(100, (x.v / max) * 100)).toFixed(1) + '%" title="' + x.label + ': '
+      + x.v.toFixed(0) + '% of pot over ' + x.n + ' spot' + (x.n === 1 ? '' : 's') + '">' + x.k + '</span>').join('');
+    const legend = poles.map((x) => '<span class="sz-key ' + x.cls + '">' + x.k + '</span> ' + x.label
+      + ' <b>' + x.v.toFixed(0) + '%</b> <span class="dsr-vs">(' + x.n + ')</span>').join(' &middot; ');
+    // The 0% tick would sit half off the left edge under a -50% transform, so
+    // the end ticks anchor to their own edge instead of centring on the mark.
+    const ticks = [0, 50, 100].filter((t) => t < max).map((t) => {
+      const at = (t / max) * 100;
+      const shift = t === 0 ? 'translateX(0)' : 'translateX(-50%)';
+      return '<span class="sz-tick" style="left:' + at.toFixed(1) + '%;transform:' + shift + '">' + t + '%</span>';
+    }).join('');
+    return '<div class="sz-track">' + ticks + dots + '</div><div class="sz-legend">' + legend + '</div>';
   }
 
   // Pool baselines for all of the above, so a player's number is always shown
@@ -1322,20 +1374,34 @@
       + 'A gap between these is the most directly exploitable thing in the store. Showdowns only, so a bluff '
       + 'that always worked never appears here.</div>';
     if (sz.nMade || sz.nBluff || sz.nDraw) {
-      h += '<div class="dsr-sizes">'
-        + dsrSize('Made hand', sz.made, sz.nMade)
-        + dsrSize('Draw', sz.draw, sz.nDraw)
-        + dsrSize('Bluff', sz.bluff, sz.nBluff)
-        + '</div>';
+      h += sizingScale(sz);
       if (sz.gap != null && sz.nMade >= SIZING_MIN_MADE && sz.nBluff >= SIZING_MIN_BLUFF) {
-        h += '<div class="dsr-flag ' + (Math.abs(sz.gap) >= SIZING_TELL_MIN_PP ? 'hot' : '') + '">'
-          + (Math.abs(sz.gap) >= SIZING_TELL_MIN_PP
-            ? (sz.gap > 0 ? 'Tell: ' + sz.gap.toFixed(0) + 'pp BIGGER with made hands.'
-              : 'Reverse tell: ' + (-sz.gap).toFixed(0) + 'pp bigger when bluffing.')
-            : 'No sizing tell - ' + Math.abs(sz.gap).toFixed(0) + 'pp apart, inside the noise.') + '</div>';
+        const tell = Math.abs(sz.gap) >= SIZING_TELL_MIN_PP;
+        h += '<div class="dsr-flag ' + (tell ? 'hot' : '') + '">'
+          + (tell
+            ? (sz.gap > 0
+              ? (isHero ? '<b>You size up with a made hand.</b> ' + sz.gap.toFixed(0)
+                  + 'pp apart - anyone watching can fold to your big bets and call the small ones.'
+                : '<b>Big bet = made hand.</b> ' + sz.gap.toFixed(0)
+                  + 'pp apart - fold to their big bets, call the small ones.')
+              : (isHero ? '<b>You bet bigger when bluffing.</b> ' + (-sz.gap).toFixed(0)
+                  + 'pp apart - backwards, and readable. Match your bluff sizing to your value sizing.'
+                : '<b>Reverse: bigger when bluffing.</b> ' + (-sz.gap).toFixed(0)
+                  + 'pp apart - their overbet is air more often than the nuts.'))
+            : (isHero ? 'No separation - your size gives nothing away (' + Math.abs(sz.gap).toFixed(0)
+                + 'pp apart). This is the good outcome.'
+              : 'No separation - their bet size tells you nothing (' + Math.abs(sz.gap).toFixed(0) + 'pp apart).'))
+          + '</div>';
       } else {
-        h += '<div class="dsr-flag">Not enough categorised bets yet for a tell (need '
+        h += '<div class="dsr-flag">Not enough categorised bets on both sides for a tell yet (need '
           + SIZING_MIN_MADE + ' made and ' + SIZING_MIN_BLUFF + ' bluffs).</div>';
+      }
+      if (sz.bluffRate != null) {
+        h += '<div class="dsr-row"><span>Caught with nothing after betting'
+          + '<br><span class="dsr-vs">a floor - a bluff that WINS never reaches a showdown to be counted, '
+          + 'so the real rate is at least this</span></span>'
+          + '<span class="num"><b>' + fmtPct1(sz.bluffRate) + '</b> of ' + sz.betSample
+          + ' bet' + (sz.betSample === 1 ? '' : 's') + '</span></div>';
       }
     } else {
       h += '<div class="hint">No showdown-categorised bets recorded.</div>';
@@ -1462,11 +1528,6 @@
     if (v == null || poolMean == null) return '';
     const d = v - poolMean;
     return (d >= 0 ? '+' : '') + d.toFixed(0) + 'pp vs pool';
-  }
-  function dsrSize(label, v, n) {
-    return '<div class="dsr-size"><div class="label">' + esc(label) + '</div>'
-      + '<div class="value">' + (v == null ? '-' : v.toFixed(0) + '%') + '</div>'
-      + '<div class="foot">' + (n ? 'n=' + n : 'no sample') + '</div></div>';
   }
 
   // ---------------------------------------------------------------------
