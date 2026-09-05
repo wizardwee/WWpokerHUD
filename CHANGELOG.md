@@ -9,6 +9,67 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.57.0
+
+A live sizing read: what *this* bet looks like, rather than how often they bet.
+Asked for after the standing sizing tell turned out to be computed correctly,
+tagged correctly, and still never surfacing.
+
+**The diagnosis came before the fix, and changed what the fix was.** The sizing
+entry in `buildTendencyEntries` was already tagged `when: ['facing']` and
+already collected the +60 relevance boost at exactly the right moment. It was
+simply outranked. Measured over the real tracked pool, `read their bet size`
+(gain 50) fires for 33 players and **leads for none of them** — it loses every
+tiebreak to reads carrying a higher constant. Raising its gain would have
+replaced the ladder's real judgement (postflop beats preflop against this pool)
+with an arbitrary one, which is the thing v1.51.0 explicitly declined to do. So
+this adds a different *kind* of line instead of a bigger number on the old one.
+
+`liveSizingRead()` takes the size they just chose and asks which of their own
+two showdown medians it sits nearer. Every other read in this file is a
+frequency — how often they do something. This one is about the bet in front of
+you, which is why it renders beside the pot-odds line rather than in the tip
+ladder, and why it can carry weight a standing tendency cannot.
+
+Nothing is recomputed. The size is the `p` that `logAction` already recorded on
+the action at the time (`betSizePctOf`, against the pot as it stood *before* the
+bet). Re-deriving it from the live pot would be a second calculation free to
+disagree with the one banked in the history — the same reasoning that has
+`pushLedgerEntry` reuse `applyHandResults`' own `heroDelta`.
+
+Nearest-pole, so a **reverse tell** (bigger when bluffing) needs no special
+case — the poles carry the direction. That is pinned in both directions by
+`test/sizing-read.test.js`, because it is the case it matters most to get right:
+against a player who bets bigger with air, a backwards read is worse than none.
+
+**It stays silent in four separate cases, and they are different questions:** no
+sized bet on this street, too few categorised showdowns to have two medians, the
+medians too close together to place a bet between, and the bet sitting too near
+the midpoint. The last is v1.32.0's "admits when it can't tell" rule — in a panel
+read mid-decision, a coin flip dressed as a read is worse than one fewer line.
+
+`SIZING_LIVE_MIN_POLE` (2) gates **each pole**, not the two summed. `TEXTURE_MIN`
+gates the sum, which is the right bar for the standing tell but the wrong one
+here: it let a player with seven made-hand bets and a single bluff through, with
+half the comparison resting on one observation dressed as a median. Over the real
+store that is the difference between 21 "readable" opponents and 8 genuinely
+readable ones. Same lesson as v1.26.0 — gate on the number the figure is actually
+computed from, never a larger neighbouring count — applied to the pole rather
+than the pair.
+
+The bluff pole is a floor biased low: a bluff good enough to take the pot never
+reaches a showdown to be sized. So the two verdicts are worded with deliberately
+different force — "looks like value" states it, "leans bluff" hedges and says
+why. Same asymmetry `bluffRate` already carries.
+
+`test/sizing-read.test.js` drives the real exported functions throughout, and was
+checked for vacuity by mutation: flipping the nearest-pole comparison fails five
+assertions, and removing the street filter fails the boundary test. Worth
+recording that a third mutation — `break` to `continue` at the street boundary —
+changed nothing, because the street *test* is what excludes an earlier street's
+bet and the `break` is only an early exit. The code comment was corrected to say
+that rather than claiming more for it.
+
 ## 1.56.0
 
 Settings collapses to its headings. Reported directly: *"the page is too long

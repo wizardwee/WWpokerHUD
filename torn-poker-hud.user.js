@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.56.0
+// @version      1.57.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,47 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.57.0 - A live sizing read: what THIS bet looks like, not how often they
+ *          bet. Asked for after the standing tell was found to be computed,
+ *          correctly tagged, and still never surfacing.
+ *            - Diagnosis first: the sizing entry was already tagged
+ *              when:['facing'] and already got the +60 relevance boost at the
+ *              right moment. It was outranked. Measured over the real pool,
+ *              'read their bet size' (gain 50) fires for 33 players and LEADS
+ *              for none — it loses every tiebreak to reads with a higher
+ *              constant. Raising its gain would have replaced the ladder's
+ *              judgement with an arbitrary one, so the fix is a different
+ *              KIND of line rather than a bigger number on the old one.
+ *            - liveSizingRead() takes the size they just chose and asks which
+ *              of their own two showdown medians it sits nearer. Every other
+ *              read in this file is a frequency; this one is about the bet in
+ *              front of you, which is why it sits beside the pot-odds line
+ *              rather than in the tip ladder.
+ *            - Nothing is recomputed. The size is the `p` logAction already
+ *              recorded on the action (betSizePctOf, against the pot BEFORE
+ *              the bet); re-deriving it from the live pot would be a second
+ *              calculation free to disagree with the banked one.
+ *            - Nearest-pole, so a REVERSE tell (bigger when bluffing) needs no
+ *              special case: the poles carry the direction. Pinned in both
+ *              directions by test/sizing-read.test.js, which is the case it
+ *              matters most to get right.
+ *            - Silent in four separate cases, and they are different
+ *              questions: no sized bet this street, too few categorised
+ *              showdowns, medians too close to place a bet between, and the
+ *              bet too near the midpoint. That last is the v1.32.0 "admits
+ *              when it can't tell" rule — a coin flip dressed as a read is
+ *              worse than one fewer line in a panel read mid-decision.
+ *            - SIZING_LIVE_MIN_POLE (2) gates EACH pole, not the two summed.
+ *              TEXTURE_MIN gates the sum, which let seven made-hand bets and
+ *              a single bluff through with half the comparison resting on one
+ *              observation dressed as a median. Over the real store that is
+ *              21 "readable" opponents against 8 genuinely readable ones —
+ *              v1.26.0's lesson applied to the pole rather than the pair.
+ *            - The BLUFF pole is a floor biased low (a bluff that works never
+ *              reaches a showdown to be sized), so the two verdicts are
+ *              deliberately worded with different force: "looks like value"
+ *              states it, "leans bluff" hedges and says why.
  *
  * 1.56.0 - Settings collapses to its headings. Reported directly: "the page
  *          is too long with a lot of descriptions. i want each of this to be
@@ -108,31 +149,6 @@
  *              reset clears, or the running-total anchor each fails a
  *              specific assertion, not the whole file.
  *
- * 1.54.0 - The player Report tab and the pool-tendencies footer get the same
- *          three-route export v1.53.0 gave History and the hand log. Asked
- *          directly: "where does the analysis of pool averages or players
- *          profile exist? can we export that out too?"
- *            - Both were still on the pre-v1.53.0 path: an off-screen
- *              copyText() fallback (the same iOS selection failure History
- *              hit) and, on pool tendencies, the same overclaiming
- *              "Sent ✓" downloadTextFile result.
- *            - Both now render exportActionsHtml/wireExportActions — Copy
- *              (against a visible textarea), Save/share, and Upload to
- *              Gist + Email link, identical to History and Settings. One
- *              helper, four call sites now, so a future fix lands in all
- *              of them at once.
- *            - No new data or analysis — buildReport/buildReportSections
- *              (per-player) and poolTendencyExport/observedPoolAverages
- *              (pool-wide) already existed and already had SOME export
- *              path; this closes the gap between "has a button" and
- *              "the button works on this device."
- *            - 8 new assertions on exportActionsHtml's markup shape in
- *              test/clipboard-export.test.js. wireExportActions' click
- *              handlers run against a real DOM and are not simulated by
- *              the class-matching test stub — same limitation the stub
- *              documents for itself — so this checks the shape a renamed
- *              class would silently break instead.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -194,7 +210,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.56.0';
+  const HUD_VERSION = '1.57.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -7834,6 +7850,83 @@
     return hand.playersIn.has(hand.lastAggressor) ? hand.lastAggressor : null;
   }
 
+  // --- Live sizing read ----------------------------------------------------
+  //
+  // Every other read in this file is a FREQUENCY — how often they do a thing.
+  // This one is about the bet in front of you: it takes the size they just
+  // chose and asks which of their own two showdown medians it sits nearer.
+  // That is why it belongs beside the pot-odds line rather than in the tip
+  // ladder, and why it can carry weight a standing tendency cannot.
+  //
+  // Nothing here is recomputed. The size is the `p` that logAction already
+  // recorded on the action at the time (betSizePctOf, against the pot as it
+  // stood BEFORE the bet); re-deriving it from the live pot would be a second
+  // calculation that could disagree with the one banked in the history.
+  const SIZING_LIVE_MIN_GAP = 20;   // pp between the medians before a bet can be placed between them
+  const SIZING_LIVE_MARGIN = 0.25;  // share of the half-gap a bet must clear to be called either way
+  // Minimum observations on EACH pole, not on the two summed.
+  //
+  // TEXTURE_MIN gates the SUM, which is the right bar for the standing tell
+  // but the wrong one here: a player with seven made-hand bets and a single
+  // bluff clears it while one pole of the comparison is a lone observation
+  // dressed as a median. Over the real store that is the difference between
+  // 21 "readable" opponents and 8 genuinely readable ones. Same lesson as
+  // v1.26.0 — gate on the number the figure is actually computed from, never
+  // a larger neighbouring count.
+  const SIZING_LIVE_MIN_POLE = 2;
+
+  // The pot-relative size of a player's most recent aggressive action on the
+  // CURRENT street. A bet from a previous street is a different decision about
+  // a different pot, so it must never be read as the size being faced now —
+  // that exclusion is the street test itself; the `break` is only an early
+  // exit, since actions are appended in order and everything before the first
+  // off-street action is off-street too.
+  function lastSizedBetPct(hand, xid) {
+    if (!hand || !xid || !Array.isArray(hand.actions)) return null;
+    for (let i = hand.actions.length - 1; i >= 0; i--) {
+      const a = hand.actions[i];
+      if (a.s !== hand.street) break;
+      if (String(a.x) !== String(xid)) continue;
+      if (a.a === 'bet' || a.a === 'raise' || a.a === 'all-in') {
+        return typeof a.p === 'number' ? a.p : null;
+      }
+    }
+    return null;
+  }
+
+  // Which side of their own sizing this particular bet falls on, or null when
+  // there is nothing honest to say.
+  //
+  // Silent in three separate cases, and they are different questions: no sized
+  // bet to read, not enough categorised showdowns to have two medians, and the
+  // medians too close together (or the bet too near the midpoint) to place it.
+  // The last one is the "admits when it can't tell" case — in a panel read
+  // mid-decision, a coin flip dressed as a read is worse than one fewer line.
+  function liveSizingRead(hand, xid) {
+    const p = xid && STORE.players[String(xid)];
+    if (!p) return null;
+    const pct = lastSizedBetPct(hand, xid);
+    if (pct == null) return null;
+    const r = computeRates(p);
+    if (r.betMadePct == null || r.betBluffPct == null) return null;
+    if ((r.betMadeCount + r.betBluffCount) < TEXTURE_MIN) return null;
+    if (r.betMadeCount < SIZING_LIVE_MIN_POLE || r.betBluffCount < SIZING_LIVE_MIN_POLE) return null;
+    const gap = r.betMadePct - r.betBluffPct;
+    if (Math.abs(gap) < SIZING_LIVE_MIN_GAP) return null;
+    const mid = (r.betMadePct + r.betBluffPct) / 2;
+    const half = Math.abs(gap) / 2;
+    if (Math.abs(pct - mid) < half * SIZING_LIVE_MARGIN) return null;
+    // Nearest pole, which handles a REVERSE tell (bigger when bluffing) with
+    // no special case: the poles carry the direction, so "nearer the made
+    // median" is the value read whichever side of the bluff median it sits on.
+    const looksMade = Math.abs(pct - r.betMadePct) < Math.abs(pct - r.betBluffPct);
+    return {
+      pct, gap, looksMade,
+      made: r.betMadePct, bluff: r.betBluffPct,
+      madeN: r.betMadeCount, bluffN: r.betBluffCount,
+    };
+  }
+
   function buildCoachAdvice() {
     if (!currentHand) return null;
     const hand = currentHand;
@@ -8001,6 +8094,27 @@
     } else if (betFacing > 0) {
       const need = (100 * betFacing) / (hand.pot + betFacing);
       out.push(`Need <b>~${need.toFixed(0)}%</b> to continue.`);
+    }
+
+    // Only while actually facing the bet. Once hero has called there is no
+    // decision left for it to inform, and the line would just be describing
+    // history.
+    if (lead && lead.facing) {
+      const szr = liveSizingRead(hand, villainXid);
+      if (szr) {
+        // The BLUFF median is a floor biased low — it can only be built from
+        // bluffs that got called all the way to showdown, so a bluff that
+        // worked never contributed a size to it. That makes "looks like value"
+        // the safer half of this read and "looks like air" the one to hold
+        // more loosely, which is why the two are worded with different force.
+        out.push(`<span class="tph-sizing-read">📏 <b>${escapeHtml(playerDisplayName(villainXid))}</b> bet `
+          + `<b>${szr.pct}%</b> pot — ${szr.looksMade
+            ? `close to their <b>made-hand</b> size (${szr.made.toFixed(0)}%, ${szr.madeN} spot${szr.madeN === 1 ? '' : 's'}) `
+              + `vs ${szr.bluff.toFixed(0)}% bluffing. <b>Looks like value.</b>`
+            : `close to their <b>bluffing</b> size (${szr.bluff.toFixed(0)}%, ${szr.bluffN} spot${szr.bluffN === 1 ? '' : 's'}) `
+              + `vs ${szr.made.toFixed(0)}% with a made hand — leans bluff, but a bluff that WORKS never `
+              + 'reaches showdown to be sized here.'}</span>`);
+      }
     }
 
     // TWO adjustments from the same synthesis the Exploit tab shows in full,
@@ -9294,6 +9408,13 @@
        panel is read mid-decision and a pair of equally weighted lines is two
        things to take in where there is time for one. Both declare their own
        colour — mandatory for a tph- element that holds text, see above. */
+    /* The live sizing read. Its own colour like every tph- element that holds
+       text (the v0.18.2 trap), and amber rather than the tip colours because
+       it is a different KIND of claim: about the bet in front of you, not a
+       standing tendency. Not red/green — this says which hand they are more
+       likely holding, not whether that is good news. */
+    .tph-sizing-read { color: #ffd9a0 !important; display: block; font-size: 11.5px;
+      line-height: 1.45; margin: 2px 0; }
     .tph-tip-lead { color: #e6ebf0 !important; display: block; }
     .tph-tip-second { color: #98a2ac !important; display: block; font-size: 11px; }
     /* background/color pinned: we inject into Torn's page, so an inherited or
@@ -12670,6 +12791,11 @@
       dropStaleHeroGhost,
       streetLeader,
       liveAggressor,
+      lastSizedBetPct,
+      liveSizingRead,
+      SIZING_LIVE_MIN_GAP,
+      SIZING_LIVE_MARGIN,
+      SIZING_LIVE_MIN_POLE,
       currentExploitTips,
       spreadEdge,
       thresholdEdge,
