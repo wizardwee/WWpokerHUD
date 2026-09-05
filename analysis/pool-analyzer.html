@@ -1004,6 +1004,11 @@
     { key: 'pfr', w: 0.4, den: 'hands', hi: 'raises a lot preflop', lo: 'passive preflop - attack their limps and blinds' },
     { key: 'threeBet', w: 0.3, den: 'hands', hi: '3-bets often - their 3-bet is wider than it looks', lo: 'their 3-bet is the nuts' },
   ];
+  // Weights for the two behavioural reads. The sizing tell outweighs every
+  // frequency stat because it is the only one that tells you what they are
+  // holding right now rather than how often they do something.
+  const TARGET_SIZING_W = 1.1;
+  const TARGET_SLOWPLAY_W = 0.6;
   const TARGET_CONF_K = 15;   // opportunities at which a stat carries half weight
   const TARGET_Z_CAP = 3;     // beyond 3 pool-SDs, more distance buys no more score
   const TARGET_MIN_HANDS = 25;
@@ -1042,6 +1047,41 @@
           lever: z > 0 ? s.hi : s.lo,
         });
       });
+      // Behavioural reads score alongside the frequency stats rather than
+      // living only inside a dossier. A sizing tell is not a rate with a pool
+      // mean and an SD, so it cannot be z-scored - it is scored on how far
+      // past the "worth calling a tell" bar the gap is, damped by the THINNER
+      // of its two samples, the same confidence rule the dossier ranks it on.
+      const sz = sizingOf(p);
+      if (sz.gap != null && sz.nMade >= SIZING_MIN_MADE && sz.nBluff >= SIZING_MIN_BLUFF) {
+        const nMin = Math.min(sz.nMade, sz.nBluff);
+        const conf = nMin / (nMin + 6);
+        const mag = Math.min(Math.abs(sz.gap) / SIZING_TELL_MIN_PP, TARGET_Z_CAP);
+        const contrib = TARGET_SIZING_W * mag * conf;
+        score += contrib;
+        parts.push({
+          key: 'sizingTell', label: 'Bet-size tell', val: sz.made, poolMean: sz.bluff,
+          diff: sz.gap, den: nMin, conf, contrib, custom: true,
+          detail: 'made ' + sz.made.toFixed(0) + '% pot (n=' + sz.nMade + ') vs bluff '
+            + sz.bluff.toFixed(0) + '% (n=' + sz.nBluff + ')',
+          lever: sz.gap > 0 ? 'big bet = real hand, small = bluff' : 'they bet BIGGER when bluffing',
+        });
+      }
+      if (sz.slowplay != null && sz.slowN >= SLOWPLAY_MIN_N && M.poolTex.slowplay != null) {
+        const d = sz.slowplay - M.poolTex.slowplay;
+        if (Math.abs(d) >= 15) {
+          const conf = sz.slowN / (sz.slowN + TARGET_CONF_K);
+          const contrib = TARGET_SLOWPLAY_W * Math.min(Math.abs(d) / 15, TARGET_Z_CAP) * conf;
+          score += contrib;
+          parts.push({
+            key: 'slowplay', label: 'Slowplay', val: sz.slowplay, poolMean: M.poolTex.slowplay,
+            diff: d, den: sz.slowN, conf, contrib, custom: true,
+            detail: 'checks a made hand ' + sz.slowplay.toFixed(0) + '% vs pool '
+              + M.poolTex.slowplay.toFixed(0) + '% (n=' + sz.slowN + ')',
+            lever: d > 0 ? 'their check is a trap - do not auto-stab' : 'their check means they missed',
+          });
+        }
+      }
       parts.sort((a, b) => b.contrib - a.contrib);
       const bb100 = p.hands ? (100 * (p.plBBEst || 0)) / p.hands : null;
       const volume = (p.hands || 0) / ((p.hands || 0) + TARGET_VOLUME_K);
@@ -1507,11 +1547,13 @@
       + '<th class="num">Hands</th><th class="num">Your bb/100</th><th>Biggest leaks vs pool</th>'
       + '<th class="num">Last seen</th></tr></thead><tbody>';
     rows.forEach((x, i) => {
-      const leaks = x.parts.slice(0, 3).map((pt) =>
-        '<div class="tg-leak"><b>' + esc(pt.label) + '</b> ' + fmtPct1(pt.val)
-        + ' <span class="tg-delta">(' + (pt.diff >= 0 ? '+' : '') + pt.diff.toFixed(0) + 'pp vs pool '
-        + fmtPct1(pt.poolMean) + ', n=' + fmtInt(pt.den) + ')</span><br><span class="tg-lever">'
-        + esc(pt.lever) + '</span></div>').join('');
+      const leaks = x.parts.slice(0, 3).map((pt) => pt.custom
+        ? '<div class="tg-leak"><b>' + esc(pt.label) + '</b> <span class="tg-delta">'
+          + esc(pt.detail) + '</span><br><span class="tg-lever">' + esc(pt.lever) + '</span></div>'
+        : '<div class="tg-leak"><b>' + esc(pt.label) + '</b> ' + fmtPct1(pt.val)
+          + ' <span class="tg-delta">(' + (pt.diff >= 0 ? '+' : '') + pt.diff.toFixed(0) + 'pp vs pool '
+          + fmtPct1(pt.poolMean) + ', n=' + fmtInt(pt.den) + ')</span><br><span class="tg-lever">'
+          + esc(pt.lever) + '</span></div>').join('');
       const thin = (x.p.hands || 0) < BB100_THIN_HANDS;
       html += '<tr><td class="num">' + (i + 1) + '</td>'
         + '<td class="clickable" data-xid="' + esc(x.p.xid) + '">' + esc(x.p.name) + '</td>'
