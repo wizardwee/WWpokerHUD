@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.58.0
+// @version      1.59.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,47 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.59.0 - The seat badge gains a bet-size tell and a bluff figure, loses its
+ *          capitals, and hero's shifts right. All four asked for directly.
+ *            - 📏 marks a player whose bet SIZE is readable. Affordable for
+ *              the same reason the hospital glyphs are: it is RARE. Only 8 of
+ *              465 qualifying opponents in a real store have one (1.7%), so
+ *              it is a decisive mark on the odd seat rather than decoration
+ *              on every seat — the test the comment above the hospital badge
+ *              already sets ("most players are attackable, so a target on
+ *              nearly every seat is noise").
+ *            - sizingTellOf() is that gate, split out of liveSizingRead so
+ *              the badge and the coach cannot disagree about whether a tell
+ *              exists. It takes the seat's already-computed rates so the 4s
+ *              badge loop does not pay for a second computeRates per seat.
+ *              The badge says a tell EXISTS; the coach says which way the
+ *              moment they bet — the same split the blockers already use.
+ *            - b19 is the bluff frequency, and it is shown only when notably
+ *              HIGH (>= BADGE_BLUFF_MIN_PCT, 20%). Measured first, and the
+ *              measurement changed the design: over 186 readable opponents
+ *              the pool's bluff rate is median 0%, mean 4.1%, p90 17%. Shown
+ *              unconditionally it would have printed "b0" on 40% of seats.
+ *              At 20% it lands on ~2% of them.
+ *            - ONE-SIDED on purpose. A low measured rate is ambiguous in a
+ *              way a high one is not — it can mean they rarely bluff, or that
+ *              they bluff constantly and it keeps working, since a bluff that
+ *              takes the pot never reaches a showdown to be counted. Only the
+ *              high side is safe to act on, so only the high side gets a mark.
+ *            - V/P/A -> v/p/a. At 10px the capitals sit at the same height as
+ *              the digits and the groups run together; the lower case have
+ *              descenders and a smaller x-height, so they break the string up
+ *              without costing a pixel.
+ *            - SELF_BADGE_RIGHT_NUDGE_PX 60 -> 78, three character widths at
+ *              the badge font. Same standing caveat as every other nudge: a
+ *              guess informed by the last report, not a fact until the next.
+ *            - Width, measured in a real browser against the 118px cap rather
+ *              than estimated: a typical seat carrying BOTH new marks renders
+ *              93px and fits. The fully-loaded worst case (role chip + 🤮 +
+ *              🔥 + 📏 + three-digit everything) is 174px and clips — but it
+ *              measured 144px and clipped BEFORE this change too, so the
+ *              overflow is pre-existing rather than introduced. badgeStats:
+ *              false remains the escape hatch.
  *
  * 1.58.0 - The bet-sizing tells become a picture, and a count that was
  *          overstating itself gets fixed. Reported directly: "i also want to
@@ -99,43 +140,6 @@
  *              deliberately worded with different force: "looks like value"
  *              states it, "leans bluff" hedges and says why.
  *
- * 1.56.0 - Settings collapses to its headings. Reported directly: "the page
- *          is too long with a lot of descriptions. i want each of this to be
- *          hideable and default to hide mode."
- *            - Every <h4> becomes a tappable heading and everything under it
- *              collapses, closed on every fresh open. The explanations stay
- *              exactly where they were, one tap away — they are needed once
- *              and then never again, which is what made the panel long
- *              rather than what made it useful.
- *            - Done by walking the mounted panel in wireSettingsPanel rather
- *              than wrapping fifteen sections in the template. The markup
- *              stays as it reads, and a section added later is collapsible
- *              without anyone remembering to wrap it — the same reason
- *              renderPanel exists rather than three hand-written builders.
- *              Nodes are re-parented, not replaced, so every handler below
- *              still finds its control by class, and pinTextColor (which runs
- *              after wire) still walks the moved content.
- *            - The open set is module-level and NOT persisted, which is the
- *              load-bearing detail: six paths in wireSettingsPanel re-render
- *              the whole panel (importing a backup, the two resets, toggling
- *              the features that change what the panel shows), and a section
- *              that slammed shut every time you ticked a checkbox inside it
- *              would be worse than no collapsing at all. Cleared when the
- *              panel closes — including the two paths that leave it for the
- *              stats and players panels — so "default to hidden" holds.
- *            - .tph-set-h declares its own colour, or Torn's bare rules
- *              render it dark-on-dark (the v0.18.2 trap). The chevron is a
- *              ::after pseudo-element so the heading TEXT stays exactly what
- *              the open-set keys on; a glyph in the markup would make the key
- *              drift with the arrow.
- *            - The harness DOM has no tag selectors, nextSibling or
- *              insertBefore, so the collapser safely no-ops there and the
- *              suite cannot exercise it. Verified instead against a real
- *              browser DOM: correct grouping per section, collapsed by
- *              default, the username field above the first heading still
- *              visible, controls still resolving by class after re-parenting,
- *              and a remembered section reopening across a re-render.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -197,7 +201,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.58.0';
+  const HUD_VERSION = '1.59.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -7891,6 +7895,29 @@
     return null;
   }
 
+  // Does this player have a readable sizing tell AT ALL — independent of any
+  // bet being in front of you right now.
+  //
+  // Split out of liveSizingRead so the seat badge and the coach cannot
+  // disagree about whether a tell exists: one gate, two renderings, the same
+  // discipline buildReportSections uses for the report.
+  // `rates` is optional and exists purely so the badge loop, which has already
+  // computed them for this seat, does not pay for a second pass every 4s
+  // across every seat at the table.
+  function sizingTellOf(p, rates) {
+    if (!p) return null;
+    const r = rates || computeRates(p);
+    if (r.betMadePct == null || r.betBluffPct == null) return null;
+    if ((r.betMadeCount + r.betBluffCount) < TEXTURE_MIN) return null;
+    if (r.betMadeSample < SIZING_LIVE_MIN_POLE || r.betBluffSample < SIZING_LIVE_MIN_POLE) return null;
+    const gap = r.betMadePct - r.betBluffPct;
+    if (Math.abs(gap) < SIZING_LIVE_MIN_GAP) return null;
+    return {
+      gap, made: r.betMadePct, bluff: r.betBluffPct,
+      madeN: r.betMadeSample, bluffN: r.betBluffSample,
+    };
+  }
+
   // Which side of their own sizing this particular bet falls on, or null when
   // there is nothing honest to say.
   //
@@ -7904,24 +7931,17 @@
     if (!p) return null;
     const pct = lastSizedBetPct(hand, xid);
     if (pct == null) return null;
-    const r = computeRates(p);
-    if (r.betMadePct == null || r.betBluffPct == null) return null;
-    if ((r.betMadeCount + r.betBluffCount) < TEXTURE_MIN) return null;
-    if (r.betMadeSample < SIZING_LIVE_MIN_POLE || r.betBluffSample < SIZING_LIVE_MIN_POLE) return null;
-    const gap = r.betMadePct - r.betBluffPct;
-    if (Math.abs(gap) < SIZING_LIVE_MIN_GAP) return null;
-    const mid = (r.betMadePct + r.betBluffPct) / 2;
+    const tell = sizingTellOf(p);
+    if (!tell) return null;
+    const gap = tell.gap;
+    const mid = (tell.made + tell.bluff) / 2;
     const half = Math.abs(gap) / 2;
     if (Math.abs(pct - mid) < half * SIZING_LIVE_MARGIN) return null;
     // Nearest pole, which handles a REVERSE tell (bigger when bluffing) with
     // no special case: the poles carry the direction, so "nearer the made
     // median" is the value read whichever side of the bluff median it sits on.
-    const looksMade = Math.abs(pct - r.betMadePct) < Math.abs(pct - r.betBluffPct);
-    return {
-      pct, gap, looksMade,
-      made: r.betMadePct, bluff: r.betBluffPct,
-      madeN: r.betMadeSample, bluffN: r.betBluffSample,
-    };
+    const looksMade = Math.abs(pct - tell.made) < Math.abs(pct - tell.bluff);
+    return { pct, gap, looksMade, made: tell.made, bluff: tell.bluff, madeN: tell.madeN, bluffN: tell.bluffN };
   }
 
   function buildCoachAdvice() {
@@ -9242,7 +9262,7 @@
     /* Emoji render wider than the 10px text around them, so they are pulled
        down a size and given the minimum gap that still keeps 🤮🔥 apart. */
     .tph-badge .tph-badge-tilt, .tph-badge .tph-badge-heat, .tph-badge .tph-badge-affil,
-    .tph-badge .tph-badge-hosp {
+    .tph-badge .tph-badge-hosp, .tph-badge .tph-badge-size {
       margin-right: 1px; font-size: 9px; }
     /* No colour declared here, same as -tilt/-heat above: this is emoji-only
        content and pinTextColor never walks badges (only .tph-panel content),
@@ -9947,7 +9967,25 @@
   // (v1.14.0, "cover the name and nothing else") once that half-line still
   // left it floating over empty felt above the name rather than on it.
   const SELF_BADGE_DOWN_NUDGE_PX = 1.5 * BADGE_HEIGHT_PX;
-  const SELF_BADGE_RIGHT_NUDGE_PX = 60;
+  // Nudged right again on report. 60 -> 78: three character widths at the
+  // badge's 10px font, which is what "3 spaces to the right" came to.
+  const SELF_BADGE_RIGHT_NUDGE_PX = 78;
+
+  // How high a bluff rate has to be before it earns a place on the badge.
+  //
+  // MEASURED, not borrowed, same discipline as the v1.11.0 POOL_AVG
+  // correction: over 186 readable opponents in a real store the pool's bluff
+  // rate is median 0%, mean 4.1%, p90 17%. So printing it unconditionally
+  // would put "b0" on 40% of seats — the exact mistake the hospital badge
+  // comment warns about ("most players are attackable, so a target on nearly
+  // every seat is noise"). At 20% it lands on roughly 2% of seats, the same
+  // rarity as a blocker glyph, and every appearance is a real read.
+  //
+  // ONE-SIDED on purpose. A LOW measured rate is ambiguous in a way a high one
+  // is not: it can mean they rarely bluff, or that they bluff plenty and it
+  // keeps working, because a bluff that takes the pot never reaches a
+  // showdown to be counted. Only the high side is safe to act on.
+  const BADGE_BLUFF_MIN_PCT = 20;
 
   // One place each, so the badge tooltip, the players list, the Stats tab and
   // the coach all describe these the same way.
@@ -10316,6 +10354,13 @@
       // and the badge is width-constrained before it is
       // information-constrained. Absence means "nothing known to be blocking";
       // the panel is where that gets stated properly, one tap away.
+      // A readable bet-size tell, and a notably high bluff rate. Both are rare
+      // by construction (about 2% of seats each), which is what makes them
+      // affordable on an element that is width-constrained before it is
+      // information-constrained.
+      const sizeTell = player ? sizingTellOf(player, r) : null;
+      const bluffy = player && r.bluffRate != null && r.bluffSample >= TEXTURE_MIN
+        && r.bluffRate >= BADGE_BLUFF_MIN_PCT ? r : null;
       const hosp = !isSelf ? targetStatusFor(xid) : null;
       const readiness = hosp ? attackReadiness(hosp) : null;
       const blockedBadge = readiness && readiness.blocked ? readiness : null;
@@ -10352,9 +10397,18 @@
       // still won't fit — Settings → "Numbers on seat labels". Type, role and
       // the state emoji survive, because those are the read; V/P/A are the
       // evidence for it and are one tap away in the Stats tab.
+      // Lower case: at 10px the capitals sit at the same height as the digits
+      // and the groups run together, while v/p/a have descenders and a smaller
+      // x-height that break the string up without costing a pixel.
+      //
+      // b is appended only for a notably high bluffer, so the fourth group is
+      // almost never present — the badge is capped at 118px with overflow
+      // hidden, and a group that pushed past that would be silently clipped
+      // rather than shown.
       const statsHtml = STORE.settings.badgeStats === false ? ''
-        : `<span class="tph-badge-dim">V${badgePct(shown.vpip)}`
-          + `P${badgePct(shown.pfr)}A${badgePct(r.afq)}</span>`;
+        : `<span class="tph-badge-dim">v${badgePct(shown.vpip)}`
+          + `p${badgePct(shown.pfr)}a${badgePct(r.afq)}`
+          + `${bluffy ? `b${badgePct(bluffy.bluffRate)}` : ''}</span>`;
       // Appended outside the hands===0 branch: a faction/marriage match is a
       // real read even before a single hand has been tracked on this player.
       const affilHtml = affil.flags ? `<span class="tph-badge-affil">${affil.flags}</span>` : '';
@@ -10364,12 +10418,14 @@
         : roleHtml
           + hospHtml
           + `${tilt ? '<span class="tph-badge-tilt">🤮</span>' : ''}`
-          + `${heat ? '<span class="tph-badge-heat">🔥</span>' : ''}<b>${type}</b>`
+          + `${heat ? '<span class="tph-badge-heat">🔥</span>' : ''}`
+          + `${sizeTell ? '<span class="tph-badge-size">📏</span>' : ''}<b>${type}</b>`
           + statsHtml)
         + affilHtml;
       badge.title = `${isSelf ? 'You' : playerDisplayName(xid)} — ${hands} hand(s) seen. `
         + (roleTag ? roleTagText(roleTag) + ' ' : '')
-        + 'V = VPIP (hands played), P = PFR (raised preflop), A = AFq (postflop aggression). '
+        + 'v = VPIP (hands played), p = PFR (raised preflop), a = AFq (postflop aggression)'
+        + (bluffy ? ', b = bluff frequency' : '') + '. '
         + (useSession
           ? `V and P are the last ${sess.hands} hands (observed V${fmtNum(sess.rawVpip)} P${fmtNum(sess.rawPfr)}) `
             + `weighted against their own baseline (V${fmtNum(sess.baseVpip)} P${fmtNum(sess.basePfr)}), `
@@ -10383,6 +10439,13 @@
         + (player && player.stack
           ? ` Stack ${fmtMoney(player.stack.now)} (sitting low ${fmtMoney(player.stack.low)}, high ${fmtMoney(player.stack.high)}).`
           : '')
+        + (sizeTell ? ` 📏 Their bet SIZE is readable: ${sizeTell.made.toFixed(0)}% pot with a made hand `
+          + `(${sizeTell.madeN} spots) vs ${sizeTell.bluff.toFixed(0)}% bluffing (${sizeTell.bluffN}) — `
+          + `${sizeTell.gap > 0 ? 'a big bet is value' : 'BACKWARDS: their big bet is more often air'}. `
+          + 'The coach says which way when they actually bet.' : '')
+        + (bluffy ? ` b = caught with nothing on ${fmtPct(bluffy.bluffRate)} of ${bluffy.bluffSample} `
+          + 'showdown bets — a FLOOR, since a bluff that wins never reaches a showdown, so the real rate '
+          + 'is at least this. Call them down lighter.' : '')
         + (affil.detail ? ` ⚠ ${affil.detail} — a fact from Torn's own profile data, not proof of anything at this table.` : '')
         + (blockedBadge ? ` ${blockedBadge.emoji} Can't attack — ${blockedBadge.label}`
           + (blockedBadge.until ? `, ${fmtStatusRemaining(blockedBadge.until)} left` : '') + '.' : '')
@@ -11681,7 +11744,7 @@
       <h4>Seat labels</h4>
       <label><input type="checkbox" class="tph-badge-toggle" ${STORE.settings.showBadges ? 'checked' : ''}> Show tendency labels on seats</label><br>
       <label><input type="checkbox" class="tph-selfbadge-toggle" ${STORE.settings.showSelfBadge ? 'checked' : ''}> Include your own seat (green)</label><br>
-      <label><input type="checkbox" class="tph-badgestats-toggle" ${STORE.settings.badgeStats !== false ? 'checked' : ''}> Numbers (V/P/A) on the labels</label>
+      <label><input type="checkbox" class="tph-badgestats-toggle" ${STORE.settings.badgeStats !== false ? 'checked' : ''}> Numbers (v/p/a) on the labels</label>
       <div style="opacity:.7;margin:2px 0 10px">Turn off if a label still reaches the community cards. You keep the
         type, the this-hand marker and 🤮/🔥 — the read itself. The numbers behind it are one tap away in Stats.</div>
       <label><input type="checkbox" class="tph-rolebadge-toggle" ${STORE.settings.showRoleBadges !== false ? 'checked' : ''}> Mark this hand's raiser and postflop leads</label>
@@ -11697,8 +11760,8 @@
         longer-run baseline: a window with few hands in it reads close to that baseline and moves toward what it is
         actually seeing as it fills, so the numbers never jump on one hand. The TYPE stays lifetime.
         🤮 marks a player running ${TILT_VPIP_JUMP}+ points looser than their own norm (${TILT_VPIP_JUMP_AFTER_LOSS}+ if they just lost a ${BIG_LOSS_BB}bb pot). 🔥 marks someone winning a lot of recent pots. Both apply to you too — see the coach panel.</div>
-      <div style="opacity:.7;margin:2px 0 10px">Small line under each seat, e.g. <b>STA 15h V74 P12 A16</b>:
-        type · window · <b>V</b>PIP (hands played) · <b>P</b>FR (raised preflop) · <b>A</b>Fq (postflop aggression).
+      <div style="opacity:.7;margin:2px 0 10px">Small line under each seat, e.g. <b>STA 15h v74p12a16</b>:
+        type · window · <b>v</b>pip (hands played) · <b>p</b>fr (raised preflop) · <b>a</b>fq (postflop aggression) · <b>b</b>luff frequency, only when notably high.
         "15h" means V and P cover your last 15 hands; A is always lifetime, since postflop samples are too scarce
         for a short window. Types: NIT, TAG, LAG, MAN(iac), STA(tion), FSH, BAL(anced); "?" = provisional.
         Tap a badge for full stats. Turn off to leave the table completely clear.</div>
@@ -12860,6 +12923,8 @@
       SIZING_LIVE_MIN_GAP,
       SIZING_LIVE_MARGIN,
       SIZING_LIVE_MIN_POLE,
+      sizingTellOf,
+      BADGE_BLUFF_MIN_PCT,
       currentExploitTips,
       spreadEdge,
       thresholdEdge,

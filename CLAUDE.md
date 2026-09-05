@@ -644,7 +644,7 @@ unify the two positions; the asymmetry is the point.
 **The badge is width-constrained, not information-constrained.** It floats over
 the table, and at full width — role chip, 🤮, 🔥, type, three numbers — it
 reached the community cards. Everything shed to fix that was punctuation, not
-content: no spaces inside `V35P23A67` (the letters already delimit), no `15h`
+content: no spaces inside `v35p23a67` (the letters already delimit), lower case since v1.59.0 because at 10px the capitals sit at digit height and the groups run together, no `15h`
 window marker on the face (it is in the tooltip), `badgePct` caps at two
 characters, and the type/number gap is a margin rather than a space. **The
 labelled numbers stay** — `74/12/16` is three unexplained figures on an element

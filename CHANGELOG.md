@@ -9,6 +9,70 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.59.0
+
+The seat badge gains a bet-size tell and a bluff figure, loses its capitals, and
+hero's badge shifts right. All four asked for directly.
+
+**📏 marks a player whose bet size is readable.** It is affordable for exactly
+the reason the hospital glyphs are: it is *rare*. Only 8 of 465 qualifying
+opponents in a real store have a readable sizing tell (1.7%), so it is a
+decisive mark on the odd seat rather than decoration on every one — the test the
+badge code already sets for itself ("most players are attackable, so a target on
+nearly every seat is noise, and the badge is width-constrained before it is
+information-constrained").
+
+`sizingTellOf()` is that gate, split out of `liveSizingRead` so the badge and the
+coach cannot disagree about whether a tell exists — one gate, two renderings. It
+takes the seat's already-computed rates, so the 4-second badge loop does not pay
+for a second `computeRates` per seat. The badge says a tell *exists*; the coach
+says which way the moment they actually bet. Same division of labour the attack
+blockers already use: glyph means "something is there", panel says what.
+
+**`b19` is the bluff frequency, shown only when notably high**, and the
+measurement changed the design before a line was written. Over 186 readable
+opponents the pool's bluff rate is median **0%**, mean **4.1%**, p90 17%. Printed
+unconditionally it would have put `b0` on 40% of seats — precisely the mistake
+quoted above. Gated at `BADGE_BLUFF_MIN_PCT` (20%) it lands on about 2% of seats,
+and every appearance is a real read.
+
+It is **one-sided on purpose**. A low measured rate is ambiguous in a way a high
+one is not: it can mean they rarely bluff, or that they bluff constantly and it
+keeps working, because a bluff good enough to take the pot never reaches a
+showdown to be counted. Only the high side is safe to act on, so only the high
+side gets a mark — the same asymmetry `bluffRate`'s own caveat has always
+carried.
+
+**V/P/A → v/p/a.** At 10px the capitals sit at the same height as the digits and
+the three groups run together; the lower-case forms have descenders and a smaller
+x-height, so they break the string up without costing a pixel. Settings, the
+tooltip legend and CLAUDE.md updated to match.
+
+**`SELF_BADGE_RIGHT_NUDGE_PX` 60 → 78**, three character widths at the badge
+font. Same standing caveat as every previous nudge: informed by the last report,
+not a fact until the next one.
+
+### Width, measured rather than estimated
+
+The badge is capped at 118px with `overflow: hidden`, so a group pushed past that
+is silently clipped rather than shown — which would have made a new figure look
+like a bug. Rendered in a real browser against the real CSS:
+
+| case | natural width | clipped |
+|---|---|---|
+| typical seat carrying **both** new marks | 93px | no |
+| fully-loaded worst case, **before** this change | 144px | **yes** |
+| same worst case, after | 174px | yes |
+
+So the pathological stack (role chip + 🤮 + 🔥 + 📏 + three-digit everything)
+overflows — but it overflowed before this change too, so the clipping is
+pre-existing rather than introduced here, and it needs tilt *and* heat *and* a
+sizing tell *and* 100% on every stat to occur. `badgeStats: false` remains the
+escape hatch. One thing noticed while measuring and deliberately not changed:
+the affiliation glyphs (🔗💍) are appended *after* the numbers, so on an
+overflowing badge they are clipped before a third digit of AFq is — arguably the
+wrong priority, but a separate judgement from what was asked for here.
+
 ## 1.58.0
 
 The bet-sizing tells become a picture, and a count that had been overstating
