@@ -630,6 +630,85 @@ a shared position would stack them. Both need `touch-action: none`, or the drag
 scrolls the page instead of moving the element, and both are recovered by the
 one Settings reset button.
 
+## The players list: sort keys are computed ONCE (v1.63.0)
+
+It was the most expensive thing in the HUD, and it never reported that — no
+error, just a panel that took a beat to open and typing that lagged the
+keyboard. Measured against a real 898-player export: **38-46ms per render in
+the sort alone**, against 12ms to compute and render every row it was sorting.
+
+Two mechanisms stacked, and both are easy to reintroduce:
+
+1. **`playersSortValue` ran `computeRates` on its first line**, before looking
+   at the column. Sorting by name — which reads nothing but `p.name` — built a
+   full rate table and discarded it. Keep the rates read **inside** the branch
+   that needs them.
+2. **The comparator was evaluated inside every comparison.** `Array.sort`
+   called it 14,538 times for 898 players — 16.2 per player. It now
+   **decorates once per player** and sorts on the stored key.
+
+The refactor rests entirely on the order being unchanged, so that is what
+`test/players-list-cost.test.js` pins: decorate-once against compare-time
+evaluation, both driven through the real comparator, on all five columns with
+deliberately colliding names, hand counts and rates. The "does this column
+compute rates" half is proved with a record `computeRates` cannot survive
+rather than by counting calls — a call counter would be a copy, and a test of a
+copy cannot fail when the original is wrong.
+
+### The thin-record gate
+
+Records under `minHands` are folded away by default behind a **Show all** chip.
+390 of 898 sat below the bar, and each renders as `Unrated` with no usable read
+— which is precisely what `classify()` returns below that gate, so these rows
+cost layout and say nothing.
+
+- **The gate reads `STORE.settings.minHands`, never a constant of its own.**
+  That is what stops it disagreeing with the bar that makes those rows unrated
+  in the first place; the test pins both directions by moving the setting.
+- **The chip states the gate in BOTH directions, always** — including when it is
+  hiding nothing. A control that is silent until it acts reads as missing data
+  the first time it acts, the same failure `heroProblem()` and the hidden `ME`
+  chip exist to prevent.
+- **The name filter runs BEFORE the gate**, so the hidden count describes *this
+  search*. Searching a one-hand player reads "0 of 1" with the count beside it,
+  never an empty list with no explanation.
+- **Hero's record is never hidden**, the same exemption it already carries
+  through every prune rule.
+- Session state (`playersShowThin`), like `playersFilter`/`playersSortKey`
+  beside it — a view of the list, not a preference about the HUD.
+
+Net: ~55-62ms → **8.3ms** per render, and 898 table rows → 508.
+
+### `observedPoolAverages()` stays uncached, and the reason has been corrected
+
+The old note called the difference from `poolTipSpread()` "deliberate" because
+this one does not run `buildExploitPlan` per player. Measured, that is 4.3ms
+against 19ms — **3.9x, not the order of magnitude implied.** The conclusion
+still holds, for a better reason: `renderPlayersList` calls it **exactly once
+per render** (the export beside it is a thunk), so there is no duplicated work
+for a cache to remove, only real work to serve stale. `poolTipSpread`'s cache
+earns its keep because that one is 4x heavier *and* answers a standing property
+of the rule set rather than a live read.
+
+The cost of caching it is concrete: `poolTendencyExport()` reads it, and that
+file is what the **next `POOL_AVG` correction gets measured from**. A cache was
+written, made `test/archetype.test.js` fail by serving a stale `null`, and was
+reverted — the test was not loosened to fit the optimisation.
+
+### `resolveSeatKey`'s fallback is hoisted, and is dormant
+
+It built and sorted an index of **every tracked player, per seat, per sweep**.
+Now built once per sweep behind `SEAT_CACHE_MS` — it is the same per-sweep
+hoist as `seatEls()`, so it takes the same tick boundary and the same tolerance
+(a name learned mid-window resolves one sweep late).
+
+It never runs on this layout: the XID is on the element id, so
+`resolveXidFromSeat` answers first. It was hoisted anyway for what it would
+cost if Torn ever changed that id format — ~0.38ms per seat against an
+898-player store, roughly 8ms/sec of CPU at eight seats, growing with the store
+up to `PRUNE_PLAYER_CAP`. A cliff that steep should not sit one line deep
+behind a selector nobody working on this can verify.
+
 ## The seat sweep is memoised, and the TTL is the safety (v1.62.0)
 
 `document.querySelectorAll(SELECTORS.seatContainer)` is the most repeated DOM

@@ -9,6 +9,66 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.63.0
+
+The players list was the most expensive thing in the HUD, and the cost was
+invisible — no error, no warning, just a panel that took a beat to open and
+typing that lagged behind the keyboard. Measured against a real 898-player
+export rather than guessed at.
+
+**38-46ms of every render went into the SORT alone**, against 12ms to compute
+and render every row it was sorting. Two mechanisms stacked:
+
+- `playersSortValue` ran `computeRates` on its **first line**, before looking at
+  which column had been asked for. Sorting by name — which reads nothing but
+  `p.name` — therefore built a full rate table and threw it away.
+- `renderPlayersList` evaluated that comparator *inside every comparison*.
+  `Array.prototype.sort` called it 14,538 times for 898 players: 16.2 per
+  player.
+
+`computeRates` now runs inside the one branch that needs it, and the sort
+**decorates once per player** then sorts on the stored key. The resulting order
+is byte-identical on all five columns — pinned in
+`test/players-list-cost.test.js`, which is what makes this a speedup rather than
+a rewrite of the sort.
+
+**Records under `minHands` are folded away by default, behind a "Show all"
+chip.** 390 of 898 were below the bar, and every one renders as `Unrated` with
+no usable read — because that is exactly what `classify()` returns below the
+gate. The gate reads `STORE.settings.minHands` rather than a constant of its
+own, so it can never disagree with the bar that makes those rows unrated in the
+first place.
+
+**The chip states the gate in both directions, always.** A control that is
+currently hiding nothing still has to say what it does, or the first time it
+*does* hide something it reads as missing data — the same failure `heroProblem()`
+and the hidden `ME` chip exist to prevent. The name filter runs **before** the
+gate, so searching a one-hand player reads "0 of 1" with the hidden count beside
+it rather than an empty list with no explanation. Hero's own record is never
+hidden, the same exemption it already carries through every prune rule.
+
+Net: one render of that panel goes from ~55-62ms to **8.3ms**, and from 898
+table rows to 508.
+
+**`resolveSeatKey`'s name-scan fallback built and sorted an index of every
+tracked player, per seat, per sweep.** Hoisted to once per sweep behind
+`SEAT_CACHE_MS`. It is dormant on this layout — the XID is on the element id, so
+`resolveXidFromSeat` answers first and the fallback never runs — but at ~0.38ms
+per seat it would be roughly 8ms/sec of CPU if Torn ever changed that id format,
+growing with the store up to `PRUNE_PLAYER_CAP`. A cliff that steep should not
+sit one line deep behind a selector nobody here can verify.
+
+**Deliberately NOT changed: `observedPoolAverages()` stays uncached.** It
+measured 4.3ms against `poolTipSpread()`'s 19ms, which corrects the old note
+claiming the gap was an order of magnitude — but the conclusion holds for a
+better reason than the one written down. `renderPlayersList` calls it exactly
+**once** per render (the export beside it is a thunk, built only on the button
+press), so there is no duplicated work for a cache to remove, only real work to
+serve stale. And its other reader is `poolTendencyExport()` — the file the
+*next* `POOL_AVG` correction gets measured from. A cache was written, made
+`test/archetype.test.js` fail by serving a stale `null`, and was reverted rather
+than the test being loosened.
+
 ## 1.62.0
 
 One seat sweep per tick, and a showdown poll that backs off when nobody is left

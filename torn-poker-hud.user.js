@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.62.0
+// @version      1.63.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,61 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.63.0 - The players list was the most expensive thing in the HUD, and the
+ *          cost was invisible: no error, no warning, just a panel that took a
+ *          beat to open and typing that lagged the keyboard. Measured against
+ *          a real 898-player export rather than guessed at.
+ *            - 38-46ms of every render went into the SORT alone, against 12ms
+ *              to compute and render every row it was sorting. Two mechanisms
+ *              stacked. playersSortValue ran computeRates on its FIRST line,
+ *              before looking at which column was asked for — so sorting by
+ *              name, which reads nothing but p.name, built a full rate table
+ *              and threw it away. And renderPlayersList evaluated that
+ *              comparator inside every comparison: Array.sort called it 14,538
+ *              times for 898 players, 16.2 per player.
+ *            - computeRates now runs inside the one branch that needs it, and
+ *              the sort decorates once per player then sorts on the stored
+ *              key. The order is byte-identical on all five columns — pinned
+ *              in test/players-list-cost.test.js, which is what makes this a
+ *              speedup rather than a rewrite of the sort.
+ *            - Records under minHands are folded away by default, behind a
+ *              "Show all" chip. 390 of 898 were below the bar, and every one
+ *              renders as "Unrated" with no usable read, because that is
+ *              exactly what classify() returns below the gate. The gate reads
+ *              STORE.settings.minHands rather than a constant of its own, so
+ *              it can never disagree with the bar that makes those rows
+ *              unrated in the first place.
+ *            - The chip states the gate in BOTH directions, always. A control
+ *              that is currently hiding nothing still has to say what it does,
+ *              or the first time it does hide something it reads as missing
+ *              data — the same failure heroProblem() and the hidden ME chip
+ *              exist to prevent. The name filter runs BEFORE the gate, so
+ *              searching a one-hand player reads "0 of 1" with the count
+ *              beside it rather than an empty list with no explanation.
+ *              Hero's own record is never hidden, the same exemption it
+ *              already carries through every prune rule.
+ *            - Net: one render of that panel goes from ~55-62ms to 8.3ms, and
+ *              from 898 table rows to 508.
+ *            - resolveSeatKey's name-scan fallback built and sorted an index
+ *              of EVERY tracked player, per seat, per sweep. Hoisted to once
+ *              per sweep behind SEAT_CACHE_MS. It is dormant on this layout —
+ *              the XID is on the element id, so resolveXidFromSeat answers
+ *              first — but at ~0.38ms per seat it would be roughly 8ms/sec of
+ *              CPU if Torn ever changed that id format, growing with the
+ *              store up to PRUNE_PLAYER_CAP. A cliff that steep should not sit
+ *              one line deep behind a selector nobody here can verify.
+ *            - Deliberately NOT changed: observedPoolAverages() stays
+ *              uncached. It was measured at 4.3ms against poolTipSpread()'s
+ *              19ms, which corrects the old note claiming the gap was an order
+ *              of magnitude — but the conclusion holds for a better reason.
+ *              renderPlayersList calls it exactly once per render (the export
+ *              beside it is a thunk), so there is no duplicated work to
+ *              remove, only real work to serve stale — and its other reader is
+ *              poolTendencyExport(), the file the NEXT POOL_AVG correction
+ *              gets measured from. A cache was written, made
+ *              test/archetype.test.js fail by serving a stale null, and was
+ *              reverted rather than the test being loosened.
  *
  * 1.62.0 - One seat sweep per tick, and a showdown poll that backs off when
  *          nobody is left to show. Both are cost reductions on the hottest DOM
@@ -112,27 +167,6 @@
  *              the c-bettor still is not — plus a case proving a raise from
  *              that player still reads RR rather than DONK.
  *
- * 1.60.0 - Every preflop raiser keeps their chip for the whole hand. Reported
- *          directly: the PFR tag should persist "even when there is a 3b or
- *          more".
- *            - handRoles tagged only the LAST preflop raiser, so a 3-bet
- *              silently un-badged the seat that opened. That is backwards on
- *              the hand where the chips matter most: in a 3-bet pot you are
- *              reading two aggressors against each other, and a seat that
- *              goes blank reads as "never raised" at a glance.
- *            - roles.preflop is now a MAP, xid -> tier, each raiser tagged at
- *              their OWN last raise — an opener who 4-bets reads 4B, not a
- *              stale PFR and not two chips. roles.pfr/tag still name the last
- *              raiser for anything that wants only that.
- *            - The postflop suppression widens with it: NO preflop raiser
- *              gets a DONK/RR chip, not just the last one. The cost is real
- *              and accepted — an opener who calls a 3-bet and then leads the
- *              flop IS donking, and the badge has room for one chip. "They
- *              raised preflop" is the statement that has to survive the hand.
- *            - The PFR tooltip no longer claims the holder was not re-raised,
- *              because now they may have been: the highest tier still showing
- *              is what holds the initiative.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -194,7 +228,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.62.0';
+  const HUD_VERSION = '1.63.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -2789,11 +2823,7 @@
     const xid = resolveXidFromSeat(seatEl);
     if (xid) return xid;
     const text = seatEl.textContent || '';
-    const known = Object.keys(STORE.players)
-      .map((k) => ({ key: k, name: (STORE.players[k] || {}).name || '' }))
-      .filter((e) => e.name.length >= 2)
-      .sort((a, b) => b.name.length - a.name.length);
-    for (const e of known) { if (text.includes(e.name)) return e.key; }
+    for (const e of seatNameIndex()) { if (text.includes(e.name)) return e.key; }
     return null;
   }
 
@@ -2847,6 +2877,35 @@
     seatCacheEls = Array.from(document.querySelectorAll(SELECTORS.seatContainer));
     seatCacheAt = now;
     return seatCacheEls;
+  }
+
+  // The name index the fallback scans, built once per sweep rather than once
+  // per seat.
+  //
+  // Dormant on this layout — the XID is on the element id, so resolveXidFromSeat
+  // answers first and the fallback never runs (see CLAUDE.md, "Identity is by
+  // XID after all"). It is hoisted anyway because of what it would cost if
+  // Torn ever changed that id format: building and sorting an index of every
+  // tracked player, per seat, per sweep. Estimated at 0.38ms per seat against
+  // an 898-player store, so ~8ms/sec of CPU across the polls at eight seats —
+  // and it grows with the store, up to PRUNE_PLAYER_CAP. A cliff that steep
+  // should not be one line deep behind a selector nobody here can verify.
+  //
+  // Shares SEAT_CACHE_MS with seatEls() deliberately: this IS a per-sweep
+  // hoist, so it wants the same tick boundary. A name learned mid-window
+  // resolves one sweep late, which is the same tolerance the seat list already
+  // accepts.
+  let seatNameIndexAt = 0;
+  let seatNameIndexVal = null;
+  function seatNameIndex() {
+    const now = Date.now();
+    if (seatNameIndexVal && (now - seatNameIndexAt) < SEAT_CACHE_MS) return seatNameIndexVal;
+    seatNameIndexVal = Object.keys(STORE.players)
+      .map((k) => ({ key: k, name: (STORE.players[k] || {}).name || '' }))
+      .filter((e) => e.name.length >= 2)
+      .sort((a, b) => b.name.length - a.name.length);
+    seatNameIndexAt = now;
+    return seatNameIndexVal;
   }
 
   // opts.includeSittingOut keeps the old behaviour for callers that want every
@@ -6434,6 +6493,27 @@
       .filter((p) => p && p.hands >= POOL_OBS_MIN_HANDS);
   }
 
+  // NOT memoised, unlike poolTipSpread() below — and the reason given for that
+  // used to be wrong even though the conclusion holds.
+  //
+  // The old note said this was cheap because it does not run buildExploitPlan
+  // per player. Measured against a real 898-player store it is 4.3ms against
+  // that one's 19ms: 3.9x, not the order of magnitude implied. The reason it
+  // still needs no cache is different and better — renderPlayersList calls it
+  // exactly ONCE per render (the export beside it is a thunk, built only when
+  // the button is pressed), so there is no duplicated work for a cache to
+  // remove, only real work to serve stale. poolTipSpread's cache earns its
+  // keep because that one is 4x heavier AND its answer is a standing property
+  // of the rule set rather than a live read.
+  //
+  // The cost of caching it is concrete: poolTendencyExport() reads this, and
+  // that file is what the NEXT POOL_AVG correction gets measured from (see
+  // CLAUDE.md, "The pool average is measured, not borrowed"). A TTL there
+  // trades the freshness of the one number this HUD exists to re-derive for
+  // 4ms, which is a tenth of what one render costs after the sort fix.
+  // test/archetype.test.js pins the live behaviour: populate the store, ask,
+  // get the answer — a cache makes that assertion fail, which is how this got
+  // reverted rather than shipped.
   function observedPoolAverages() {
     const ps = poolQualifyingPlayers();
     if (ps.length < 3) return null; // too few to mean anything
@@ -9735,6 +9815,16 @@
     .tph-sortable:active { opacity: 1; }
     .tph-prow { cursor: pointer; }
     .tph-prow:active { background: #2c2c33; }
+    /* Thin-record gate. Both spans declare their own colour: pinTextColor skips
+       tph- elements, so an undeclared one renders dark-on-dark (the v0.18.2
+       bug). The button is a chip rather than a checkbox — same tap target as
+       the History tab's filter chips, and a checkbox at this size is a
+       mis-tap waiting to happen on a phone. */
+    .tph-pthin { margin-top: 6px; font-size: 11px; line-height: 1.5; color: #8d959c !important; }
+    .tph-pthin-btn { color: #cfe3ff !important; background: #26303a; border: 1px solid #3b4956;
+                     border-radius: 3px; padding: 3px 8px; cursor: pointer; white-space: nowrap; }
+    .tph-pthin-btn:active { background: #2c2c33; }
+    .tph-pthin-note { color: #8d959c !important; margin-left: 6px; }
     /* Hand history was one 11px monospace blob of up to 40 hands run together on
        the panel's own background — nothing separated one hand from the next and
        the focus player was marked only by a "*". Each hand is now its own block
@@ -11334,6 +11424,19 @@
   // this on changed nothing about what a fresh open of the panel shows.
   let playersSortKey = 'hands';
   let playersSortDir = 'desc';
+  // Records under `minHands` are folded away by default. They are the bulk of
+  // the list — 302 of 898 in the store this was measured against were under
+  // ten hands — and every one of them renders as "Unrated" with no usable
+  // read, because that is exactly what classify() returns below the gate. So
+  // the default hides rows that cost layout and say nothing.
+  //
+  // Session state, like playersFilter/playersSortKey beside it, not a setting:
+  // it is a view of the list, not a preference about the HUD, and the count
+  // line states what is hidden on every render so it can never be a silent
+  // filter — the failure `heroProblem()` and the hidden ME chip both exist to
+  // avoid. Hero's own record is never hidden, same exemption it already has
+  // from every prune rule.
+  let playersShowThin = false;
 
   // The value each row sorts on for a given column — kept separate from the
   // HTML the row renders so a column can sort on something other than what's
@@ -11344,12 +11447,16 @@
   // a player who has never faced a 3-bet is "no data", not "folds 0% of the
   // time", and should land at whichever end of the list means "unknown", not
   // get mixed in among players who genuinely never fold there.
+  //
+  // `computeRates` runs INSIDE the one branch that needs it, never at the top.
+  // It used to run unconditionally, so sorting by name — which reads nothing
+  // but p.name — built a full rate table on every comparison and threw it
+  // away. See renderPlayersList for the other half of that fix.
   function playersSortValue(key, xid, p) {
-    const r = computeRates(p);
     if (key === 'name') return (p.name || '').toLowerCase();
     if (key === 'type') return classify(p);
     if (key === 'hands') return p.hands || 0;
-    if (key === 'vpip') return r.vpip == null ? -Infinity : r.vpip;
+    if (key === 'vpip') { const r = computeRates(p); return r.vpip == null ? -Infinity : r.vpip; }
     // Hero's own P/L column doesn't show a number at all (see plShort/isHeroRecord
     // below) — sorting hero to the bottom on a numeric sort keeps that row from
     // landing in the middle of real P/L figures under a value nobody can see.
@@ -11660,18 +11767,44 @@
     });
   }
 
+  // A row with too few hands to rate. Hero is exempt — the coach reads that
+  // record and it is the one row you always want to be able to find.
+  function playersRowIsThin(xid, p) {
+    return !isHeroRecord(xid) && (p.hands || 0) < STORE.settings.minHands;
+  }
+
   function renderPlayersList() {
-    const all = !playersListOpen ? [] : Object.keys(STORE.players)
+    // Name filter first, thin gate second, so the hidden count below describes
+    // what THIS search turned up rather than the whole store. Typing the name
+    // of a one-hand player therefore reads "0 shown · +1 under 20 hands"
+    // rather than an empty list with no explanation.
+    const matched = !playersListOpen ? [] : Object.keys(STORE.players)
       .map((xid) => ({ xid, p: STORE.players[xid] }))
-      .filter(({ p }) => !playersFilter || (p.name || '').toLowerCase().includes(playersFilter.toLowerCase()))
+      .filter(({ p }) => !playersFilter || (p.name || '').toLowerCase().includes(playersFilter.toLowerCase()));
+    const thinCount = playersShowThin ? 0 : matched.filter((e) => playersRowIsThin(e.xid, e.p)).length;
+    const kept = playersShowThin ? matched : matched.filter((e) => !playersRowIsThin(e.xid, e.p));
+
+    // Decorate, sort, undecorate. The sort key is computed ONCE per player
+    // and stored, rather than recomputed inside every comparison.
+    //
+    // This was the most expensive thing in the HUD. Array.prototype.sort
+    // invoked the comparator 14,538 times for 898 players — 16.2 calls per
+    // player — and each call ran playersSortValue, which ran computeRates.
+    // Measured against a real 898-player store: 38-46ms per render whatever
+    // the column, against 12ms to compute and render every row it was
+    // sorting. renderPlayersList rebuilds on every keystroke in the filter
+    // box and on every column-header tap, so that cost was paid between
+    // letters, on a phone. Decorating drops it to 3-5ms, a 9-13x saving, and
+    // the resulting order is byte-identical on all five columns.
+    const all = kept
+      .map((e) => ({ e, k: playersSortValue(playersSortKey, e.xid, e.p) }))
       .sort((a, b) => {
-        const av = playersSortValue(playersSortKey, a.xid, a.p);
-        const bv = playersSortValue(playersSortKey, b.xid, b.p);
-        const cmp = typeof av === 'string' || typeof bv === 'string'
-          ? String(av).localeCompare(String(bv))
-          : av - bv;
+        const cmp = typeof a.k === 'string' || typeof b.k === 'string'
+          ? String(a.k).localeCompare(String(b.k))
+          : a.k - b.k;
         return playersSortDir === 'asc' ? cmp : -cmp;
-      });
+      })
+      .map((d) => d.e);
 
     const rows = all.length
       ? all.map(({ xid, p }) => {
@@ -11708,9 +11841,23 @@
       onClose: () => { playersListOpen = false; renderPlayersList(); },
       html: `
       <span class="tph-close">✕</span>
-      <h3>Tracked players (${all.length})</h3>
+      <h3>Tracked players (${all.length}${thinCount ? ' of ' + (all.length + thinCount) : ''})</h3>
       ${problem ? `<div class="tph-warn">⚠ ${escapeHtml(problem)}</div>` : ''}
       <input class="tph-pfilter" placeholder="Filter by name…" value="${escapeHtml(playersFilter)}" style="width:60%">
+      ${(() => {
+        // The chip always states the gate, in both directions — a control that
+        // is currently hiding nothing still has to say what it does, or the
+        // first time it DOES hide something it reads as missing data.
+        const min = STORE.settings.minHands;
+        if (playersShowThin) {
+          return `<div class="tph-pthin"><span class="tph-pthin-btn">Hide under ${min} hands</span>`
+            + ` <span class="tph-pthin-note">showing every tracked record</span></div>`;
+        }
+        return `<div class="tph-pthin"><span class="tph-pthin-btn">Show all</span>`
+          + ` <span class="tph-pthin-note">${thinCount
+            ? thinCount + ' hidden — under ' + min + ' hands, so unrated'
+            : 'nothing hidden — every match has ' + min + '+ hands'}</span></div>`;
+      })()}
       <table class="tph-ptable">
         <tr>${(() => {
           // ▲/▼ only on the active column — the others carry a data-sort
@@ -11759,6 +11906,11 @@
             renderPlayersList();
             openPlayerPanel(row.dataset.xid);
           });
+        });
+        const thinBtn = panel.querySelector('.tph-pthin-btn');
+        if (thinBtn) thinBtn.addEventListener('click', () => {
+          playersShowThin = !playersShowThin;
+          renderPlayersList();
         });
         panel.querySelectorAll('.tph-sortable').forEach((th) => {
           th.addEventListener('click', () => {
@@ -13137,6 +13289,9 @@
       plShort,
       isHeroRecord,
       playersSortValue,
+      playersRowIsThin,
+      get playersShowThin() { return playersShowThin; },
+      set playersShowThin(v) { playersShowThin = v; },
       TORN_STAKES,
       MIN_PLAUSIBLE_BB,
       plausibleBB,
