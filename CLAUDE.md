@@ -43,11 +43,12 @@ tracked-players browser, coach prompts in a resizable panel, a verified Monte
 Carlo equity engine, position from the seat ring, session tracking, bet-sizing
 tells, showdown ranges, and optional GitHub Gist sync.
 
-What is still unverified is called out where it lives: `POOL_AVG`'s central
-values are still the v1.11.0 measurement and are known to blend three tables
-with genuinely different populations (see "The pool is not one pool"), and the
-v0.22.0 identity/ring markers are read out of someone else's source.
-`POOL_SPREAD` was the other item here and was measured in v1.64.0.
+What is still unverified is called out where it lives: the v0.22.0
+identity/ring markers are read out of someone else's source. `POOL_SPREAD` was
+measured in v1.64.0 and the stake-aware anchor built in v1.65.0, so the pool
+figures are now measured throughout — `POOL_AVG`'s own central values remain
+the v1.11.0 global measurement, which is now only the FALLBACK anchor for
+players at unmeasured stakes.
 
 ## The critical constraint
 
@@ -1721,35 +1722,66 @@ at the loosest table in the set — which is why the observed global average now
 reads 47.9 and why **updating it globally would be wrong**: it relabels 39
 players `Fish → Balanced`, i.e. it stops calling the $500k fish fish.
 
-### If a stake-aware anchor gets built, these are the measured answers
+### The anchor is per player, and these are the rules (built in v1.65.0)
 
-- **Anchor per PLAYER, not per current table.** The label is about the player,
-  so it must not flicker when you move tables — and every consumer of
+`POOL_AVG_BY_STAKE` holds the three tables; `poolAvgFor(p)` picks the anchor.
+
+- **Per PLAYER, not per current table.** The label is a claim about the player,
+  so it must not flicker when *you* move tables — and every consumer of
   `POOL_AVG` already receives the player, whereas per-current-table would need
   `lastSeenBB` threaded into pure classification functions.
-- **Volume-weight across the stakes they play; do not winner-take-all.** They
+- **Volume-weighted across the stakes they play, never winner-take-all.** They
   differ by a median of 0.02pp (players are effectively single-stake: the
   median player has **99%** of their hands at one table, p25 77%, p10 58%), so
-  the blend costs nothing — but winner-take-all has a cliff at 50/50, and this
-  file already has the precedent against threshold-switching in `blendedRates`
+  the blend buys nothing on the numbers — but winner-take-all puts a cliff at
+  50/50, and this file settled that argument once already in `blendedRates`
   ("Don't reintroduce a threshold", v0.39.0). Same argument, same answer.
-- **Only three stats earn a stake-aware anchor**: `vpip` (span 0.71 SD),
-  `foldTo3Bet` (1.33), `limpShareOfVpip` (1.15). Those are the ones with both a
-  real span AND a monotonic gradient. `cbet` (0.36) and `foldToCbet` (0.65) are
-  non-monotonic across three buckets, which with n=81 in the smallest is what
-  noise looks like; `pfr` (0.18) and `threeBet` (0.09) are flat. Don't encode
-  noise as a constant.
+- **Only three stats are stake-aware**: `vpip` (span 0.71 SD), `foldTo3Bet`
+  (1.33), `limpShareOfVpip` (1.15) — a real span AND a monotonic gradient.
+  `cbet` (0.36) and `foldToCbet` (0.65) are non-monotonic across three buckets,
+  which with n=81 in the smallest is what noise looks like; `pfr` (0.18) and
+  `threeBet` (0.09) are flat. **Don't add a fourth key to a stake entry** —
+  `poolAvgFor` builds the others from `POOL_AVG` explicitly and would silently
+  ignore it, so `test/pool-anchor.test.js` pins the map's keys instead.
 - **Only three stakes have the sample to anchor at all** (214 / 132 / 81
-  players). Everything else in the store is ≤7 players and must fall back to
-  the global figure.
-- **Shrinkage and classification have to move together.** `classifyProvisional`
-  reads `computeShrunkRates`, so making only the prior stake-aware would shrink
-  a $500k player toward 54.9 while still judging them against a global bar —
-  pushing thin $500k players over the "loose" line, the exact opposite of the
-  intent. It is all-or-nothing, which is why it is its own change rather than a
-  rider on v1.64.0: `A.tight`/`A.loose` are module-level constants and
-  `ARCHETYPE_RULES` is a static array of closures over `POOL_AVG`, so a
-  per-player anchor means changing that rule signature. 76 references.
+  players). Everything else in the store is ≤7 players and falls through to the
+  global figure — and an unmeasured stake contributes the **global** figure for
+  its share rather than being dropped, so a split player isn't judged entirely
+  on the half we happen to have a figure for.
+
+**Shrinkage and classification move TOGETHER. This is the invariant.**
+`computeShrunkRates` returns the anchor it used *on the rates object*, and the
+archetype bars derive from that same object via `vpipBars(r)` — so the number a
+rate was shrunk toward and the number it is compared against cannot drift
+apart. Making only the prior stake-aware would shrink a $500k player toward
+54.9 while still judging them against a global bar, pushing thin $500k players
+over the "loose" line: the exact opposite of the intent. `A.tightMul`/
+`A.looseMul` are the constants; `A.tight`/`A.loose` are **getters** onto the
+global anchor, so "the pool bar" still has one value without becoming a second
+source of truth.
+
+Everything that quotes a pool figure at a player quotes that player's anchor —
+the Stats tab, the players-list shading, the tendency report, both plans. A
+sentence reading "vs a 42% pool" beside a bar computed from 54.9 argues with
+its own maths. The players-list footer and pool row stay **global**, because
+those describe the assumed pool itself rather than any one player.
+
+**What it moved:** 89 of 442 players relabel (36 `Fish → Balanced`, 31
+`Station → Fish`, 8 `Station → Balanced`, 7 `Balanced → Nit`). All 89 come from
+Old Folks Home (53) or River Wizard (36) and **none** from Cat's Chance, whose
+anchor is within 0.1 of the old global — the labels moved exactly where the
+anchor did.
+
+Memoised per record, keyed on total tabled hands (a real version number for the
+mix — it can only change when some table's count changes). 0.14ms across 442
+players, so the players-list path v1.63.0 optimised is untouched.
+
+**Two test lessons from this one**, both caught by mutation rather than review:
+"a shrunk value sits above its anchor" is **vacuous** when the observation is
+above both candidate anchors — state it as a difference between two identical
+records at different stakes instead. And checking only VPIP let a revert of
+`foldTo3Bet` to the global figure pass clean, because the three are separate
+lines in `computeShrunkRates`.
 
 ## Shared-affiliation badges, not a behavioural collusion detector (v1.8.0)
 

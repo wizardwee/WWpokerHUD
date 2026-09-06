@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.64.0
+// @version      1.65.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,63 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.65.0 - Players are judged against the pool THEY play in, not one blended
+ *          average across three tables that describes none of them.
+ *            - Measured over 442 seat-resolved opponents, three stats show a
+ *              real monotonic stakes gradient: VPIP 54.9 / 46.2 / 42.6 across
+ *              Old Folks Home $500k, River Wizard $1M and Cat's Chance $2.5M,
+ *              with fold-to-3-bet and limp share running the same way. Lower
+ *              stakes play looser, limp more and fold less to 3-bets. One
+ *              POOL_AVG called the $500k pool loose almost by definition.
+ *            - POOL_AVG_BY_STAKE plus poolAvgFor(p) picks the anchor. PER
+ *              PLAYER, not per current table: an archetype is a claim about
+ *              the player, so it must not change because YOU sat down
+ *              somewhere else — and every consumer already receives the
+ *              player, whereas keying off the live table would mean threading
+ *              lastSeenBB into pure classification functions.
+ *            - VOLUME-WEIGHTED across the stakes they play, not
+ *              winner-take-all. Measured, the two differ by a median 0.02pp
+ *              because players are effectively single-stake (median player has
+ *              99% of their hands at one table), so the blend buys nothing on
+ *              the numbers — but winner-take-all puts a cliff at 50/50, and
+ *              this file settled that argument once already in blendedRates.
+ *              Same reasoning, same answer.
+ *            - ONLY THREE STATS. Span measured against each stat's own SD:
+ *              vpip 0.71, foldTo3Bet 1.33, limpShareOfVpip 1.15, all
+ *              monotonic. cbet (0.36) and foldToCbet (0.65) are NOT monotonic
+ *              across three buckets, which with n=81 in the smallest is what
+ *              noise looks like; pfr (0.18) and threeBet (0.09) are flat.
+ *              Encoding those would repeat the WTSD anchor mistake.
+ *            - Shrinkage and classification move TOGETHER, and that is the
+ *              load-bearing part. computeShrunkRates returns the anchor it
+ *              used on the rates object, and the archetype bars are derived
+ *              from that same object via vpipBars(r). Shrinking a $500k
+ *              player toward 54.9 while judging them against a global bar
+ *              would push thin $500k players over the "loose" line — the exact
+ *              opposite of the intent — so the two cannot be split.
+ *            - A.tight/A.loose are now getters onto the global anchor, with
+ *              A.tightMul/A.looseMul the actual constants. One source of
+ *              truth: "the pool bar" still has a value for anything that means
+ *              exactly that, and per-player bars come from the anchor.
+ *            - The Stats tab, the players list shading, the tendency report
+ *              and the exploit/leak plans all quote the SAME anchor. A
+ *              sentence reading "vs a 42% pool" beside a bar computed from
+ *              54.9 argues with its own maths.
+ *            - 89 of 442 players relabel: 36 Fish -> Balanced, 31 Station ->
+ *              Fish, 8 Station -> Balanced, 7 Balanced -> Nit. Every one comes
+ *              from Old Folks Home (53) or River Wizard (36) and NONE from
+ *              Cat's Chance, whose anchor is within 0.1 of the old global —
+ *              the labels moved exactly where the anchor did.
+ *            - Memoised per record, keyed on total tabled hands, which is a
+ *              real version number for the mix. 0.14ms across 442 players, so
+ *              the players-list path v1.63.0 optimised is untouched.
+ *            - test/pool-anchor.test.js, mutation-verified against eight
+ *              regressions. Two survived the first draft and both were the
+ *              test's fault: "shrunk value sits above its anchor" is vacuous
+ *              when the observation is above both, and checking only VPIP let
+ *              a revert of foldTo3Bet pass. Stated as a DIFFERENCE between two
+ *              identical records at different stakes instead, per stat.
  *
  * 1.64.0 - POOL_SPREAD is measured now, not a judgement call, and the pool it
  *          was measured from no longer counts records that are not players.
@@ -66,36 +123,6 @@
  *              its reconciliation assertion caught the divergence the instant
  *              the real function changed and the copy had not — which is
  *              exactly why that assertion exists instead of trusting the copy.
- *
- * 1.63.1 - The pool report said "75,721 hands of evidence" and was read as
- *          hands played. Reported directly, and correctly: "I don't think I
- *          have seen 75 thousand hands."
- *            - Both numbers were right. That sum is each qualifying player's
- *              OWN lifetime hand count, added up, and those counts come from
- *              hand.dealtInXids — a snapshot of the seats at your table. So
- *              one real hand counts once for every opponent seated in it. On
- *              the store this was measured against, 75,721 of them sat behind
- *              11,781 hands actually played: 6.4 tracked opponents per hand,
- *              which is just what a seven-handed table looks like.
- *            - A reporting bug, not a wrong figure. Nothing divides by it:
- *              observedPoolAverages returns UNWEIGHTED means across players,
- *              each counting once however long they have been tracked, so the
- *              sum annotates the sample and never scales it. Every pool
- *              percentage is unchanged.
- *            - `totalHands` is now `playerHands`, printed as "PLAYER-hands",
- *              beside a new `heroHands` and the ratio between them, with the
- *              export saying outright that the two are not the same number.
- *              The name and the label are the fix — the old ones only ever
- *              got one test, from the first person to read them, and failed
- *              it.
- *            - The ratio is guarded rather than assumed: "Reset my stats"
- *              zeroes hero's record while opponent records survive, which
- *              would make it meaningless.
- *            - test/pool-tendency.test.js pins the DISTINCTION, not the
- *              spelling: that the two figures are separate and can differ by
- *              a lot, that the mean stays unweighted (a 3000-hand player at
- *              VPIP 100 against three 30-hand players at 0 must average 25,
- *              not 36), and that the old conflating wording is gone.
  *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
@@ -158,7 +185,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.64.0';
+  const HUD_VERSION = '1.65.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -6299,6 +6326,103 @@
     limpShareOfVpip: 42.4,
   };
 
+  // The pool is not one pool (v1.65.0).
+  //
+  // Measured over 442 seat-resolved opponents, bucketed by the stake they
+  // mostly play, three stats show a real and MONOTONIC stakes gradient:
+  //
+  //   table                  n     VPIP   foldTo3Bet   limpShare
+  //   Old Folks Home $500k   132   54.9      47.9         50.0
+  //   River Wizard   $1M     214   46.2      51.6         45.1
+  //   Cat's Chance   $2.5M    81   42.6      58.7         33.3
+  //
+  // Lower stakes play looser, limp more, and fold less to 3-bets — a coherent
+  // poker story rather than three unrelated numbers, which is most of why
+  // these are trusted enough to anchor on.
+  //
+  // ONLY THESE THREE. The span of every stat was measured against its own SD:
+  // vpip 0.71, foldTo3Bet 1.33, limpShareOfVpip 1.15 — real, and monotonic.
+  // cbet (0.36) and foldToCbet (0.65) are NOT monotonic across the three
+  // buckets, and with n=81 in the smallest that is exactly what noise looks
+  // like; pfr (0.18) and threeBet (0.09) are flat. Adding those would be
+  // encoding noise as a constant, which is the mistake the WTSD anchor made.
+  // Everything absent from this map keeps the global POOL_AVG figure.
+  //
+  // Only three stakes appear because only three have the sample to anchor on.
+  // Every other table in the store has 7 or fewer qualifying players, so they
+  // fall through to the global figure rather than getting a made-up one.
+  const POOL_AVG_BY_STAKE = {
+    500000:  { vpip: 54.9, foldTo3Bet: 47.9, limpShareOfVpip: 50.0 },
+    1000000: { vpip: 46.2, foldTo3Bet: 51.6, limpShareOfVpip: 45.1 },
+    2500000: { vpip: 42.6, foldTo3Bet: 58.7, limpShareOfVpip: 33.3 },
+  };
+
+  // The anchor a given PLAYER is judged and shrunk against.
+  //
+  // Per player, not per current table. Two reasons, and the first is the one
+  // that matters: an archetype label is a claim about the player, so it must
+  // not change because YOU sat down somewhere else. The second is mechanical —
+  // every consumer of POOL_AVG already receives the player, whereas keying off
+  // the table you are at would mean threading lastSeenBB into pure
+  // classification functions.
+  //
+  // VOLUME-WEIGHTED across the stakes they actually play, not winner-take-all.
+  // Measured, the two differ by a median of 0.02pp, because players are
+  // effectively single-stake — the median player has 99% of their hands at one
+  // table (p25 77%, p10 58%). So the blend buys almost nothing on the numbers.
+  // It is still the right shape, because winner-take-all puts a cliff at 50/50
+  // where a 51/49 player gets a completely different anchor from a 49/51 one,
+  // and this file has already settled that argument once: see blendedRates and
+  // "Don't reintroduce a threshold" (v0.39.0). Same reasoning, same answer.
+  //
+  // A stake with no entry contributes the GLOBAL figure for its share rather
+  // than being dropped, so a player split between $1M and some unmeasured
+  // table lands between the two anchors instead of being judged entirely on
+  // the half we happen to have a figure for.
+  function poolAvgForStake(bb) {
+    return POOL_AVG_BY_STAKE[bb] || null;
+  }
+
+  // Memoised per record. The key is the player's total tabled hands, which is
+  // a real version number for the mix: it can only change when some table's
+  // count changes, so a hit means the weights are genuinely unchanged. Worth
+  // doing because computeShrunkRates runs per row in the players list and
+  // again inside classify() — see "The players list" in CLAUDE.md for what
+  // that path already costs.
+  const poolAnchorCache = new WeakMap();
+
+  function poolAvgFor(p) {
+    const tables = p && p.tables;
+    if (!tables) return POOL_AVG;
+    let total = 0;
+    for (const k in tables) total += tables[k] || 0;
+    if (!total) return POOL_AVG;
+
+    const hit = poolAnchorCache.get(p);
+    if (hit && hit.n === total) return hit.val;
+
+    const out = {
+      vpip: 0, foldTo3Bet: 0, limpShareOfVpip: 0,
+      // Not stake-aware — measured flat or non-monotonic across tables, so
+      // these are the global figures and are carried here only so callers can
+      // read one object rather than remembering which is which.
+      pfr: POOL_AVG.pfr,
+      threeBet: POOL_AVG.threeBet,
+      cbet: POOL_AVG.cbet,
+      foldToCbet: POOL_AVG.foldToCbet,
+    };
+    for (const k in tables) {
+      const w = (tables[k] || 0) / total;
+      if (!w) continue;
+      const a = poolAvgForStake(Number(k)) || POOL_AVG;
+      out.vpip += a.vpip * w;
+      out.foldTo3Bet += a.foldTo3Bet * w;
+      out.limpShareOfVpip += a.limpShareOfVpip * w;
+    }
+    poolAnchorCache.set(p, { n: total, val: out });
+    return out;
+  }
+
   // Strength of the prior, in pseudo-observations.
   //
   // A rate over few hands is mostly noise: 3 hands played out of 3 is not a
@@ -6326,14 +6450,24 @@
   // observed. Classification uses these.
   function computeShrunkRates(p) {
     const raw = computeRates(p);
+    // The player's own anchor, not the global one — see poolAvgFor. Shrinkage
+    // and classification MUST move together: shrinking a $500k player toward
+    // 54.9 while still judging them against a global bar would push thin $500k
+    // players over the "loose" line, which is the exact opposite of the point.
+    // That is why `anchor` is returned on the rates object rather than looked
+    // up separately by each caller — the number a rate was shrunk toward and
+    // the number it gets compared against are then the same object, and
+    // cannot drift apart.
+    const a = poolAvgFor(p);
     return {
-      vpip: shrunkPct(p.vpip, p.hands, POOL_AVG.vpip),
-      pfr: shrunkPct(p.pfr, p.hands, POOL_AVG.pfr),
-      threeBet: shrunkPct(p.threeBetMade, p.hands, POOL_AVG.threeBet),
-      foldTo3Bet: shrunkPct(p.foldTo3BetMade, p.foldTo3BetOpp, POOL_AVG.foldTo3Bet),
-      cbet: shrunkPct(p.cbetMade, p.cbetOpp, POOL_AVG.cbet),
-      foldToCbet: shrunkPct(p.foldToCbetMade, p.foldToCbetOpp, POOL_AVG.foldToCbet),
-      limpShareOfVpip: shrunkPct(p.limpMade, p.vpip, POOL_AVG.limpShareOfVpip),
+      anchor: a,
+      vpip: shrunkPct(p.vpip, p.hands, a.vpip),
+      pfr: shrunkPct(p.pfr, p.hands, a.pfr),
+      threeBet: shrunkPct(p.threeBetMade, p.hands, a.threeBet),
+      foldTo3Bet: shrunkPct(p.foldTo3BetMade, p.foldTo3BetOpp, a.foldTo3Bet),
+      cbet: shrunkPct(p.cbetMade, p.cbetOpp, a.cbet),
+      foldToCbet: shrunkPct(p.foldToCbetMade, p.foldToCbetOpp, a.foldToCbet),
+      limpShareOfVpip: shrunkPct(p.limpMade, p.vpip, a.limpShareOfVpip),
       // No published pool figure for these, so they are left raw rather than
       // shrunk toward a number that was never measured. See the WTSD note above.
       wtsd: raw.wtsd,
@@ -6377,7 +6511,12 @@
     const priorHands = Math.max(0, (p.hands || 0) - win.hands);
     const priorPlayed = Math.max(0, (p.vpip || 0) - win.played);
     const priorRaised = Math.max(0, (p.pfr || 0) - win.raised);
-    const baseVpip = shrunkPct(priorPlayed, priorHands, POOL_AVG.vpip);
+    // VPIP collapses to the player's OWN stake anchor when they have no
+    // history outside the window — a brand-new face at a $500k table is best
+    // guessed at 54.9, not at a figure blended across three tables. PFR is not
+    // stake-aware (measured span 0.18 SD, flat), so it keeps the global one.
+    const anchor = poolAvgFor(p);
+    const baseVpip = shrunkPct(priorPlayed, priorHands, anchor.vpip);
     const basePfr = shrunkPct(priorRaised, priorHands, POOL_AVG.pfr);
     return {
       hands: win.hands,
@@ -6677,12 +6816,28 @@
   // Pool anchors (v1.11.0, measured): VPIP 42.5, PFR 9.4, PFR/VPIP 0.221.
   // aggRatio/passiveRatio are NOT re-derived from that ratio — see the
   // "NOT touched by this correction" note on POOL_AVG above.
+  // The MULTIPLIERS are the constants; the bars are derived from whichever
+  // anchor the player is being judged against (v1.65.0). `tight`/`loose` are
+  // getters onto the GLOBAL anchor, so "the pool bar" still has one value for
+  // callers and tests that mean exactly that — one source of truth, not two.
+  // Per-player bars come from vpipBars(r).
   const A = {
-    tight: POOL_AVG.vpip * 0.55,   // ~23 — well below pool, "tight" for Torn
-    loose: POOL_AVG.vpip * 1.15,   // ~49 — meaningfully looser than pool
+    tightMul: 0.55,                // well below the anchor, "tight" for Torn
+    looseMul: 1.15,                // meaningfully looser than the anchor
     aggRatio: 0.45,                // PFR/VPIP; pool sits at 0.221
     passiveRatio: 0.20,            // clearly below pool: raises almost nothing
+    get tight() { return POOL_AVG.vpip * this.tightMul; },
+    get loose() { return POOL_AVG.vpip * this.looseMul; },
   };
+
+  // The VPIP bars for one rates object, read off the anchor it was shrunk
+  // toward. A rates object with no anchor (a hand-built one in a test, or an
+  // older caller) falls back to the global figure, so this can never throw and
+  // never silently classifies against nothing.
+  function vpipBars(r) {
+    const avg = (r && r.anchor && r.anchor.vpip != null) ? r.anchor.vpip : POOL_AVG.vpip;
+    return { avg, tight: avg * A.tightMul, loose: avg * A.looseMul };
+  }
 
   // Order matters — first match wins.
   //
@@ -6701,13 +6856,18 @@
   // use above. A loose-PASSIVE player (pfr/vpip < passiveRatio) can no longer
   // be swept into Maniac at all; they fall through to Station like they
   // should, whatever their postflop AFq happens to be.
+  // Every bar here is read off vpipBars(r) rather than a module constant, so a
+  // player is measured against the pool THEY play in. "Loose" at $2.5M
+  // (bar 49.0) is not "loose" at $500k (bar 63.1), and a single bar called the
+  // $500k pool loose almost by definition — 39 of 442 players sat between the
+  // two, which is 9% of the pool being labelled by which table they chose.
   const ARCHETYPE_RULES = [
-    { name: 'Nit', test: (r) => r.vpip != null && r.vpip < A.tight && (r.pfr == null || r.pfr / r.vpip < A.aggRatio) },
-    { name: 'TAG', test: (r) => r.vpip != null && r.vpip < A.tight && r.pfr != null && r.pfr / r.vpip >= A.aggRatio },
-    { name: 'Maniac', test: (r) => r.afq != null && r.afq > 60 && r.vpip != null && r.vpip > A.loose && r.pfr != null && r.pfr / r.vpip >= A.aggRatio },
-    { name: 'LAG', test: (r) => r.vpip != null && r.vpip > A.loose && r.pfr != null && r.pfr / r.vpip >= A.aggRatio },
-    { name: 'Station', test: (r) => r.vpip != null && r.vpip > A.loose && (r.pfr == null || r.pfr / r.vpip < A.passiveRatio) },
-    { name: 'Fish', test: (r) => r.vpip != null && r.vpip > POOL_AVG.vpip && (r.pfr == null || r.pfr / r.vpip < A.aggRatio) },
+    { name: 'Nit', test: (r) => r.vpip != null && r.vpip < vpipBars(r).tight && (r.pfr == null || r.pfr / r.vpip < A.aggRatio) },
+    { name: 'TAG', test: (r) => r.vpip != null && r.vpip < vpipBars(r).tight && r.pfr != null && r.pfr / r.vpip >= A.aggRatio },
+    { name: 'Maniac', test: (r) => r.afq != null && r.afq > 60 && r.vpip != null && r.vpip > vpipBars(r).loose && r.pfr != null && r.pfr / r.vpip >= A.aggRatio },
+    { name: 'LAG', test: (r) => r.vpip != null && r.vpip > vpipBars(r).loose && r.pfr != null && r.pfr / r.vpip >= A.aggRatio },
+    { name: 'Station', test: (r) => r.vpip != null && r.vpip > vpipBars(r).loose && (r.pfr == null || r.pfr / r.vpip < A.passiveRatio) },
+    { name: 'Fish', test: (r) => r.vpip != null && r.vpip > vpipBars(r).avg && (r.pfr == null || r.pfr / r.vpip < A.aggRatio) },
   ];
 
   // Three-letter forms for the seat badge and the players list, where the full
@@ -8438,6 +8598,11 @@
     if (!p) return [];
     const r = computeRates(p);
     const s = computeShrunkRates(p);
+    // The anchor these rates were shrunk toward, so a threshold and the
+    // figure it is quoted against are the same number. Quoting the global
+    // "42% pool" at a $500k player while testing them against 54.9 would be a
+    // sentence that argues with its own maths.
+    const PA = s.anchor;
     const out = [];
     // `short` is a 2-5 word action for the collapsed pill and the live line,
     // where there is no room for the full sentence. The long form stays for
@@ -8521,16 +8686,16 @@
 
     // --- Preflop ------------------------------------------------------------
     if (r.foldTo3Bet != null && p.foldTo3BetOpp >= 6) {
-      if (s.foldTo3Bet > POOL_AVG.foldTo3Bet + POOL_SPREAD.foldTo3Bet) {
+      if (s.foldTo3Bet > PA.foldTo3Bet + POOL_SPREAD.foldTo3Bet) {
         add(85, '3-bet',
-          `Folds to 3-bets ${fmtPct(r.foldTo3Bet)} vs a ${POOL_AVG.foldTo3Bet}% pool `
+          `Folds to 3-bets ${fmtPct(r.foldTo3Bet)} vs a ${PA.foldTo3Bet}% pool `
             + `(${p.foldTo3BetOpp} spots). 3-bet their opens light, especially in position.`,
-          `You fold to 3-bets ${fmtPct(r.foldTo3Bet)} vs a ${POOL_AVG.foldTo3Bet}% pool `
+          `You fold to 3-bets ${fmtPct(r.foldTo3Bet)} vs a ${PA.foldTo3Bet}% pool `
             + `(${p.foldTo3BetOpp} spots) — you're giving up your opens too easily. Good players will start `
             + '3-betting you light and taking the pot uncontested; 4-bet or continue more instead of folding.',
           '3-bet them light', 'defend your opens', ['preflop'],
-          spreadEdge(s.foldTo3Bet, POOL_AVG.foldTo3Bet, POOL_SPREAD.foldTo3Bet));
-      } else if (s.foldTo3Bet < POOL_AVG.foldTo3Bet - POOL_SPREAD.foldTo3Bet) {
+          spreadEdge(s.foldTo3Bet, PA.foldTo3Bet, POOL_SPREAD.foldTo3Bet));
+      } else if (s.foldTo3Bet < PA.foldTo3Bet - POOL_SPREAD.foldTo3Bet) {
         add(60, '3-bet',
           `Rarely folds to 3-bets (${fmtPct(r.foldTo3Bet)}). 3-bet for value only — `
             + 'a light 3-bet just builds a pot out of position with the worse hand.',
@@ -8538,11 +8703,11 @@
             + 'raised. Tighten up; calling or 4-betting light here builds a bigger pot with the worse hand, '
             + 'not a stand.',
           '3-bet value only', 'tighten vs 3-bets', ['preflop'],
-          spreadEdge(s.foldTo3Bet, POOL_AVG.foldTo3Bet, POOL_SPREAD.foldTo3Bet));
+          spreadEdge(s.foldTo3Bet, PA.foldTo3Bet, POOL_SPREAD.foldTo3Bet));
       }
     }
     if (r.limpShareOfVpip != null && p.limpMade >= 5
-        && s.limpShareOfVpip > POOL_AVG.limpShareOfVpip + POOL_SPREAD.limpShareOfVpip) {
+        && s.limpShareOfVpip > PA.limpShareOfVpip + POOL_SPREAD.limpShareOfVpip) {
       add(80, 'Isolate',
         `Limps into ${fmtPct(r.limpShareOfVpip)} of the pots they enter. `
           + 'Raise big to isolate them in position — their limping range is capped, and they will call too wide.',
@@ -8550,27 +8715,27 @@
           + 'and attentive opponents will raise big to isolate you knowing they have the range edge. '
           + 'Open-raise more instead of limping.',
         'isolate their limps', 'raise instead of limp', ['preflop'],
-        spreadEdge(s.limpShareOfVpip, POOL_AVG.limpShareOfVpip, POOL_SPREAD.limpShareOfVpip));
+        spreadEdge(s.limpShareOfVpip, PA.limpShareOfVpip, POOL_SPREAD.limpShareOfVpip));
     }
     if (r.vpip != null && n >= 20) {
-      if (s.vpip > POOL_AVG.vpip + POOL_SPREAD.vpip) {
+      if (s.vpip > PA.vpip + POOL_SPREAD.vpip) {
         add(55, 'Range',
-          `Plays ${fmtPct(r.vpip)} of hands vs a ${POOL_AVG.vpip.toFixed(0)}% pool — `
+          `Plays ${fmtPct(r.vpip)} of hands vs a ${PA.vpip.toFixed(0)}% pool — `
             + 'their range is wide and weak. Value bet thinner than feels comfortable and stop bluffing.',
-          `You play ${fmtPct(r.vpip)} of hands vs a ${POOL_AVG.vpip.toFixed(0)}% pool — that's wide. `
+          `You play ${fmtPct(r.vpip)} of hands vs a ${PA.vpip.toFixed(0)}% pool — that's wide. `
             + 'Tighten your opening range, especially from early position; a wide range value-bets thinner '
             + 'but also bluffs more, and attentive opponents punish both.',
           'value bet thin', 'tighten your range', null,
-          spreadEdge(s.vpip, POOL_AVG.vpip, POOL_SPREAD.vpip));
-      } else if (s.vpip < POOL_AVG.vpip - POOL_SPREAD.vpip) {
+          spreadEdge(s.vpip, PA.vpip, POOL_SPREAD.vpip));
+      } else if (s.vpip < PA.vpip - POOL_SPREAD.vpip) {
         add(65, 'Range',
-          `Plays only ${fmtPct(r.vpip)} of hands vs a ${POOL_AVG.vpip.toFixed(0)}% pool — `
+          `Plays only ${fmtPct(r.vpip)} of hands vs a ${PA.vpip.toFixed(0)}% pool — `
             + 'genuinely tight for this table. Respect their raises and steal their blinds relentlessly.',
-          `You play only ${fmtPct(r.vpip)} of hands vs a ${POOL_AVG.vpip.toFixed(0)}% pool — genuinely `
+          `You play only ${fmtPct(r.vpip)} of hands vs a ${PA.vpip.toFixed(0)}% pool — genuinely `
             + 'tight. Observant opponents will stop respecting your raises and steal your blinds relentlessly; '
             + 'widen up, especially in position and defending the blinds.',
           'steal their blinds', 'widen your range', ['preflop'],
-          spreadEdge(s.vpip, POOL_AVG.vpip, POOL_SPREAD.vpip));
+          spreadEdge(s.vpip, PA.vpip, POOL_SPREAD.vpip));
       }
     }
     if (r.pfr != null && r.vpip > 0 && n >= 20) {
@@ -9252,6 +9417,9 @@
     const p = STORE.players[xid];
     if (!p) return null;
     const r = computeRates(p);
+    // Same anchor the classification used — the report must not quote a
+    // different pool figure from the one the badge judged them against.
+    const PA = computeShrunkRates(p).anchor;
     const secs = [];
     const sec = (title) => { const s = { title, items: [] }; secs.push(s); return s; };
     const add = (s, text, act) => { if (text) s.items.push({ text, act: act || null }); };
@@ -9269,7 +9437,7 @@
     const pre = sec('Preflop');
     if (r.vpip != null) {
       add(pre, `Plays ${r.vpip > 30 ? 'very wide' : r.vpip > 20 ? 'moderately wide' : 'tight'} `
-        + `preflop (VPIP ${fmtPct(r.vpip)}, pool ${POOL_AVG.vpip.toFixed(0)}%).`);
+        + `preflop (VPIP ${fmtPct(r.vpip)}, pool ${PA.vpip.toFixed(0)}%).`);
     }
     if (r.pfr != null && r.vpip) {
       const ratio = r.pfr / r.vpip;
@@ -9280,10 +9448,10 @@
     if (r.limpShareOfVpip != null && p.limpMade > 0) {
       const share = r.limpShareOfVpip;
       add(pre, `Limps ${fmtPct(r.limp)} of hands — ${fmtPct(share)} of the pots they enter `
-        + `(pool ${POOL_AVG.limpShareOfVpip}%).`,
-      share > POOL_AVG.limpShareOfVpip + 12
+        + `(pool ${PA.limpShareOfVpip}%).`,
+      share > PA.limpShareOfVpip + 12
         ? 'Habitual limper: isolate wide in position, and expect a capped range when they only call.'
-        : share < POOL_AVG.limpShareOfVpip - 15
+        : share < PA.limpShareOfVpip - 15
           ? 'Rarely limps, so when they call it is a genuine calling range.'
           : null);
     }
@@ -9294,7 +9462,7 @@
           : null);
     }
     if (r.foldTo3Bet != null) {
-      add(pre, `Folds to 3-bets ${fmtPct(r.foldTo3Bet)} (${p.foldTo3BetOpp} samples, pool ${POOL_AVG.foldTo3Bet}%).`,
+      add(pre, `Folds to 3-bets ${fmtPct(r.foldTo3Bet)} (${p.foldTo3BetOpp} samples, pool ${PA.foldTo3Bet}%).`,
         r.foldTo3Bet > 65 ? '3-bet them light — their opens are close to free money.'
           : r.foldTo3Bet < 40 ? '3-bet for value only; they will not give up their opens.' : null);
     }
@@ -10941,8 +11109,16 @@
       + `<div class="tph-sz-legend">${legend}</div>${verdict}</td></tr>`;
   }
 
-  function statRow(label, rawValue, shrunkValue, key, recent) {
-    const norm = key ? POOL_AVG[key] : null;
+  // `anchor` is the pool figure this player is judged against — pass the
+  // `anchor` off their own computeShrunkRates result. Omitted, it falls back to
+  // the global POOL_AVG, which is right for a row with no player behind it.
+  //
+  // This has to be the SAME anchor the badge classified them with, or the
+  // Stats tab draws its tick and its +/- delta against a number the archetype
+  // was never computed from — two verdicts about one player, disagreeing, with
+  // nothing on screen saying why.
+  function statRow(label, rawValue, shrunkValue, key, recent, anchor) {
+    const norm = key ? ((anchor && anchor[key] != null) ? anchor[key] : POOL_AVG[key]) : null;
     const dev = deviation(shrunkValue, norm, key ? POOL_SPREAD[key] : null);
 
     const cls = dev ? `tph-dev-${dev.level}` : '';
@@ -11097,8 +11273,8 @@
           })()}
           <tr><th>Stat</th><th>Lifetime · recent</th><th>Pool</th></tr>
           <tr><td class="tph-stat-l">Hands</td><td class="tph-stat-v"><b>${p.hands}</b></td><td class="tph-stat-n">${p.hands < STORE.settings.minHands ? '<span class="tph-stat-norm">low</span>' : ''}</td></tr>
-          ${statRow('VPIP', r.vpip, s.vpip, 'vpip', recentStat(p, 'vpip'))}
-          ${statRow('PFR', r.pfr, s.pfr, 'pfr', recentStat(p, 'pfr'))}
+          ${statRow('VPIP', r.vpip, s.vpip, 'vpip', recentStat(p, 'vpip'), s.anchor)}
+          ${statRow('PFR', r.pfr, s.pfr, 'pfr', recentStat(p, 'pfr'), s.anchor)}
           ${(() => {
             // A shape, not a number: the blended VPIP/PFR figures above say
             // WHERE they are right now, this says whether they got there by
@@ -11115,11 +11291,11 @@
               + `<td class="tph-stat-v" colspan="2"><span class="tph-trend-label-v">V</span>${vpipSpark}`
               + `<span class="tph-trend-label-p">P</span>${pfrSpark}</td></tr>`;
           })()}
-          ${statRow('3-Bet', r.threeBet, s.threeBet, 'threeBet')}
-          ${statRow('Fold v 3B', r.foldTo3Bet, s.foldTo3Bet, 'foldTo3Bet')}
-          ${statRow('C-Bet', r.cbet, s.cbet, 'cbet')}
-          ${statRow('Fold v CB', r.foldToCbet, s.foldToCbet, 'foldToCbet')}
-          ${statRow('Limp', r.limpShareOfVpip, s.limpShareOfVpip, 'limpShareOfVpip')}
+          ${statRow('3-Bet', r.threeBet, s.threeBet, 'threeBet', null, s.anchor)}
+          ${statRow('Fold v 3B', r.foldTo3Bet, s.foldTo3Bet, 'foldTo3Bet', null, s.anchor)}
+          ${statRow('C-Bet', r.cbet, s.cbet, 'cbet', null, s.anchor)}
+          ${statRow('Fold v CB', r.foldToCbet, s.foldToCbet, 'foldToCbet', null, s.anchor)}
+          ${statRow('Limp', r.limpShareOfVpip, s.limpShareOfVpip, 'limpShareOfVpip', null, s.anchor)}
           <tr title="Limped, then re-raised the SAME hand — the trap line. Almost nobody does this light, so treat it as the strongest preflop signal on the table. Rare by nature, which is why the raw count sits beside the percentage: 2% off three hands and off three hundred are different claims. No pool figure exists for it, so there is no tick and no verdict.">
             <td class="tph-stat-l">Limp-3bet</td>
             <td class="tph-stat-v"><b>${fmtPct(r.limpRaise)}</b></td>
@@ -11806,8 +11982,11 @@
         const s = computeShrunkRates(p);
         // Raw figures shown, sample-adjusted figures colour them — same rule as
         // the Stats tab, so a two-hand player doesn't light up the list.
+        // Against this player's OWN anchor, same as the Stats tab and the
+        // badge. A list where the shading disagrees with the archetype beside
+        // it is worse than no shading.
         const cell = (raw, shrunk, key) => {
-          const d = deviation(shrunk, POOL_AVG[key], POOL_SPREAD[key]);
+          const d = deviation(shrunk, (s.anchor && s.anchor[key] != null) ? s.anchor[key] : POOL_AVG[key], POOL_SPREAD[key]);
           const c = d ? `tph-dev-${d.level}` : '';
           const a = d && d.level !== 'typical' ? (d.dir === 'up' ? '▲' : '▼') : '';
           return `<span class="${c}">${fmtPct(raw)}${a}</span>`;
@@ -13282,6 +13461,9 @@
       sizingScaleHtml,
       plShort,
       isHeroRecord,
+      poolAvgFor,
+      POOL_AVG_BY_STAKE,
+      vpipBars,
       playersSortValue,
       playersRowIsThin,
       get playersShowThin() { return playersShowThin; },

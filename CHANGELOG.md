@@ -9,6 +9,76 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.65.0
+
+Players are judged against the pool **they** play in, not one blended average
+across three tables that describes none of them.
+
+**The measurement.** Over 442 seat-resolved opponents, three stats show a real
+and monotonic stakes gradient:
+
+| table | n | VPIP | fold-to-3bet | limp share |
+|---|---|---|---|---|
+| Old Folks Home $500k | 132 | 54.9 | 47.9 | 50.0 |
+| River Wizard $1M | 214 | 46.2 | 51.6 | 45.1 |
+| Cat's Chance $2.5M | 81 | 42.6 | 58.7 | 33.3 |
+
+Lower stakes play looser, limp more and fold less to 3-bets — a coherent poker
+story rather than three unrelated numbers, which is most of why these are
+trusted enough to anchor on. A single `POOL_AVG` called the $500k pool loose
+almost by definition.
+
+**`poolAvgFor(p)` picks the anchor, per PLAYER, not per current table.** An
+archetype is a claim about the player, so it must not change because *you* sat
+down somewhere else — and every consumer of `POOL_AVG` already receives the
+player, whereas keying off the live table would mean threading `lastSeenBB`
+into pure classification functions.
+
+**Volume-weighted, not winner-take-all.** Measured, the two differ by a median
+of 0.02pp, because players are effectively single-stake — the median player has
+**99%** of their hands at one table (p25 77%, p10 58%). So the blend buys almost
+nothing on the numbers. It is still the right shape: winner-take-all puts a
+cliff at 50/50 where a 51/49 player gets a completely different anchor from a
+49/51 one, and this file settled that argument once already in `blendedRates`
+("Don't reintroduce a threshold", v0.39.0).
+
+**Only three stats.** Each stat's between-table span, measured against its own
+SD: `vpip` 0.71, `foldTo3Bet` 1.33, `limpShareOfVpip` 1.15 — real and monotonic.
+`cbet` (0.36) and `foldToCbet` (0.65) are **not** monotonic across three
+buckets, which with n=81 in the smallest is exactly what noise looks like;
+`pfr` (0.18) and `threeBet` (0.09) are flat. Encoding those would repeat the
+WTSD anchor mistake.
+
+**Shrinkage and classification move together, and that is the load-bearing
+part.** `computeShrunkRates` returns the anchor it used *on the rates object*,
+and the archetype bars derive from that same object via `vpipBars(r)`. Shrinking
+a $500k player toward 54.9 while judging them against a global bar would push
+thin $500k players over the "loose" line — the exact opposite of the intent — so
+the two cannot be split. `A.tight`/`A.loose` are now getters onto the global
+anchor with `A.tightMul`/`A.looseMul` as the actual constants, so "the pool bar"
+still has one value for anything that means exactly that.
+
+The Stats tab, the players-list shading, the tendency report and the
+exploit/leak plans all quote the **same** anchor. A sentence reading "vs a 42%
+pool" beside a bar computed from 54.9 argues with its own maths.
+
+**89 of 442 players relabel**: 36 `Fish → Balanced`, 31 `Station → Fish`, 8
+`Station → Balanced`, 7 `Balanced → Nit`. Every one comes from Old Folks Home
+(53) or River Wizard (36) and **none** from Cat's Chance, whose anchor sits
+within 0.1 of the old global — the labels moved exactly where the anchor did,
+which is the cleanest sanity check available here.
+
+Memoised per record, keyed on total tabled hands (a real version number for the
+mix): 0.14ms across 442 players, so the players-list path v1.63.0 optimised is
+untouched.
+
+`test/pool-anchor.test.js` is mutation-verified against eight regressions. Two
+survived the first draft and both were the test's fault, worth recording:
+"shrunk value sits above its anchor" is vacuous when the observation is above
+both anchors, and checking only VPIP let a revert of `foldTo3Bet` to the global
+figure pass clean. Both are now stated as a **difference between two identical
+records at different stakes**, per stat.
+
 ## 1.64.0
 
 `POOL_SPREAD` is measured now, not a judgement call — and the pool it was
