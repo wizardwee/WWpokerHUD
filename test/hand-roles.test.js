@@ -21,16 +21,41 @@ const A = (x, a, s) => ({ x, a, amt: 0, s });
 
 {
   // The opener raises, someone 3-bets. The 3-bettor is who everyone is now
-  // playing against — tagging the opener would name the wrong seat.
+  // playing against, so they hold `pfr` — but the opener KEEPS a chip. Losing
+  // it was the reported bug: a 3-bet un-badged the seat that opened, and a
+  // blank seat reads as "never raised" at a glance.
   const r = T.handRoles({ actions: [A('3', 'raise', 'preflop'), A('5', 'raise', 'preflop'), A('3', 'call', 'preflop')] });
   t.eq('the 3-bettor is the preflop aggressor', r.pfr, '5');
   t.eq('and the tag names the level', r.tag, '3B');
+  t.eq('the opener keeps a PFR chip through the 3-bet', r.preflop['3'], 'PFR');
+  t.eq('and the 3-bettor carries their own tier', r.preflop['5'], '3B');
 }
 
 {
   const r = T.handRoles({ actions: [A('3', 'raise', 'preflop'), A('5', 'raise', 'preflop'), A('3', 'raise', 'preflop')] });
   t.eq('a 4-bet returns the initiative to the opener', r.pfr, '3');
   t.eq('and is tagged 4B', r.tag, '4B');
+  // Each raiser is tagged at the tier of their OWN last raise, so the opener
+  // is promoted off PFR rather than showing two chips or a stale one.
+  t.eq('the 4-bettor shows their latest tier, not their first', r.preflop['3'], '4B');
+  t.eq('the 3-bettor still shows 3B', r.preflop['5'], '3B');
+  t.eq('tag agrees with the last raiser\'s own entry', r.tag, r.preflop[r.pfr]);
+}
+
+{
+  // Five-bet pot: the ladder keeps climbing and both seats stay chipped.
+  const r = T.handRoles({
+    actions: [A('3', 'raise', 'preflop'), A('5', 'raise', 'preflop'),
+      A('3', 'raise', 'preflop'), A('5', 'raise', 'preflop')],
+  });
+  t.eq('the 5-bettor is tagged 5B', r.preflop['5'], '5B');
+  t.eq('the 4-bettor is still tagged 4B', r.preflop['3'], '4B');
+}
+
+{
+  // A limped pot has nobody in the preflop map at all.
+  const r = T.handRoles({ actions: [A('4', 'call', 'preflop'), A('2', 'check', 'preflop')] });
+  t.eq('no preflop raiser means no preflop chips', Object.keys(r.preflop).length, 0);
 }
 
 {
@@ -66,6 +91,20 @@ const A = (x, a, s) => ({ x, a, amt: 0, s });
     actions: [A('3', 'raise', 'preflop'), A('7', 'call', 'preflop'), A('3', 'bet', 'flop')],
   });
   t.eq('the preflop raiser is never given a postflop chip', r.post['3'], undefined);
+  t.eq('and keeps their preflop chip on the flop', r.preflop['3'], 'PFR');
+}
+
+{
+  // The suppression covers EVERY preflop raiser, not just the last one. The
+  // opener leading after being 3-bet is a donk lead, and that read is
+  // deliberately given up: the badge has room for one chip, and "they raised
+  // preflop" is the statement that has to survive the whole hand.
+  const r = T.handRoles({
+    actions: [A('3', 'raise', 'preflop'), A('5', 'raise', 'preflop'), A('3', 'call', 'preflop'),
+      A('3', 'bet', 'flop')],
+  });
+  t.eq('an out-tiered preflop raiser gets no postflop chip', r.post['3'], undefined);
+  t.eq('their preflop chip survives the flop instead', r.preflop['3'], 'PFR');
 }
 
 {
@@ -90,6 +129,7 @@ const A = (x, a, s) => ({ x, a, amt: 0, s });
   const empty = T.handRoles(null);
   t.eq('no hand yields no preflop raiser', empty.pfr, null);
   t.eq('no hand yields an empty postflop map', Object.keys(empty.post).length, 0);
+  t.eq('no hand yields an empty preflop map', Object.keys(empty.preflop).length, 0);
   t.eq('a hand with no actions is the same', T.handRoles({ actions: [] }).tag, null);
 }
 

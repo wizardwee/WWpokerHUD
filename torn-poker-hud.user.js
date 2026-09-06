@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.59.0
+// @version      1.60.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,27 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.60.0 - Every preflop raiser keeps their chip for the whole hand. Reported
+ *          directly: the PFR tag should persist "even when there is a 3b or
+ *          more".
+ *            - handRoles tagged only the LAST preflop raiser, so a 3-bet
+ *              silently un-badged the seat that opened. That is backwards on
+ *              the hand where the chips matter most: in a 3-bet pot you are
+ *              reading two aggressors against each other, and a seat that
+ *              goes blank reads as "never raised" at a glance.
+ *            - roles.preflop is now a MAP, xid -> tier, each raiser tagged at
+ *              their OWN last raise — an opener who 4-bets reads 4B, not a
+ *              stale PFR and not two chips. roles.pfr/tag still name the last
+ *              raiser for anything that wants only that.
+ *            - The postflop suppression widens with it: NO preflop raiser
+ *              gets a DONK/RR chip, not just the last one. The cost is real
+ *              and accepted — an opener who calls a 3-bet and then leads the
+ *              flop IS donking, and the badge has room for one chip. "They
+ *              raised preflop" is the statement that has to survive the hand.
+ *            - The PFR tooltip no longer claims the holder was not re-raised,
+ *              because now they may have been: the highest tier still showing
+ *              is what holds the initiative.
  *
  * 1.59.0 - The seat badge gains a bet-size tell and a bluff figure, loses its
  *          capitals, and hero's shifts right. All four asked for directly.
@@ -99,47 +120,6 @@
  *              reaches a showdown to be counted, so the real rate is at least
  *              the figure shown.
  *
- * 1.57.0 - A live sizing read: what THIS bet looks like, not how often they
- *          bet. Asked for after the standing tell was found to be computed,
- *          correctly tagged, and still never surfacing.
- *            - Diagnosis first: the sizing entry was already tagged
- *              when:['facing'] and already got the +60 relevance boost at the
- *              right moment. It was outranked. Measured over the real pool,
- *              'read their bet size' (gain 50) fires for 33 players and LEADS
- *              for none — it loses every tiebreak to reads with a higher
- *              constant. Raising its gain would have replaced the ladder's
- *              judgement with an arbitrary one, so the fix is a different
- *              KIND of line rather than a bigger number on the old one.
- *            - liveSizingRead() takes the size they just chose and asks which
- *              of their own two showdown medians it sits nearer. Every other
- *              read in this file is a frequency; this one is about the bet in
- *              front of you, which is why it sits beside the pot-odds line
- *              rather than in the tip ladder.
- *            - Nothing is recomputed. The size is the `p` logAction already
- *              recorded on the action (betSizePctOf, against the pot BEFORE
- *              the bet); re-deriving it from the live pot would be a second
- *              calculation free to disagree with the banked one.
- *            - Nearest-pole, so a REVERSE tell (bigger when bluffing) needs no
- *              special case: the poles carry the direction. Pinned in both
- *              directions by test/sizing-read.test.js, which is the case it
- *              matters most to get right.
- *            - Silent in four separate cases, and they are different
- *              questions: no sized bet this street, too few categorised
- *              showdowns, medians too close to place a bet between, and the
- *              bet too near the midpoint. That last is the v1.32.0 "admits
- *              when it can't tell" rule — a coin flip dressed as a read is
- *              worse than one fewer line in a panel read mid-decision.
- *            - SIZING_LIVE_MIN_POLE (2) gates EACH pole, not the two summed.
- *              TEXTURE_MIN gates the sum, which let seven made-hand bets and
- *              a single bluff through with half the comparison resting on one
- *              observation dressed as a median. Over the real store that is
- *              21 "readable" opponents against 8 genuinely readable ones —
- *              v1.26.0's lesson applied to the pole rather than the pair.
- *            - The BLUFF pole is a floor biased low (a bluff that works never
- *              reaches a showdown to be sized), so the two verdicts are
- *              deliberately worded with different force: "looks like value"
- *              states it, "leans bluff" hedges and says why.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -201,7 +181,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.59.0';
+  const HUD_VERSION = '1.60.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -3874,39 +3854,61 @@
 
   // ---- This-hand roles, for the seat badges ----------------------------------
   //
-  // Who is the preflop raiser, and who has taken the betting lead off them
-  // postflop. DERIVED from hand.actions on every render rather than tracked in
-  // parallel state: there is nothing to keep in sync, it is correct after a
-  // mid-hand re-render (badges redraw every 4s and on every log line), and it
-  // empties itself at settlement because freshHandState() clears actions.
+  // Who raised preflop, and who has taken the betting lead off them postflop.
+  // DERIVED from hand.actions on every render rather than tracked in parallel
+  // state: there is nothing to keep in sync, it is correct after a mid-hand
+  // re-render (badges redraw every 4s and on every log line), and it empties
+  // itself at settlement because freshHandState() clears actions.
   //
-  // `pfr` is the LAST preflop raiser, not the first. That is the seat everyone
-  // else is playing against — in a 3-bet pot the 3-bettor holds the initiative,
-  // and it is also the player c-bet tracking already treats as the aggressor.
-  // hand.aggressorByStreet would give the same xid but not the raise COUNT,
-  // which is what lets the tag say 3B/4B instead of a flat "PFR".
+  // EVERY preflop raiser keeps a tag for the rest of the hand — `roles.preflop`
+  // is a map, not a single seat. It used to be one: `pfr` held the LAST raiser
+  // and nothing else was tagged, so a 3-bet silently un-badged the player who
+  // opened. That is exactly backwards on the hand where the chips matter most —
+  // in a 3-bet pot you are reading two aggressors against each other, and the
+  // opener going blank reads as "nobody raised" to a glance.
+  //
+  // Each raiser is tagged at the tier of their OWN last raise, so an opener who
+  // 4-bets reads 4B rather than staying on PFR. `pfr`/`tag` still name the last
+  // raiser — the seat everyone else is playing against, and the one c-bet
+  // tracking already treats as the aggressor — for callers that want just that.
   //
   // Inherits the known imprecision noted in the header: an all-in is counted as
   // a raise, so a short-stack all-in CALL can inflate the tag by one level.
+  function raiseTierTag(n) {
+    return n <= 1 ? 'PFR' : (n + 1) + 'B';
+  }
+
   function handRoles(hand) {
-    const roles = { pfr: null, tag: null, post: {} };
+    const roles = { pfr: null, tag: null, preflop: {}, post: {} };
     if (!hand || !hand.actions) return roles;
     let raises = 0;
     hand.actions.forEach((a) => {
       const aggressive = a.a === 'bet' || a.a === 'raise' || a.a === 'all-in';
       if (a.s === 'preflop') {
-        if (aggressive) { raises += 1; roles.pfr = a.x; }
+        if (aggressive) {
+          raises += 1;
+          roles.pfr = a.x;
+          roles.preflop[a.x] = raiseTierTag(raises);
+        }
         return;
       }
-      if (!aggressive || a.x === roles.pfr) return;
-      // Aggression postflop from someone who was NOT the preflop raiser. Only
-      // one player can open a street, so a `bet` here is a donk lead; a raise is
-      // a check-raise or a raise of the c-bet. Both say the same thing — the
+      // A preflop raiser is never given a postflop chip, and that now covers
+      // every one of them rather than only the last. Two reasons, and the first
+      // is the whole point of this function: their preflop tag has to survive
+      // the street, and the badge has room for one chip. The second is the
+      // original one — a marker on a c-bet carries no information because it is
+      // expected. The cost is real and accepted: an opener who calls a 3-bet
+      // and then leads the flop IS donking, and that read is now folded into
+      // the flatter "they raised preflop" statement the chip already makes.
+      if (!aggressive || roles.preflop[a.x]) return;
+      // Aggression postflop from someone who did NOT raise preflop. Only one
+      // player can open a street, so a `bet` here is a donk lead; a raise is a
+      // check-raise or a raise of the c-bet. Both say the same thing — the
       // initiative has changed hands — but they are different enough reads to
       // name separately. Latest action wins, so the tag tracks the live street.
       roles.post[a.x] = (a.a === 'bet') ? 'DONK' : 'RR';
     });
-    roles.tag = roles.pfr ? (raises <= 1 ? 'PFR' : (raises + 1) + 'B') : null;
+    roles.tag = roles.pfr ? roles.preflop[roles.pfr] : null;
     return roles;
   }
 
@@ -10245,10 +10247,12 @@
   }
 
   function roleTagText(tag) {
-    if (tag === 'DONK') return 'DONK = led out this street without being the preflop raiser.';
-    if (tag === 'RR') return 'RR = raised postflop without being the preflop raiser (check-raise or raise of the c-bet).';
-    if (tag === 'PFR') return 'PFR = made the last raise preflop, so they hold the initiative.';
-    return `${tag} = made the last preflop raise, a ${tag.replace('B', '')}-bet.`;
+    if (tag === 'DONK') return 'DONK = led out this street without having raised preflop.';
+    if (tag === 'RR') return 'RR = raised postflop without having raised preflop (check-raise or raise of the c-bet).';
+    // Every preflop raiser keeps a chip for the whole hand, so "PFR" no longer
+    // implies nobody re-raised — the highest tier still on the table does.
+    if (tag === 'PFR') return 'PFR = raised preflop. The highest tier showing holds the initiative.';
+    return `${tag} = re-raised preflop, a ${tag.replace('B', '')}-bet.`;
   }
 
   function renderBadges() {
@@ -10256,7 +10260,7 @@
     if (!STORE.settings.showBadges) return;
     // Computed once for the whole table, not per seat — it walks the action log.
     const roles = STORE.settings.showRoleBadges === false
-      ? { pfr: null, tag: null, post: {} } : handRoles(currentHand);
+      ? { pfr: null, tag: null, preflop: {}, post: {} } : handRoles(currentHand);
     // Also once per render, not per seat — affiliationFlags compares against
     // every OTHER seated xid, so computing the list once avoids an O(seats²)
     // re-scan of the DOM inside the per-seat loop below.
@@ -10290,9 +10294,10 @@
     const frag = document.createDocumentFragment();
     measured.forEach(({ xid, isSelf, rect }) => {
       const player = STORE.players[xid];
-      // This-hand role marker. A player can't be both, since handRoles skips the
-      // preflop raiser when it looks at postflop aggression.
-      const roleTag = roles.pfr === xid ? roles.tag : (roles.post[xid] || null);
+      // This-hand role marker. A player can't be both, since handRoles skips
+      // every preflop raiser when it looks at postflop aggression — which is
+      // also what keeps a PFR/3B chip on the seat for the whole hand.
+      const roleTag = roles.preflop[xid] || roles.post[xid] || null;
       const badge = document.createElement('div');
       badge.className = 'tph-badge' + (isSelf ? ' tph-badge-self' : '')
         + (roleTag ? ' tph-badge-wide' : '');

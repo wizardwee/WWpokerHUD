@@ -9,6 +9,39 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.60.0
+
+Every preflop raiser keeps their chip for the whole hand. Reported directly: the
+PFR tag should persist "even when there is a 3b or more".
+
+**`handRoles` tagged only the LAST preflop raiser**, so a 3-bet silently
+un-badged the seat that opened. That is backwards on the hand where the chips
+matter most: in a 3-bet pot you are reading two aggressors against each other,
+and a seat that goes blank reads as "never raised" at a glance rather than as
+"opened and got re-raised".
+
+**`roles.preflop` is now a map**, xid → tier, with each raiser tagged at the
+tier of their *own* last raise. An opener who 4-bets reads `4B`, not a stale
+`PFR` and not two chips. `roles.pfr` / `roles.tag` still name the last raiser —
+the seat everyone else is playing against, and the one c-bet tracking already
+treats as the aggressor — for anything that wants only that; `tag` is now just
+`preflop[pfr]`, so the two cannot disagree.
+
+**The postflop suppression widens with it.** No preflop raiser gets a `DONK`/`RR`
+chip, not just the last one. The cost is real and accepted: an opener who calls a
+3-bet and then leads the flop *is* donking, and that read is now folded into the
+flatter statement the chip already makes. The badge has room for one chip, and
+"they raised preflop" is the statement that has to survive the whole hand — which
+is the entire point of the change.
+
+**The `PFR` tooltip no longer claims the holder was not re-raised**, because now
+they may have been. It says the highest tier still showing is what holds the
+initiative.
+
+`test/hand-roles.test.js` pins the ladder from both ends: the opener keeps `PFR`
+through a 3-bet, is promoted to `4B` when they 4-bet, a 5-bet pot leaves both
+seats chipped, and an out-tiered raiser leading the flop gets no postflop chip.
+
 ## 1.59.0
 
 The seat badge gains a bet-size tell and a bluff figure, loses its capitals, and

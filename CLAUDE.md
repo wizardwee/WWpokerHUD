@@ -1005,11 +1005,23 @@ from the parse path — that is a second copy of state that can drift.
 
 Three choices worth preserving:
 
-- **The LAST preflop raiser, not the first.** In a 3-bet pot the 3-bettor is the
-  seat everyone else is playing against. `aggressorByStreet.preflop` gives the
-  same xid but not the raise *count*, which is what lets the chip say `3B`.
-- **The preflop raiser never gets a postflop chip.** Their c-bet is expected; a
-  marker on nearly every hand carries no information.
+- **Every preflop raiser keeps a chip for the whole hand (v1.60.0).**
+  `roles.preflop` is a map, xid → tier, each raiser tagged at the tier of their
+  *own* last raise — so an opener who 4-bets reads `4B`, not a stale `PFR`.
+  It used to tag only the LAST raiser, which meant a 3-bet silently un-badged
+  the seat that opened: backwards on the hand where the chips matter most, since
+  in a 3-bet pot you are reading two aggressors against each other and a blank
+  seat reads as "never raised". `roles.pfr`/`tag` still name the last raiser —
+  the seat everyone else is playing against, and the one c-bet tracking already
+  treats as the aggressor — and `tag` is derived as `preflop[pfr]` so the two
+  cannot disagree. `aggressorByStreet.preflop` gives the same xid but not the
+  raise *count*, which is what lets a chip say `3B`.
+- **No preflop raiser gets a postflop chip** — not just the last one. Their
+  c-bet is expected; a marker on nearly every hand carries no information. The
+  widening has a real cost, accepted deliberately: an opener who calls a 3-bet
+  and then leads the flop *is* donking, and that read is given up because the
+  badge has room for one chip and the preflop tag is the one that has to
+  survive the hand.
 - Inherits open finding #3 — an all-in counts as a raise, so an all-in *call*
   can inflate the tag one level.
 
