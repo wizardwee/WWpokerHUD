@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.60.0
+// @version      1.61.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,40 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.61.0 - DONK and PFR coexist. Asked for directly, and v1.60.0 had given
+ *          the read up on a width assumption that turns out to be wrong.
+ *            - Half of v1.60.0's rule was right and stays: the LAST preflop
+ *              raiser betting postflop is a c-bet, expected, and a marker on
+ *              an expected action carries no information.
+ *            - The other half was not. Applying it to EVERY preflop raiser
+ *              meant an opener who called a 3-bet and then led the flop was
+ *              unmarked — that player is donking into whoever took the
+ *              betting lead off them, one of the sharpest reads on the table,
+ *              and it was given up on the grounds that the badge had room for
+ *              one chip.
+ *            - It has room for two. Measured in a real browser against the
+ *              118px cap rather than assumed: PFR+DONK is 133px and clips,
+ *              PFR+DK is 119px and does not, 4B+DK is 113px. So DONK
+ *              compresses to DK ONLY when sharing the badge with a preflop
+ *              chip — alone it stays spelled out, because the badge sheds only
+ *              when width actually demands it, and the tooltip spells both out
+ *              either way. DK also matches its sibling RR, which was already
+ *              two characters.
+ *            - Rare by construction: needs a multi-raise pot AND a non-last
+ *              raiser taking the lead, so the extra width is almost never
+ *              paid. Known interaction, honest about it: a seat carrying two
+ *              chips AND the rare b-figure (136px) or the 📏 glyph (127px)
+ *              does clip, and badgeStats:false remains the escape hatch.
+ *            - The last-raiser filter runs AFTER the action walk, not during
+ *              it, because which player that is is only known once preflop has
+ *              been walked. Recording during and deleting after is what keeps
+ *              the rule expressible in one line.
+ *            - test/hand-roles.test.js pinned the OLD rule and failed on this
+ *              change, which is the test doing its job. Replaced with the new
+ *              rule pinned from both sides — the out-tiered raiser IS marked,
+ *              the c-bettor still is not — plus a case proving a raise from
+ *              that player still reads RR rather than DONK.
  *
  * 1.60.0 - Every preflop raiser keeps their chip for the whole hand. Reported
  *          directly: the PFR tag should persist "even when there is a 3b or
@@ -80,46 +114,6 @@
  *              overflow is pre-existing rather than introduced. badgeStats:
  *              false remains the escape hatch.
  *
- * 1.58.0 - The bet-sizing tells become a picture, and a count that was
- *          overstating itself gets fixed. Reported directly: "i also want to
- *          know the bluffing frequency, and bet tells in a more succint way.
- *          Its hard to see it from the numbers alone."
- *            - Exactly right, and the reason is structural: the READ is the
- *              GAP between two medians, and a gap is the one thing a column
- *              of figures cannot show. Four numeric rows made you do the
- *              comparison yourself. sizingScaleHtml puts bluff / draw / made
- *              on ONE axis so the separation is seen, and states the
- *              conclusion underneath — "Big bet = made hand. 84pp apart."
- *            - Letters ride the dots, figures sit in the legend below.
- *              Labelling in place would collide exactly when the medians are
- *              close, which is the case the picture most needs to render
- *              honestly: a player with no separation should LOOK like one.
- *            - Not red/green, same rule as the deviation indicators. Which
- *              hand they are holding is information, not good or bad news.
- *              Hue separates the poles and the letter carries identity, so
- *              neither is doing the job alone.
- *            - isHero flips the VOICE, not the numbers. The Stats tab is the
- *              same panel for an opponent and for you, and "their bet size
- *              tells you nothing" is nonsense about yourself — the same
- *              exploitText/leakText split buildTendencyEntries already makes.
- *              Your own record reads "No separation — your size gives nothing
- *              away", which over 25/25/25 spots is the good outcome.
- *            - THE BUG THIS SURFACED, and it is v1.26.0's rule broken again:
- *              betMadePct is the median of a BOUNDED window (25 sizes) while
- *              betMadeCount is the LIFETIME count of such bets. Quoting them
- *              together said "113% pot, 140 spots" when 25 sizes produced
- *              that median, and gating on the count let one stored size stand
- *              in for a median — v1.57.0's brand-new per-pole gate was
- *              checking the wrong number and passed a player holding exactly
- *              one. computeRates now exposes betMadeSample/betBluffSample/
- *              betDrawSample (the array lengths), and every median-adjacent
- *              count and gate reads those instead. The lifetime counts stay
- *              for bluffRate, which genuinely is a rate over them.
- *            - Bluff frequency and slowplay keep their own rows and their
- *              floor caveat: a bluff good enough to take the pot never
- *              reaches a showdown to be counted, so the real rate is at least
- *              the figure shown.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -181,7 +175,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.60.0';
+  const HUD_VERSION = '1.61.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -3892,23 +3886,31 @@
         }
         return;
       }
-      // A preflop raiser is never given a postflop chip, and that now covers
-      // every one of them rather than only the last. Two reasons, and the first
-      // is the whole point of this function: their preflop tag has to survive
-      // the street, and the badge has room for one chip. The second is the
-      // original one — a marker on a c-bet carries no information because it is
-      // expected. The cost is real and accepted: an opener who calls a 3-bet
-      // and then leads the flop IS donking, and that read is now folded into
-      // the flatter "they raised preflop" statement the chip already makes.
-      if (!aggressive || roles.preflop[a.x]) return;
-      // Aggression postflop from someone who did NOT raise preflop. Only one
-      // player can open a street, so a `bet` here is a donk lead; a raise is a
-      // check-raise or a raise of the c-bet. Both say the same thing — the
-      // initiative has changed hands — but they are different enough reads to
-      // name separately. Latest action wins, so the tag tracks the live street.
+      if (!aggressive) return;
+      // Postflop aggression. Only one player can open a street, so a `bet` here
+      // is a donk lead; a raise is a check-raise or a raise of the c-bet. Both
+      // say the initiative has changed hands, but they are different enough
+      // reads to name separately. Latest action wins, so the tag tracks the
+      // live street.
+      //
+      // Recorded for EVERYONE, preflop raisers included — the last raiser is
+      // filtered out below rather than here, because which player that is is
+      // only known once the whole preflop is walked.
       roles.post[a.x] = (a.a === 'bet') ? 'DONK' : 'RR';
     });
     roles.tag = roles.pfr ? roles.preflop[roles.pfr] : null;
+    // The LAST preflop raiser betting postflop is a c-bet, not a donk, and a
+    // marker on an expected action carries no information — that half of
+    // v1.60.0's rule was right and stays.
+    //
+    // What was wrong was applying it to every preflop raiser. An opener who
+    // called a 3-bet and then leads the flop is donking into the player who
+    // took the betting lead off them, which is one of the sharpest reads on the
+    // table, and v1.60.0 gave it up on the grounds that the badge had room for
+    // one chip. It has room for two — measured — so the read comes back and
+    // both chips show. Rare by construction: it needs a multi-raise pot AND a
+    // non-last raiser taking the lead, so the width is almost never paid.
+    if (roles.pfr) delete roles.post[roles.pfr];
     return roles;
   }
 
@@ -10297,7 +10299,11 @@
       // This-hand role marker. A player can't be both, since handRoles skips
       // every preflop raiser when it looks at postflop aggression — which is
       // also what keeps a PFR/3B chip on the seat for the whole hand.
-      const roleTag = roles.preflop[xid] || roles.post[xid] || null;
+      // Both, when both apply. `preTag` is what they did preflop and has to
+      // survive the whole hand; `postTag` is who has the initiative NOW.
+      const preTag = roles.preflop[xid] || null;
+      const postTag = roles.post[xid] || null;
+      const roleTag = preTag || postTag;
       const badge = document.createElement('div');
       badge.className = 'tph-badge' + (isSelf ? ' tph-badge-self' : '')
         + (roleTag ? ' tph-badge-wide' : '');
@@ -10395,9 +10401,14 @@
       // The role marker leads, and is shown even for an unseen player: someone
       // you have never met who has just 3-bet is exactly the seat you need
       // flagged, and "NEW" alone doesn't say that.
-      const roleHtml = roleTag
-        ? `<span class="tph-badge-role ${roles.post[xid] ? 'tph-role-post' : 'tph-role-pre'}">${roleTag}</span>`
-        : '';
+      // DONK compresses to DK only when it is sharing the badge with a preflop
+      // chip. Measured against the 118px cap: PFR+DONK is 133px and clips,
+      // PFR+DK is 119px and does not. Alone it stays spelled out, because the
+      // badge sheds only when width actually demands it — and the tooltip
+      // spells it out either way.
+      const postShort = postTag === 'DONK' && preTag ? 'DK' : postTag;
+      const roleHtml = (preTag ? `<span class="tph-badge-role tph-role-pre">${preTag}</span>` : '')
+        + (postTag ? `<span class="tph-badge-role tph-role-post">${postShort}</span>` : '');
       // The numbers are the widest part and the first thing to go when the badge
       // still won't fit — Settings → "Numbers on seat labels". Type, role and
       // the state emoji survive, because those are the read; V/P/A are the
@@ -10428,7 +10439,8 @@
           + statsHtml)
         + affilHtml;
       badge.title = `${isSelf ? 'You' : playerDisplayName(xid)} — ${hands} hand(s) seen. `
-        + (roleTag ? roleTagText(roleTag) + ' ' : '')
+        + (preTag ? roleTagText(preTag) + ' ' : '')
+        + (postTag ? roleTagText(postTag) + ' ' : '')
         + 'v = VPIP (hands played), p = PFR (raised preflop), a = AFq (postflop aggression)'
         + (bluffy ? ', b = bluff frequency' : '') + '. '
         + (useSession

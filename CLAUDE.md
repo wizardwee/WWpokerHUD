@@ -1016,12 +1016,19 @@ Three choices worth preserving:
   treats as the aggressor — and `tag` is derived as `preflop[pfr]` so the two
   cannot disagree. `aggressorByStreet.preflop` gives the same xid but not the
   raise *count*, which is what lets a chip say `3B`.
-- **No preflop raiser gets a postflop chip** — not just the last one. Their
-  c-bet is expected; a marker on nearly every hand carries no information. The
-  widening has a real cost, accepted deliberately: an opener who calls a 3-bet
-  and then leads the flop *is* donking, and that read is given up because the
-  badge has room for one chip and the preflop tag is the one that has to
-  survive the hand.
+- **Only the LAST preflop raiser is denied a postflop chip (v1.61.0).** Their
+  bet is a c-bet, expected, and a marker on an expected action carries no
+  information — that half of v1.60.0's rule was right and stays. Applying it to
+  *every* preflop raiser was the wrong half: an opener who called a 3-bet and
+  then leads the flop is donking into the player who took the lead off them,
+  which is one of the sharpest reads on the table. v1.60.0 gave it up on the
+  grounds that the badge had room for one chip; measured against the 118px cap
+  it has room for two, so both show and `DONK` compresses to `DK` **only** when
+  it is sharing the badge with a preflop chip (PFR+DONK is 133px and clips,
+  PFR+DK is 119px and does not). Rare by construction — it needs a multi-raise
+  pot AND a non-last raiser taking the lead — so the width is almost never
+  paid. The filter runs AFTER the action walk, because which player is the last
+  raiser is only known once preflop has been walked.
 - Inherits open finding #3 — an all-in counts as a raise, so an all-in *call*
   can inflate the tag one level.
 

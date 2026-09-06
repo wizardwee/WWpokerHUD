@@ -95,16 +95,32 @@ const A = (x, a, s) => ({ x, a, amt: 0, s });
 }
 
 {
-  // The suppression covers EVERY preflop raiser, not just the last one. The
-  // opener leading after being 3-bet is a donk lead, and that read is
-  // deliberately given up: the badge has room for one chip, and "they raised
-  // preflop" is the statement that has to survive the whole hand.
+  // The suppression covers the LAST preflop raiser only. An opener who called a
+  // 3-bet and then leads the flop is donking into the player who took the
+  // betting lead off them — one of the sharpest reads on the table, and NOT an
+  // expected c-bet. v1.60.0 suppressed it too, on the grounds that the badge
+  // had room for one chip; it has room for two (measured), so both show.
   const r = T.handRoles({
     actions: [A('3', 'raise', 'preflop'), A('5', 'raise', 'preflop'), A('3', 'call', 'preflop'),
       A('3', 'bet', 'flop')],
   });
-  t.eq('an out-tiered preflop raiser gets no postflop chip', r.post['3'], undefined);
-  t.eq('their preflop chip survives the flop instead', r.preflop['3'], 'PFR');
+  t.eq('an out-tiered preflop raiser leading IS a donk', r.post['3'], 'DONK');
+  t.eq('and keeps their preflop chip alongside it', r.preflop['3'], 'PFR');
+  // The player who actually took the lead preflop is still c-betting, and that
+  // half of the old rule is the half that was right.
+  t.eq('the last preflop raiser still gets no postflop chip', r.post['5'], undefined);
+  t.eq('and holds the higher tier', r.preflop['5'], '3B');
+}
+
+{
+  // A raise rather than a bet from an out-tiered raiser is RR, not DONK — the
+  // two are separate reads and the distinction must survive the change above.
+  const r = T.handRoles({
+    actions: [A('3', 'raise', 'preflop'), A('5', 'raise', 'preflop'), A('3', 'call', 'preflop'),
+      A('5', 'bet', 'flop'), A('3', 'raise', 'flop')],
+  });
+  t.eq('an out-tiered raiser check-raising reads RR', r.post['3'], 'RR');
+  t.eq('the c-bettor is still unmarked', r.post['5'], undefined);
 }
 
 {

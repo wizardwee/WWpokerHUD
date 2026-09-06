@@ -9,6 +9,55 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.61.0
+
+`DONK` and `PFR` coexist. Asked for directly — and v1.60.0 had given the read up
+on a width assumption that turns out to be wrong.
+
+**Half of v1.60.0's rule was right and stays.** The *last* preflop raiser
+betting postflop is a c-bet: expected, and a marker on an expected action
+carries no information.
+
+**The other half was not.** Applying the suppression to *every* preflop raiser
+left an opener who called a 3-bet and then led the flop completely unmarked.
+That player is donking into whoever took the betting lead off them, which is one
+of the sharpest reads on the table — and it was given up on the stated grounds
+that "the badge has room for one chip."
+
+It has room for two. Measured in a real browser against the 118px cap rather
+than assumed:
+
+| layout | width | clips |
+|---|---|---|
+| `PFR` alone | 100px | no |
+| `PFR` + `DONK` | 133px | **yes** |
+| `PFR` + `DK` | 119px | no |
+| `4B` + `DK` | 113px | no |
+
+So `DONK` compresses to `DK` **only when sharing the badge with a preflop
+chip**. Alone it stays spelled out, because the badge sheds only when width
+actually demands it, and the tooltip spells both out either way. `DK` also
+matches its sibling `RR`, which was already two characters — the four/two split
+was the inconsistency that made the pair not fit in the first place.
+
+Rare by construction: it needs a multi-raise pot *and* a non-last raiser taking
+the lead, so the extra width is almost never paid. One interaction worth being
+honest about: a seat carrying two chips *and* the rare bluff figure (136px) or
+the 📏 sizing glyph (127px) does clip. `badgeStats: false` remains the escape
+hatch, and the affiliation-glyph ordering noted in v1.59.0 still applies.
+
+The last-raiser filter runs **after** the action walk rather than during it,
+because which player that is is only known once preflop has been walked.
+Recording every postflop aggressor during the walk and deleting one entry after
+is what keeps the rule expressible in a single line.
+
+`test/hand-roles.test.js` pinned the old rule and failed on this change, which
+is the test doing its job rather than an obstacle. Replaced with the new rule
+pinned from both sides — the out-tiered raiser *is* marked, the c-bettor still
+is not — plus a case proving a raise from that same player still reads `RR`
+rather than `DONK`, since collapsing that distinction would be an easy silent
+casualty of the change.
+
 ## 1.60.0
 
 Every preflop raiser keeps their chip for the whole hand. Reported directly: the
