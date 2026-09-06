@@ -43,10 +43,11 @@ tracked-players browser, coach prompts in a resizable panel, a verified Monte
 Carlo equity engine, position from the seat ring, session tracking, bet-sizing
 tells, showdown ranges, and optional GitHub Gist sync.
 
-What is still unverified is called out where it lives: `POOL_SPREAD` is a
-judgement call (not re-derived when `POOL_AVG` was corrected to measured
-figures in v1.11.0 — see "The pool average is measured, not borrowed"), and
-the v0.22.0 identity/ring markers are read out of someone else's source.
+What is still unverified is called out where it lives: `POOL_AVG`'s central
+values are still the v1.11.0 measurement and are known to blend three tables
+with genuinely different populations (see "The pool is not one pool"), and the
+v0.22.0 identity/ring markers are read out of someone else's source.
+`POOL_SPREAD` was the other item here and was measured in v1.64.0.
 
 ## The critical constraint
 
@@ -1543,8 +1544,8 @@ correction actually landing cleanly:
   not algebraic functions of `POOL_AVG`, so correcting VPIP/PFR here did NOT
   re-examine whether they still sit at the right distance from the pool's new
   PFR/VPIP ratio (was 0.264, now 0.221) — left alone rather than guessed at.
-  `POOL_SPREAD` is the same story: still the original judgement-call spreads,
-  not re-derived from this measurement.
+  `POOL_SPREAD` was the same story until v1.64.0, which measured it — see
+  "Deviation indicators".
 - **`observedPoolAverages()` reports what this HUD has actually seen**, and the
   players list footer shows it beside the assumed figure — this is what made
   the correction possible, and is exactly how the NEXT one should happen too,
@@ -1638,9 +1639,22 @@ VPIP (norm ~42) is noise, 5pp on 3-bet (norm ~1.5) more than triples it. A
 single shared threshold calls the first notable and the second typical — exactly
 backwards. One spread = notable, two = extreme.
 
-Like `POOL_AVG`, the spreads are a **judgement call, not a measurement**. The
-honest version would be the population standard deviation of each stat, which
-nothing here has measured.
+**Measured as of v1.64.0** — this section used to say the spreads were a
+judgement call and that the honest version would be the population standard
+deviation "which nothing here has measured". It has been now: 442 seat-resolved
+opponents with 25+ hands each, read off `computeShrunkRates` (the same numbers
+`statRow` colours and `buildExploitPlan` thresholds on, so the spread is
+measured against what it gets compared with). Two were badly wrong in opposite
+directions — VPIP 10 against a measured 17, which flagged 62% of the pool as
+notable; c-bet 15 against a measured 9.5, which hid real deviations. Re-measure
+rather than nudge, the same discipline `POOL_AVG` is under.
+
+**One global set, and that is measured too, not assumed.** `POOL_AVG` has a
+real per-stake gradient but the SPREAD does not: within each of the three
+tables in the pool, VPIP SD is 15.9 / 17.1 / 17.8 against a pooled 17.3, and
+every other stat matches as closely. The between-table difference is small next
+to the within-table spread, so a stake-aware anchor does not drag a stake-aware
+spread behind it.
 
 Three rules the rendering follows, all of which exist for a reason:
 
@@ -1687,6 +1701,55 @@ A player seen for two hands who played both used to read as a 100%-VPIP maniac
 on the badge. `computeRates` stays **raw** — the Stats tab must show what was
 observed, and shrinkage is for classification only. AFq is deliberately left
 unshrunk because no published pool figure exists for it.
+
+## The pool is not one pool (v1.64.0)
+
+Measured over 442 seat-resolved opponents, bucketed by the stake they mostly
+play:
+
+| table | n | VPIP | fold-to-3bet | limp share |
+|---|---|---|---|---|
+| Old Folks Home $500k | 132 | **54.9** | 47.9 | 50.0 |
+| River Wizard $1M | 214 | **46.2** | 51.6 | 45.1 |
+| Cat's Chance $2.5M | 81 | **42.6** | 58.7 | 33.3 |
+
+A clean monotonic stakes gradient, and it tells a coherent poker story: lower
+stakes play looser, limp more, and fold less to 3-bets. **A single `POOL_AVG`
+describes none of these tables.** The v1.11.0 anchor (42.5) is almost exactly
+today's Cat's Chance figure, and the pool has since taken on 28% of its hands
+at the loosest table in the set — which is why the observed global average now
+reads 47.9 and why **updating it globally would be wrong**: it relabels 39
+players `Fish → Balanced`, i.e. it stops calling the $500k fish fish.
+
+### If a stake-aware anchor gets built, these are the measured answers
+
+- **Anchor per PLAYER, not per current table.** The label is about the player,
+  so it must not flicker when you move tables — and every consumer of
+  `POOL_AVG` already receives the player, whereas per-current-table would need
+  `lastSeenBB` threaded into pure classification functions.
+- **Volume-weight across the stakes they play; do not winner-take-all.** They
+  differ by a median of 0.02pp (players are effectively single-stake: the
+  median player has **99%** of their hands at one table, p25 77%, p10 58%), so
+  the blend costs nothing — but winner-take-all has a cliff at 50/50, and this
+  file already has the precedent against threshold-switching in `blendedRates`
+  ("Don't reintroduce a threshold", v0.39.0). Same argument, same answer.
+- **Only three stats earn a stake-aware anchor**: `vpip` (span 0.71 SD),
+  `foldTo3Bet` (1.33), `limpShareOfVpip` (1.15). Those are the ones with both a
+  real span AND a monotonic gradient. `cbet` (0.36) and `foldToCbet` (0.65) are
+  non-monotonic across three buckets, which with n=81 in the smallest is what
+  noise looks like; `pfr` (0.18) and `threeBet` (0.09) are flat. Don't encode
+  noise as a constant.
+- **Only three stakes have the sample to anchor at all** (214 / 132 / 81
+  players). Everything else in the store is ≤7 players and must fall back to
+  the global figure.
+- **Shrinkage and classification have to move together.** `classifyProvisional`
+  reads `computeShrunkRates`, so making only the prior stake-aware would shrink
+  a $500k player toward 54.9 while still judging them against a global bar —
+  pushing thin $500k players over the "loose" line, the exact opposite of the
+  intent. It is all-or-nothing, which is why it is its own change rather than a
+  rider on v1.64.0: `A.tight`/`A.loose` are module-level constants and
+  `ARCHETYPE_RULES` is a static array of closures over `POOL_AVG`, so a
+  per-player anchor means changing that rule signature. 76 references.
 
 ## Shared-affiliation badges, not a behavioural collusion detector (v1.8.0)
 

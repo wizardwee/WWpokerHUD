@@ -101,6 +101,57 @@ function mk(T, xid, o) {
   t.near('hero\'s own extreme numbers do not pull the average', obs.vpip, 50);
 }
 
+// --- "name:" pseudo-records are not players ---------------------------------
+//
+// A pseudo-record is a log name that never bound to a seat. It is not a thin
+// sample of a real player, it is a structurally skewed one: the record only
+// exists on hands where a log line named that player, so it never records the
+// hands they sat out of. Measured on a real store, 27 of them cleared the
+// 25-hand bar and read fold-to-3-bet 82.2% against 52.3% for seat-resolved
+// records. Excluding them is a correctness fix, so there is no sample
+// threshold involved and a big pseudo-record must not qualify.
+
+{
+  const T = load();
+  T.STORE = T.emptyStore();
+  T.heroXid = 'hero1';
+  mk(T, 'hero1', { hands: 500, vpip: 250, pfr: 100 });
+  mk(T, '111', { hands: 100, vpip: 40, pfr: 10 });
+  mk(T, '222', { hands: 100, vpip: 40, pfr: 10 });
+  mk(T, '333', { hands: 100, vpip: 40, pfr: 10 });
+
+  const clean = T.observedPoolAverages();
+  t.eq('three real opponents qualify', clean.players, 3);
+  t.near('and the average is theirs', clean.vpip, 40);
+
+  // A pseudo-record with plenty of hands and a wildly different rate. If it
+  // counted, both the player total and the average would move.
+  mk(T, 'name:GhostNote420', { hands: 400, vpip: 400, pfr: 0 });
+  const after = T.observedPoolAverages();
+  t.eq('a pseudo-record does not count toward the player total', after.players, 3);
+  t.near('nor does it move the average', after.vpip, 40);
+  t.eq('nor the player-hand sample', after.playerHands, clean.playerHands);
+
+  // The bar is what the id IS, not how much of it there is.
+  mk(T, 'name:Another', { hands: 5000, vpip: 5000, pfr: 0 });
+  t.eq('and volume does not buy a pseudo-record its way in',
+    T.observedPoolAverages().players, 3);
+}
+
+{
+  // The exclusion is on the pseudo prefix, not on anything that merely looks
+  // unusual — a real numeric xid with an odd rate is still a player.
+  const T = load();
+  T.STORE = T.emptyStore();
+  T.heroXid = 'hero1';
+  mk(T, '111', { hands: 100, vpip: 40, pfr: 10 });
+  mk(T, '222', { hands: 100, vpip: 40, pfr: 10 });
+  mk(T, '999', { hands: 100, vpip: 100, pfr: 0 }); // 100% VPIP, but real
+  const obs = T.observedPoolAverages();
+  t.eq('a real record with an extreme rate still counts', obs.players, 3);
+  t.near('and pulls the average with it', obs.vpip, 60);
+}
+
 // --- playerHands are SEAT OBSERVATIONS, not hands played --------------------
 //
 // This field used to be called totalHands and printed as "hands of evidence",

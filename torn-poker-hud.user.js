@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.63.1
+// @version      1.64.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,55 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.64.0 - POOL_SPREAD is measured now, not a judgement call, and the pool it
+ *          was measured from no longer counts records that are not players.
+ *            - POOL_SPREAD sat on estimates for eleven versions, with the
+ *              comment saying outright that the honest version would be the
+ *              population SD "which nothing here has measured". It has been
+ *              now, the same way POOL_AVG was corrected in v1.11.0: 442
+ *              seat-resolved opponents with 25+ hands each, out of a real
+ *              store, read off computeShrunkRates (the same numbers statRow
+ *              colours and buildExploitPlan thresholds on, so the spread is
+ *              measured against what it will be compared with).
+ *            - Two were badly wrong in opposite directions. VPIP was 10
+ *              against a measured 17: it flagged 272 of 442 players as
+ *              notable-or-worse, and calling 62% of the pool remarkable is the
+ *              same as saying nothing. C-bet was 15 against a measured 9.5,
+ *              hiding real deviations — 52 flagged before, 141 after. The rest
+ *              moved a little; limpShareOfVpip at 15 vs a measured 15.5 means
+ *              one of the seven original guesses was already right.
+ *            - Archetype labels are untouched, 0 of 442 changed, because
+ *              POOL_SPREAD does not feed classify(). This moves the deviation
+ *              shading and the exploit-plan bars only; total plan entries went
+ *              3459 -> 3407.
+ *            - ONE global set, deliberately, even though POOL_AVG has a real
+ *              per-stake gradient. Measured within each of the three tables in
+ *              the pool, VPIP SD is 15.9 / 17.1 / 17.8 against a pooled 17.3,
+ *              and every other stat matches as closely — the between-table
+ *              difference is small next to the within-table spread. So a
+ *              stake-aware anchor would not drag a stake-aware spread behind
+ *              it.
+ *            - POOL_AVG's own values are deliberately NOT updated here. The
+ *              observed global figures read higher on all seven stats, but
+ *              that is composition, not error: the pool spans three tables
+ *              with VPIP 54.9 / 46.2 / 42.6, and a single blended anchor at
+ *              47.9 would describe none of them. Updating it globally
+ *              relabels 39 players Fish -> Balanced, i.e. it stops calling the
+ *              $500k fish fish. That belongs with a stake-aware anchor, not
+ *              before one.
+ *            - "name:" pseudo-records are excluded from every pool figure.
+ *              They are log names that never bound to a seat, so a record only
+ *              exists on hands where a line named that player and never on the
+ *              hands they sat out of — structurally skewed, not merely thin.
+ *              27 cleared the 25-hand bar and read fold-to-3-bet 82.2% against
+ *              52.3% for seat-resolved records, pulling the pool figure up
+ *              1.6pp. A correctness fix, so there is no sample threshold on it
+ *              and volume cannot buy one in.
+ *            - analysis/pool-report.js keeps its own copy of that filter, and
+ *              its reconciliation assertion caught the divergence the instant
+ *              the real function changed and the copy had not — which is
+ *              exactly why that assertion exists instead of trusting the copy.
  *
  * 1.63.1 - The pool report said "75,721 hands of evidence" and was read as
  *          hands played. Reported directly, and correctly: "I don't think I
@@ -47,121 +96,6 @@
  *              a lot, that the mean stays unweighted (a 3000-hand player at
  *              VPIP 100 against three 30-hand players at 0 must average 25,
  *              not 36), and that the old conflating wording is gone.
- *
- * 1.63.0 - The players list was the most expensive thing in the HUD, and the
- *          cost was invisible: no error, no warning, just a panel that took a
- *          beat to open and typing that lagged the keyboard. Measured against
- *          a real 898-player export rather than guessed at.
- *            - 38-46ms of every render went into the SORT alone, against 12ms
- *              to compute and render every row it was sorting. Two mechanisms
- *              stacked. playersSortValue ran computeRates on its FIRST line,
- *              before looking at which column was asked for — so sorting by
- *              name, which reads nothing but p.name, built a full rate table
- *              and threw it away. And renderPlayersList evaluated that
- *              comparator inside every comparison: Array.sort called it 14,538
- *              times for 898 players, 16.2 per player.
- *            - computeRates now runs inside the one branch that needs it, and
- *              the sort decorates once per player then sorts on the stored
- *              key. The order is byte-identical on all five columns — pinned
- *              in test/players-list-cost.test.js, which is what makes this a
- *              speedup rather than a rewrite of the sort.
- *            - Records under minHands are folded away by default, behind a
- *              "Show all" chip. 390 of 898 were below the bar, and every one
- *              renders as "Unrated" with no usable read, because that is
- *              exactly what classify() returns below the gate. The gate reads
- *              STORE.settings.minHands rather than a constant of its own, so
- *              it can never disagree with the bar that makes those rows
- *              unrated in the first place.
- *            - The chip states the gate in BOTH directions, always. A control
- *              that is currently hiding nothing still has to say what it does,
- *              or the first time it does hide something it reads as missing
- *              data — the same failure heroProblem() and the hidden ME chip
- *              exist to prevent. The name filter runs BEFORE the gate, so
- *              searching a one-hand player reads "0 of 1" with the count
- *              beside it rather than an empty list with no explanation.
- *              Hero's own record is never hidden, the same exemption it
- *              already carries through every prune rule.
- *            - Net: one render of that panel goes from ~55-62ms to 8.3ms, and
- *              from 898 table rows to 508.
- *            - resolveSeatKey's name-scan fallback built and sorted an index
- *              of EVERY tracked player, per seat, per sweep. Hoisted to once
- *              per sweep behind SEAT_CACHE_MS. It is dormant on this layout —
- *              the XID is on the element id, so resolveXidFromSeat answers
- *              first — but at ~0.38ms per seat it would be roughly 8ms/sec of
- *              CPU if Torn ever changed that id format, growing with the
- *              store up to PRUNE_PLAYER_CAP. A cliff that steep should not sit
- *              one line deep behind a selector nobody here can verify.
- *            - Deliberately NOT changed: observedPoolAverages() stays
- *              uncached. It was measured at 4.3ms against poolTipSpread()'s
- *              19ms, which corrects the old note claiming the gap was an order
- *              of magnitude — but the conclusion holds for a better reason.
- *              renderPlayersList calls it exactly once per render (the export
- *              beside it is a thunk), so there is no duplicated work to
- *              remove, only real work to serve stale — and its other reader is
- *              poolTendencyExport(), the file the NEXT POOL_AVG correction
- *              gets measured from. A cache was written, made
- *              test/archetype.test.js fail by serving a stale null, and was
- *              reverted rather than the test being loosened.
- *
- * 1.62.0 - One seat sweep per tick, and a showdown poll that backs off when
- *          nobody is left to show. Both are cost reductions on the hottest DOM
- *          path in the file, taken after counting what the timers actually do
- *          rather than assuming.
- *            - seatEls() memoises document.querySelectorAll(seatContainer) for
- *              SEAT_CACHE_MS (150). Eight functions did that walk, and several
- *              fire back to back inside one tick: the 3s watcher ran between
- *              three and six of them depending on which API keys are set, and
- *              renderBadges did TWO per render (seatedXids for the affiliation
- *              comparison, then its own loop). Each of those is now one walk.
- *            - The scroll case is the big one. renderBadges is rAF-driven on
- *              scroll, so dragging the table ran ~120 full-document sweeps a
- *              second; the cache collapses a burst of frames to roughly seven.
- *              Badge POSITIONS are unaffected — getBoundingClientRect is still
- *              called live on each cached element, and only the element list
- *              is reused.
- *            - 150ms is pinned from both sides, and the reason is the
- *              departure watch. Every false "player left" comes from a sweep
- *              reading SHORT, so a window long enough to serve one tick's list
- *              to the next tick would invent events. Every interval here is
- *              400ms or slower, so a window under that can only ever collapse
- *              reads inside ONE tick — and a 150ms-old list is a COMPLETE read
- *              of the table, not a partial one. runDeepScan deliberately reads
- *              the document directly: a calibration report that describes a
- *              table which has already changed is worse than no report.
- *            - harvestShownCards polls every 400ms and swept the whole
- *              document each time, whatever the hand was doing. It now checks
- *              hand.playersIn.size first — a Set read, no DOM — and backs off
- *              to one poll in three once everyone but one player has folded,
- *              which is how most hands end.
- *            - It DEGRADES rather than stops, deliberately. "No showdown is
- *              possible" rests on every fold line having been seen, and missed
- *              log lines are this file's recurring failure; a wrong answer
- *              would blind the primary showdown source on a layout whose
- *              reveal lines cannot be trusted. A hand with no readable
- *              playersIn polls at full rate. Cards stay up until the next
- *              deal, so 1.2s still catches them — inside the 1s that was
- *              already judged too slow, which is why the back-off is two ticks
- *              and not five.
- *            - Take the tick, THEN skip. The poll that first sees the field
- *              collapse is the one worth keeping, since the last fold is when
- *              a player is most likely to flash a card. The settlement re-read
- *              passes force:true — it gets one guaranteed look, and a hand
- *              that got there by everyone folding is exactly the shape the
- *              back-off throttles.
- *            - Corrected a comment that was simply false: the poll did NOT
- *              "do no work at all once a hand's reveals are recorded". The
- *              per-seat check is inside the sweep, so a fully recorded hand
- *              still walked the document and resolved every seat key each
- *              tick; only the deep card read was skipped.
- *            - test/seat-sweep.test.js, mutation-verified against five
- *              regressions (a reader routed back to a bare sweep, skip-first
- *              ordering, force ignored, failing closed on a missing
- *              playersIn, and the deep scan reading the cache).
- *            - test/stack-tables.test.js swaps the seat DOM between lines to
- *              simulate successive ticks, which the cache would otherwise
- *              swallow. It now declares the tick boundary explicitly; without
- *              that it would have been asserting against the previous line's
- *              seats and proving nothing.
  *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
@@ -224,7 +158,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.63.1';
+  const HUD_VERSION = '1.64.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -6485,6 +6419,15 @@
       // Hero's own record is not part of the opponent pool, and including it
       // would bias the average toward your own style.
       .filter((xid) => heroUnresolved() || String(xid) !== String(heroXid))
+      // "name:" pseudo-records are NOT players. They are log names that never
+      // bound to a seat, and their stats are structurally skewed rather than
+      // merely thin: a pseudo-record only exists on hands where a log line
+      // named that player, so it never records the hands they sat out of.
+      // Measured on a real store, 27 of them cleared the 25-hand bar and read
+      // fold-to-3-bet 82.2% against 52.3% for seat-resolved records — dragging
+      // the pool figure up 1.6pp. Excluding them is a correctness fix, not a
+      // sample-size judgement, which is why there is no threshold here.
+      .filter((xid) => !String(xid).startsWith('name:'))
       .map((xid) => STORE.players[xid])
       .filter((p) => p && p.hands >= POOL_OBS_MIN_HANDS);
   }
@@ -6663,22 +6606,54 @@
   // How far from POOL_AVG a stat has to move before it means anything, in
   // percentage points.
   //
-  // These are a JUDGEMENT CALL, not a measurement. The honest thing would be the
-  // population standard deviation of each stat, which nothing here has measured
-  // — so they are set from how much room each stat has and how much a difference
-  // changes play. The scale is what makes deviations comparable: 5pp on VPIP
-  // (norm 50.9) is noise, while 5pp on 3-bet (norm 3.7) more than doubles it.
+  // MEASURED as of v1.64.0 — these were a judgement call for eleven versions,
+  // and this section used to say the honest version would be the population
+  // standard deviation of each stat, "which nothing here has measured". It has
+  // now been measured, the same way POOL_AVG was corrected in v1.11.0: 442
+  // seat-resolved opponents with 25+ hands each, out of a real store.
+  //
+  // Taken from computeShrunkRates, not computeRates. A raw rate on a thin
+  // sample carries binomial noise that inflates the SD without saying anything
+  // about how players actually differ; the shrunk figure is also the one
+  // statRow() colours and buildExploitPlan() thresholds on, so the spread is
+  // measured on the same numbers it will be compared against. Read at a >=100
+  // hand cutoff (n=207) and cross-checked at >=200 (n=100).
+  //
+  //   stat              was   now    measured (>=25 / >=100 / >=200)
+  //   vpip               10    17     17.3 / 17.3 / 16.1   was badly too TIGHT
+  //   pfr                 6     7      8.0 /  7.5 /  6.6
+  //   threeBet            2   1.5      2.0 /  1.6 /  1.3
+  //   foldTo3Bet         12     9      8.1 /  9.0 /  9.7
+  //   cbet               15   9.5      9.5 /  9.5 /  9.5   was badly too WIDE
+  //   foldToCbet         12    10      9.9 / 10.0 /  9.5
+  //   limpShareOfVpip    15  15.5     14.6 / 16.0 / 16.1   judgement was right
+  //
+  // What that fixed, measured over the same pool: VPIP flagged notable-or-worse
+  // on 272 of 442 players before and 170 after — a spread of 10 called 62% of
+  // the pool remarkable, which is the same as saying nothing. C-bet went the
+  // other way, 52 to 141: a spread of 15 was hiding real deviations. Archetype
+  // labels are untouched (0 of 442 changed) because POOL_SPREAD does not feed
+  // classify(); this moves the deviation shading and the exploit-plan bars.
+  //
+  // ONE GLOBAL SET, deliberately, even though POOL_AVG has a real per-stake
+  // gradient. The spread does NOT vary by stake — measured within each of the
+  // three tables in the pool, VPIP SD is 15.9 / 17.1 / 17.8 against a pooled
+  // 17.3, and every other stat matches just as closely. The between-table
+  // difference is small next to the within-table spread, so pooling barely
+  // inflates it. That is what keeps a stake-aware anchor from dragging a
+  // stake-aware spread along behind it.
   //
   // One spread = "notable", two = "extreme". Adjust these rather than adding
-  // per-stat special cases at the call sites.
+  // per-stat special cases at the call sites — and re-measure rather than
+  // nudging, now that there is a way to.
   const POOL_SPREAD = {
-    vpip: 10,
-    pfr: 6,
-    threeBet: 2,
-    foldTo3Bet: 12,
-    cbet: 15,
-    foldToCbet: 12,
-    limpShareOfVpip: 15,
+    vpip: 17,
+    pfr: 7,
+    threeBet: 1.5,
+    foldTo3Bet: 9,
+    cbet: 9.5,
+    foldToCbet: 10,
+    limpShareOfVpip: 15.5,
   };
 
   // 'typical' | 'notable' | 'extreme', plus direction. Null norm means the stat

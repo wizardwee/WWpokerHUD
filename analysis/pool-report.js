@@ -90,10 +90,14 @@ const pseudoXids = allXids.filter((x) => x.startsWith('name:'));
 const pseudoQualifying = pseudoXids
   .map((x) => T.STORE.players[x])
   .filter((p) => p && p.hands >= 25);
+// Excluded since v1.64.0. Still counted and printed here, because "how many
+// log names never bound to a seat" is a health signal about name resolution
+// itself — a number that climbs means nameToXidGuess is losing players.
 line(`Players total: ${allXids.length}. Pseudo ("name:") records: ${pseudoXids.length}, `
   + `of which ${pseudoQualifying.length} have >=25 hands `
-  + `(${pseudoQualifying.reduce((a, p) => a + p.hands, 0)} hands total) and DO count toward every pool `
-  + 'figure below — poolQualifyingPlayers() only excludes hero, not pseudo-records.');
+  + `(${pseudoQualifying.reduce((a, p) => a + p.hands, 0)} hands total). These are EXCLUDED from every `
+  + 'pool figure below (v1.64.0) — they are log names that never bound to a seat, so they only record '
+  + 'hands where a line named them and never the hands those players sat out of.');
 
 // ---------------------------------------------------------------------------
 hr('1. POOL AVERAGES vs ASSUMED (POOL_AVG)');
@@ -145,6 +149,12 @@ hr('2. SPREAD MEASUREMENT (candidate POOL_SPREAD)');
 function qualifyingPlayers(minHands) {
   return allXids
     .filter((x) => x !== T.heroXid)
+    // Pseudo-records excluded since v1.64.0, matching poolQualifyingPlayers().
+    // This line was added BECAUSE the reconciliation assertion below caught the
+    // divergence the moment the real function changed and this copy did not —
+    // which is the entire reason that assertion exists rather than trusting the
+    // copy by construction.
+    .filter((x) => !String(x).startsWith('name:'))
     .map((x) => T.STORE.players[x])
     .filter((p) => p && p.hands >= minHands);
 }

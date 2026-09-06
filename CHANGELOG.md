@@ -9,6 +9,65 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.64.0
+
+`POOL_SPREAD` is measured now, not a judgement call — and the pool it was
+measured from no longer counts records that are not players.
+
+**It sat on estimates for eleven versions**, with the comment saying outright
+that the honest version would be the population standard deviation "which
+nothing here has measured". It has been now, the same way `POOL_AVG` was
+corrected in v1.11.0: 442 seat-resolved opponents with 25+ hands each, out of a
+real store. Read off `computeShrunkRates` rather than `computeRates` — a raw
+rate on a thin sample carries binomial noise that inflates the SD without saying
+anything about how players differ, and the shrunk figure is also the one
+`statRow()` colours and `buildExploitPlan()` thresholds on, so the spread is
+measured against the numbers it will be compared with.
+
+| stat | was | now | measured (≥25 / ≥100 / ≥200) |
+|---|---|---|---|
+| vpip | 10 | **17** | 17.3 / 17.3 / 16.1 — badly too tight |
+| pfr | 6 | 7 | 8.0 / 7.5 / 6.6 |
+| threeBet | 2 | 1.5 | 2.0 / 1.6 / 1.3 |
+| foldTo3Bet | 12 | 9 | 8.1 / 9.0 / 9.7 |
+| cbet | 15 | **9.5** | 9.5 / 9.5 / 9.5 — badly too wide |
+| foldToCbet | 12 | 10 | 9.9 / 10.0 / 9.5 |
+| limpShareOfVpip | 15 | 15.5 | 14.6 / 16.0 / 16.1 — guess was right |
+
+**Two were wrong in opposite directions.** VPIP flagged 272 of 442 players as
+notable-or-worse; calling 62% of the pool remarkable is the same as saying
+nothing. It now flags 170. C-bet went the other way — 52 to 141 — because a
+spread of 15 was hiding real deviations.
+
+**Archetype labels are untouched** (0 of 442 changed): `POOL_SPREAD` does not
+feed `classify()`. This moves the deviation shading and the exploit-plan bars
+only; total plan entries went 3459 → 3407.
+
+**One global set, deliberately**, even though `POOL_AVG` has a real per-stake
+gradient. Measured *within* each of the three tables in the pool, VPIP SD is
+15.9 / 17.1 / 17.8 against a pooled 17.3, and every other stat matches as
+closely — the between-table difference is small next to the within-table
+spread. A stake-aware anchor would not drag a stake-aware spread behind it.
+
+**`POOL_AVG`'s own values are deliberately NOT updated here.** The observed
+global figures read higher on all seven stats, but that is composition, not
+error: the pool spans three tables at VPIP 54.9 / 46.2 / 42.6, and a single
+blended anchor at 47.9 describes none of them. Updating it globally relabels 39
+players `Fish → Balanced` — it stops calling the $500k fish fish. That belongs
+with a stake-aware anchor, not before one.
+
+**`name:` pseudo-records are excluded from every pool figure.** They are log
+names that never bound to a seat, so a record only exists on hands where a line
+named that player and never on the hands they sat out of — structurally skewed,
+not merely thin. 27 cleared the 25-hand bar and read fold-to-3-bet 82.2% against
+52.3% for seat-resolved records, pulling the pool figure up 1.6pp. A correctness
+fix, so there is no sample threshold on it and volume cannot buy one in.
+
+`analysis/pool-report.js` keeps its own copy of that filter, and its
+reconciliation assertion caught the divergence the instant the real function
+changed and the copy had not — which is exactly why that assertion exists
+instead of trusting the copy by construction.
+
 ## 1.63.1
 
 The pool report said "75,721 hands of evidence" and was read as hands played.
