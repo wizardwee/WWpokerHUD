@@ -9,6 +9,90 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.66.0
+
+Manual player tags — your own read on a seat, for the things the stats
+structurally cannot see.
+
+**Four, mutually exclusive**, one per player or none:
+
+| | tag | what you do about it |
+|---|---|---|
+| 🎣 | Bluffs | Call them down lighter. |
+| 📞 | Station | Never bluff them. Value bet thin. |
+| 🚪 | Folds | Bet at them relentlessly. |
+| 🐍 | Traps | Beware the check-raise; check back more. |
+
+Each carries the **action**, not just a label. A tag that doesn't change what
+you do is a note, and there is a Notes field directly below it for that.
+
+**Why a human is allowed to overwrite a measurement here:** each covers a
+*structural* blind spot rather than a thin sample. `bluffRate` only ever counts
+bets that reached a real showdown, so a bluff that took the pot uncontested is
+invisible to it — already documented as an asymmetric floor. `texture.checkMade`
+needs a showdown to record a slowplay, so the check-raise that made you fold
+never enters the sample. You can see what those cannot.
+
+Set in the player panel's **Notes tab**, which was already the tab for what
+*you* know about a player. Re-tapping the active chip clears it, so there is no
+separate "none" chip to hunt for on a phone.
+
+**The glyph sits ahead of the inferred state emoji (🤮🔥📏), not among them** —
+on the badge and in the players list. Position is the only cheap signal that
+separates what you asserted from what the HUD worked out, and telling those
+apart matters: an inferred read can be wrong about a player, a manual one can
+only be out of date. It shows on a `NEW` seat too, since a tag from last
+session is exactly the read worth having before a single hand is tracked.
+
+**Width measured in a browser against the 118px cap, not estimated.** The tag
+costs 12px:
+
+| badge contents | width |
+|---|---|
+| type + numbers (no tag) | 77px |
+| **+ manual tag** | **89px** |
+| + tag + tilt | 101px |
+| + tag + tilt + heat | 113px |
+| + tag + tilt + heat + size | **125px — clips** |
+
+The only case that clips needs a player simultaneously tagged, tilting, running
+hot *and* carrying a readable size tell — rare by construction, and
+`badgeStats: false` remains the escape hatch. (Chromium metrics; iOS emoji may
+differ a little.)
+
+Glyphs are all Unicode 6.0 single codepoints with **no variation selector**,
+because this renders on whatever Safari the phone has and a VS16 sequence is
+exactly what turns into a hollow box on the one device nobody working on this
+can test. The test scans for that.
+
+**Deliberately not fed to the coach.** The seat and the panel say it; the coach
+keeps ranking measured reads.
+
+### Fixed on the way in: a merge was already destroying your notes
+
+`mergeStores` swaps the **whole** player record for whichever side has more
+hands — so a gist merge from a device that had seen a player more silently
+destroyed anything typed here. `p.notes` has been losable that way for as long
+as notes have existed, and tags would have inherited it exactly. Manual fields
+are now carried across the swap: **a counter is rebuilt by playing more hands;
+judgement is not.**
+
+**Local wins when both devices tagged the same player differently.** There is no
+timestamp to order them by, and the alternative overwrites what you can see on
+the device you're sitting at with something you can't. The remote value is
+adopted only where local has none, so a tag propagates to a device that hasn't
+made its own call. Known gap, stated rather than solved: two devices that
+disagree keep disagreeing until one is cleared.
+
+`test/player-tags.test.js` is mutation-verified against eight regressions,
+including the merge losing a manual field, the merge mutating the caller's
+remote store, and a glyph gaining a variation selector.
+
+One process note worth keeping: the CSS comment for the new chips hit the
+documented template-literal trap on the first write — a backtick inside a
+stylesheet comment terminates the string. `node test/run.js` caught it on the
+first run, which is most of why it runs first.
+
 ## 1.65.0
 
 Players are judged against the pool **they** play in, not one blended average

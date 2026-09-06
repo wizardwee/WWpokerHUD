@@ -1783,6 +1783,66 @@ records at different stakes instead. And checking only VPIP let a revert of
 `foldTo3Bet` to the global figure pass clean, because the three are separate
 lines in `computeShrunkRates`.
 
+## Manual player tags are the one read a human asserts (v1.66.0)
+
+Everything else in this file is derived from counters. `PLAYER_TAGS` is four
+reads you set by hand — 🎣 Bluffs, 📞 Station, 🚪 Folds, 🐍 Traps — mutually
+exclusive, one per player or none, stored sparsely as `p.tag`.
+
+**The bar for adding one is a STRUCTURAL blind spot, not a thin sample.** Each
+of the four covers something the stats cannot ever see, however many hands
+accrue: `bluffRate` only counts bets that reached a real showdown, so a bluff
+that took the pot uncontested is invisible to it (the asymmetric floor
+documented under "Bluff tracking"); `texture.checkMade` needs a showdown to
+record a slowplay, so the check-raise that made you fold never enters the
+sample. **Don't add a fifth tag for something more hands would fix** — that is
+a sample-size problem, and shrinkage already handles it.
+
+Each tag carries its `act`. A tag that doesn't change what you do is a note,
+and the Notes field sits directly below it.
+
+**The glyph goes AHEAD of the inferred emoji (🤮🔥📏), never among them** — on
+the badge and in the players list, one vocabulary so a row and a seat can't
+read differently. Position is the only cheap signal separating what you
+asserted from what the HUD worked out, and that distinction is real: an
+inferred read can be *wrong* about a player, a manual one can only be *out of
+date*. The report marks it the same way, in words.
+
+**Width is measured, not estimated** (Chromium, against the 118px cap): the tag
+costs 12px, taking type+numbers from 77 to 89px, +tilt to 101, +tilt+heat to
+113. Only tag+tilt+heat+size clips, at 125px, and that needs a player
+simultaneously tagged, tilting, hot and size-readable. Re-measure rather than
+guess if a sixth glyph is ever proposed.
+
+**Glyphs must be bare single codepoints, Unicode 6.0-era.** A VS16 sequence or
+a 2018 emoji is exactly what renders as a hollow box on the iOS JSC webview
+nobody here can test — same class of hazard as the regex lookbehind.
+`test/player-tags.test.js` scans for variation selectors, ZWJ sequences and
+multi-codepoint glyphs.
+
+Not fed to the coach, by decision: the seat and the panel carry it, and the
+coach keeps ranking measured reads.
+
+### A merge was destroying manual fields, and notes had the bug already
+
+`mergeStores` takes whichever record has more hands and **discards the other
+whole record**. So a gist merge from a device that had seen a player more
+silently wiped anything typed here — `p.notes` has been losable that way for as
+long as notes existed. `MANUAL_FIELDS` (`tag`, `notes`) are now carried across
+the swap in both directions.
+
+The principle, and the one to apply to any future hand-entered field: **a
+counter is rebuilt by playing more hands; judgement is not.** Same reasoning
+that exempts hero's record from every prune rule.
+
+**Local wins a genuine disagreement.** No timestamp exists to order two tags
+by, and the alternative overwrites what you can see on the device you are
+sitting at with something you cannot. Remote is adopted only where local has
+none. Known gap, stated rather than solved: two devices that tag the same
+player differently keep disagreeing until one is cleared. The merge also
+**copies rather than mutates** — `remotePlayer` belongs to the caller's freshly
+parsed gist, and writing through it would edit an object they still hold.
+
 ## Shared-affiliation badges, not a behavioural collusion detector (v1.8.0)
 
 HopesG's HUD (see below) does real behavioural collusion detection — raise

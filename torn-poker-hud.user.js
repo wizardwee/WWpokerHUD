@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.65.0
+// @version      1.66.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,68 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.66.0 - Manual player tags: your own read on a seat, for the things the
+ *          stats structurally cannot see.
+ *            - Four, mutually exclusive, one per player or none. 🎣 Bluffs
+ *              (call them down lighter), 📞 Station (never bluff them, value
+ *              bet thin), 🚪 Folds (bet at them relentlessly), 🐍 Traps
+ *              (beware the check-raise). Each carries the ACTION, not just a
+ *              label — a tag that doesn't change what you do is a note, and
+ *              there is a Notes field directly below it for that.
+ *            - The justification for letting a human overwrite a measurement
+ *              is that each covers a STRUCTURAL blind spot rather than a thin
+ *              sample. bluffRate only ever counts bets that reached a real
+ *              showdown, so a bluff that took the pot uncontested is invisible
+ *              to it — already documented as an asymmetric floor. Likewise
+ *              texture.checkMade needs a showdown to record a slowplay, so the
+ *              check-raise that made you fold never enters the sample.
+ *            - Set in the player panel's Notes tab, which was already the tab
+ *              for what YOU know about a player. Re-tapping the active chip
+ *              clears it, so there is no separate "none" chip to hunt for.
+ *            - The glyph sits AHEAD of the inferred state emoji (🤮🔥📏) on
+ *              the badge and in the players list, not among them. Position is
+ *              the only cheap signal that separates what you asserted from
+ *              what the HUD worked out, and telling those apart matters: an
+ *              inferred read can be wrong about a player, a manual one can
+ *              only be out of date. It shows on a NEW seat too — a tag from
+ *              last session is exactly the read worth having before a single
+ *              hand is tracked.
+ *            - Width MEASURED in a browser against the 118px cap, not
+ *              estimated. The tag costs 12px. Type+numbers goes 77 -> 89px,
+ *              +tilt 101px, +tilt+heat 113px, all fitting. The first case that
+ *              clips is tag+tilt+heat+size at 125px — a player simultaneously
+ *              tagged, tilting, running hot AND carrying a readable size tell,
+ *              which is rare by construction; badgeStats:false stays the
+ *              escape hatch. (Chromium metrics; iOS emoji may differ a little.)
+ *            - Glyphs are all Unicode 6.0 single codepoints with no variation
+ *              selector, because this renders on whatever Safari the phone
+ *              has and a VS16 sequence is exactly what turns into a hollow box
+ *              on the one device nobody here can test. The test scans for that.
+ *            - Deliberately NOT fed to the coach. The panel and the seat say
+ *              it; the coach keeps ranking measured reads.
+ *            - FIXED ON THE WAY IN, a pre-existing bug this would have
+ *              inherited: mergeStores swaps the WHOLE player record for
+ *              whichever side has more hands, so a gist merge from a device
+ *              that had seen a player more silently destroyed anything typed
+ *              here — p.notes has been losable that way for as long as notes
+ *              have existed. Manual fields are now carried across the swap.
+ *              A counter is rebuilt by playing more hands; judgement is not.
+ *            - LOCAL wins when both devices tagged the same player
+ *              differently. There is no timestamp to order them by, and the
+ *              alternative overwrites what you can see on the device you are
+ *              sitting at with something you cannot. The remote value is
+ *              adopted only where local has none. Known gap, stated rather
+ *              than solved: two devices disagreeing keep disagreeing until one
+ *              is cleared.
+ *            - test/player-tags.test.js, mutation-verified against eight
+ *              regressions including the merge losing a manual field, the
+ *              merge mutating the caller's remote store, and a glyph gaining a
+ *              variation selector.
+ *            - The CSS comment for the new chips hit the documented
+ *              template-literal trap on the first write: a backtick inside a
+ *              stylesheet comment terminates the string. node test/run.js
+ *              caught it immediately, which is most of why it runs first.
  *
  * 1.65.0 - Players are judged against the pool THEY play in, not one blended
  *          average across three tables that describes none of them.
@@ -74,55 +136,6 @@
  *              when the observation is above both, and checking only VPIP let
  *              a revert of foldTo3Bet pass. Stated as a DIFFERENCE between two
  *              identical records at different stakes instead, per stat.
- *
- * 1.64.0 - POOL_SPREAD is measured now, not a judgement call, and the pool it
- *          was measured from no longer counts records that are not players.
- *            - POOL_SPREAD sat on estimates for eleven versions, with the
- *              comment saying outright that the honest version would be the
- *              population SD "which nothing here has measured". It has been
- *              now, the same way POOL_AVG was corrected in v1.11.0: 442
- *              seat-resolved opponents with 25+ hands each, out of a real
- *              store, read off computeShrunkRates (the same numbers statRow
- *              colours and buildExploitPlan thresholds on, so the spread is
- *              measured against what it will be compared with).
- *            - Two were badly wrong in opposite directions. VPIP was 10
- *              against a measured 17: it flagged 272 of 442 players as
- *              notable-or-worse, and calling 62% of the pool remarkable is the
- *              same as saying nothing. C-bet was 15 against a measured 9.5,
- *              hiding real deviations — 52 flagged before, 141 after. The rest
- *              moved a little; limpShareOfVpip at 15 vs a measured 15.5 means
- *              one of the seven original guesses was already right.
- *            - Archetype labels are untouched, 0 of 442 changed, because
- *              POOL_SPREAD does not feed classify(). This moves the deviation
- *              shading and the exploit-plan bars only; total plan entries went
- *              3459 -> 3407.
- *            - ONE global set, deliberately, even though POOL_AVG has a real
- *              per-stake gradient. Measured within each of the three tables in
- *              the pool, VPIP SD is 15.9 / 17.1 / 17.8 against a pooled 17.3,
- *              and every other stat matches as closely — the between-table
- *              difference is small next to the within-table spread. So a
- *              stake-aware anchor would not drag a stake-aware spread behind
- *              it.
- *            - POOL_AVG's own values are deliberately NOT updated here. The
- *              observed global figures read higher on all seven stats, but
- *              that is composition, not error: the pool spans three tables
- *              with VPIP 54.9 / 46.2 / 42.6, and a single blended anchor at
- *              47.9 would describe none of them. Updating it globally
- *              relabels 39 players Fish -> Balanced, i.e. it stops calling the
- *              $500k fish fish. That belongs with a stake-aware anchor, not
- *              before one.
- *            - "name:" pseudo-records are excluded from every pool figure.
- *              They are log names that never bound to a seat, so a record only
- *              exists on hands where a line named that player and never on the
- *              hands they sat out of — structurally skewed, not merely thin.
- *              27 cleared the 25-hand bar and read fold-to-3-bet 82.2% against
- *              52.3% for seat-resolved records, pulling the pool figure up
- *              1.6pp. A correctness fix, so there is no sample threshold on it
- *              and volume cannot buy one in.
- *            - analysis/pool-report.js keeps its own copy of that filter, and
- *              its reconciliation assertion caught the divergence the instant
- *              the real function changed and the copy had not — which is
- *              exactly why that assertion exists instead of trusting the copy.
  *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
@@ -185,7 +198,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.65.0';
+  const HUD_VERSION = '1.66.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -1180,11 +1193,40 @@
       plLedger: local.plLedger,
       settings: local.settings,
     };
+    // Fields a HUMAN typed. Everything else on a record is a counter that
+    // more hands will rebuild; these cannot be re-derived by playing, which is
+    // why they get their own rule.
+    //
+    // The record-level swap below takes whichever side has more hands and
+    // discards the other WHOLE record — so a note typed on the phone was
+    // already being destroyed by a merge from a device that had seen that
+    // player more, silently, since notes existed. Tags would have inherited
+    // exactly that, and a tag is the most expensive thing in the store to
+    // recreate because it is judgement rather than data.
+    //
+    // LOCAL WINS when both sides have one. There is no timestamp to order
+    // them by, and the alternative loses whatever you just typed on the device
+    // you are sitting at. The remote's value is adopted only where local has
+    // none — so a tag set on either device propagates to a device that has
+    // not made its own call, and nothing you can see on screen is ever
+    // overwritten by something you cannot. Known gap, stated rather than
+    // solved: two devices that both tag the same player differently keep
+    // disagreeing until one is cleared.
+    const MANUAL_FIELDS = ['tag', 'notes'];
     for (const xid of Object.keys(remote.players || {})) {
       const remotePlayer = remote.players[xid];
       const localPlayer = merged.players[xid];
+      const manual = {};
+      MANUAL_FIELDS.forEach((f) => {
+        const v = (localPlayer && localPlayer[f]) || remotePlayer[f];
+        if (v) manual[f] = v;
+      });
       if (!localPlayer || (remotePlayer.hands || 0) > (localPlayer.hands || 0)) {
-        merged.players[xid] = remotePlayer;
+        // Copied rather than mutated: remotePlayer belongs to the caller's
+        // parsed remote store, and writing through it would edit their object.
+        merged.players[xid] = Object.assign({}, remotePlayer, manual);
+      } else if (Object.keys(manual).some((f) => localPlayer[f] !== manual[f])) {
+        merged.players[xid] = Object.assign({}, localPlayer, manual);
       }
     }
     if (remote.hero && (remote.hero.hands || 0) > (local.hero.hands || 0)) {
@@ -6423,6 +6465,63 @@
     return out;
   }
 
+  // Manual player tags (v1.66.0) — your own read, not an inferred one.
+  //
+  // Every other read in this file is derived from counters. These are the
+  // opposite: four reads you assert by hand, for the things the stats
+  // STRUCTURALLY cannot see rather than merely have a thin sample of. That
+  // distinction is the whole justification for letting a human overwrite a
+  // measurement here:
+  //
+  //   bluff   `bluffRate` only ever counts bets that reached a REAL showdown,
+  //           so a bluff that took the pot uncontested is invisible to it —
+  //           documented as an asymmetric floor in "Bluff tracking". You can
+  //           see the ones it can't.
+  //   station AFq and fold-to-c-bet describe frequencies, not whether calling
+  //           you down is the thing they are actually doing badly.
+  //   folds   Overfolding postflop in spots fold-to-c-bet doesn't cover
+  //           (turns and rivers after they called the flop).
+  //   trap    `texture.checkMade` needs a showdown to record a slowplay, so
+  //           the check-raise that made you fold never enters the sample.
+  //
+  // MUTUALLY EXCLUSIVE, one per player or none. Two of these at once is not a
+  // read, it is a note — and there is a Notes field two inches below for that.
+  //
+  // Glyphs are all Unicode 6.0 single codepoints with no variation selector:
+  // this runs on whatever Safari the phone has (see Conventions), and a VS16
+  // sequence or a 2018-era emoji is exactly the kind of thing that renders as
+  // a hollow box on the one device nobody here can test.
+  const PLAYER_TAGS = [
+    { key: 'bluff', glyph: '🎣', label: 'Bluffs', act: 'Call them down lighter.' },
+    { key: 'station', glyph: '📞', label: 'Station', act: 'Never bluff them. Value bet thin.' },
+    { key: 'folds', glyph: '🚪', label: 'Folds', act: 'Bet at them relentlessly.' },
+    { key: 'trap', glyph: '🐍', label: 'Traps', act: 'Beware the check-raise; check back more.' },
+  ];
+
+  function playerTagDef(key) {
+    if (!key) return null;
+    for (const t of PLAYER_TAGS) { if (t.key === key) return t; }
+    return null; // an unknown key reads as untagged rather than throwing
+  }
+
+  // Sparse on purpose: an untagged record carries no field at all, so this
+  // costs nothing on the ~99% of records you never tag. Same reasoning as
+  // boardTex's one-letter sparse keys.
+  function playerTag(p) {
+    return p ? playerTagDef(p.tag) : null;
+  }
+
+  function setPlayerTag(xid, key) {
+    const p = getPlayer(xid);
+    if (!p) return null;
+    // Re-tapping the active chip clears it — the same control both ways, so
+    // there is no separate "none" chip to hunt for.
+    const next = (p.tag === key) ? null : (playerTagDef(key) ? key : null);
+    if (next) p.tag = next; else delete p.tag;
+    saveStore();
+    return next;
+  }
+
   // Strength of the prior, in pseudo-observations.
   //
   // A rate over few hands is mostly noise: 3 hands played out of 3 is not a
@@ -9426,6 +9525,14 @@
 
     const head = sec(null); // untitled lead block
     add(head, `${p.name} — ${p.hands} hands observed, ${classify(p)}.`);
+    // First, and marked as yours. Everything else in this report is derived
+    // from counters; a reader who cannot tell which line was asserted by hand
+    // has no way to weigh it against the measured ones.
+    const manualTag = playerTag(p);
+    if (manualTag) {
+      add(head, `${manualTag.glyph} Tagged "${manualTag.label}" by you — a manual read, not a measurement.`,
+        manualTag.act);
+    }
     if (p.hands < STORE.settings.minHands) {
       head.items.push({
         text: `Fewer than ${STORE.settings.minHands} hands observed — read with caution.`,
@@ -9619,7 +9726,7 @@
     /* Emoji render wider than the 10px text around them, so they are pulled
        down a size and given the minimum gap that still keeps 🤮🔥 apart. */
     .tph-badge .tph-badge-tilt, .tph-badge .tph-badge-heat, .tph-badge .tph-badge-affil,
-    .tph-badge .tph-badge-hosp, .tph-badge .tph-badge-size {
+    .tph-badge .tph-badge-hosp, .tph-badge .tph-badge-size, .tph-badge .tph-badge-tag {
       margin-right: 1px; font-size: 9px; }
     /* No colour declared here, same as -tilt/-heat above: this is emoji-only
        content and pinTextColor never walks badges (only .tph-panel content),
@@ -9975,6 +10082,22 @@
        inside a .tph-prow anyway so there is nothing to conflict with. */
     .tph-sortable { cursor: pointer; white-space: nowrap; }
     .tph-sortable:active { opacity: 1; }
+    /* Manual tag chips (Notes tab). Every one declares its own colour —
+       pinTextColor walks panel content and leaves tph- elements to whatever
+       Torn's bare rules do, which is the v0.18.2 dark-on-dark bug. The "on"
+       modifier is declared AFTER the base rule so it wins: both are
+       single-class with !important, and the later rule takes it.
+       (No backticks in here — this whole sheet is a template literal, and one
+       backtick in a comment terminates it. Same trap as the v0.25.0 "td".) */
+    .tph-tag-lead { color: #8d959c !important; font-size: 11px; line-height: 1.45; margin-bottom: 7px; }
+    .tph-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 7px; }
+    .tph-tagchip { color: #9fb0bf !important; background: #23262b; border: 1px solid #3a3f46;
+                   border-radius: 4px; padding: 5px 9px; font-size: 12px; cursor: pointer;
+                   white-space: nowrap; }
+    .tph-tagchip:active { background: #2c2c33; }
+    .tph-tagchip.on { color: #ffd479 !important; background: #342c18; border-color: #6b5626; }
+    .tph-tag-act { color: #e6ebf0 !important; font-size: 11px; line-height: 1.45; margin-bottom: 9px; }
+    .tph-tag-act b { color: #ffd479 !important; }
     .tph-prow { cursor: pointer; }
     .tph-prow:active { background: #2c2c33; }
     /* Thin-record gate. Both spans declare their own colour: pinTextColor skips
@@ -10792,10 +10915,20 @@
       // real read even before a single hand has been tracked on this player.
       const affilHtml = affil.flags ? `<span class="tph-badge-affil">${affil.flags}</span>` : '';
       const hospHtml = blockedBadge ? `<span class="tph-badge-hosp">${blockedBadge.emoji}</span>` : '';
+      // YOUR tag, placed ahead of the inferred state emoji (🤮🔥📏) rather
+      // than among them. Position is the only cheap signal available here that
+      // separates what you asserted from what the HUD worked out, and telling
+      // those apart matters more than one glyph of width: an inferred read can
+      // be wrong about a player, a manual one can only be out of date.
+      const manualTag = playerTag(player);
+      const tagHtml = manualTag ? `<span class="tph-badge-tag">${manualTag.glyph}</span>` : '';
       badge.innerHTML = (hands === 0
-        ? `${roleHtml}${hospHtml}<b>NEW</b>`
+        // Shown on a NEW seat too: a tag you set on this player last session
+        // is exactly the read worth having before a single hand is tracked.
+        ? `${roleHtml}${hospHtml}${tagHtml}<b>NEW</b>`
         : roleHtml
           + hospHtml
+          + tagHtml
           + `${tilt ? '<span class="tph-badge-tilt">🤮</span>' : ''}`
           + `${heat ? '<span class="tph-badge-heat">🔥</span>' : ''}`
           + `${sizeTell ? '<span class="tph-badge-size">📏</span>' : ''}<b>${type}</b>`
@@ -10814,6 +10947,8 @@
             + 'The TYPE is lifetime — 🤮 is what flags them playing off-type right now.'
           : 'All lifetime.')
         + (label === 'Unrated' && hands > 0 ? ` "?" = provisional, under the ${STORE.settings.minHands}-hand minimum.` : '')
+        + (manualTag ? ` ${manualTag.glyph} ${manualTag.label} — YOUR tag, not a measurement: `
+          + `${manualTag.act} Change it in the player panel's Notes tab.` : '')
         + (tilt ? ` ${tiltText(tilt)}` : '')
         + (heat ? ` ${heatText(heat)}` : '')
         + (player && player.stack
@@ -11569,7 +11704,29 @@
     } else if (openPlayerTab === 'notes') {
       // Set .value (not innerHTML) so a note containing "</textarea>" or other
       // markup is treated as literal text and can't break out of the field.
-      body.innerHTML = '<textarea class="tph-notes"></textarea>';
+      // The tag lives here rather than in the header because this is already
+      // the tab for what YOU know about a player, and the badge carries the
+      // glyph anyway — so it does not need to cost vertical space on the five
+      // tabs that are about measured numbers.
+      const curTag = p.tag || null;
+      const curDef = playerTagDef(curTag);
+      body.innerHTML = '<div class="tph-tag-lead">Your own read — for what the numbers structurally '
+        + 'can\'t see. One at a time; tap the active one again to clear it.</div>'
+        + '<div class="tph-tags">'
+        + PLAYER_TAGS.map((t) => `<span class="tph-tagchip${curTag === t.key ? ' on' : ''}" `
+          + `data-tag="${escapeHtml(t.key)}">${t.glyph} ${escapeHtml(t.label)}</span>`).join('')
+        + '</div>'
+        + `<div class="tph-tag-act">${curDef
+          ? '<b>' + curDef.glyph + ' ' + escapeHtml(curDef.label) + '</b> — ' + escapeHtml(curDef.act)
+          : 'No tag set. These show on the seat badge.'}</div>`
+        + '<textarea class="tph-notes"></textarea>';
+      body.querySelectorAll('.tph-tagchip').forEach((chip) => {
+        chip.addEventListener('click', () => {
+          setPlayerTag(openPlayerXid, chip.dataset.tag);
+          renderPlayerPanel();  // re-render so the active chip and the action line agree
+          renderBadges();       // and the seat updates without waiting for the 4s tick
+        });
+      });
       body.querySelector('.tph-notes').value = p.notes || '';
       body.querySelector('.tph-notes').addEventListener('input', (e) => {
         p.notes = e.target.value;
@@ -11994,7 +12151,11 @@
         const tilt = tiltRead(p);
         const heat = heatRead(p);
         return `<tr data-xid="${escapeHtml(xid)}" class="tph-prow">
-            <td><b>${escapeHtml(p.name)}</b>${isHeroRecord(xid) ? '<span class="tph-you">you</span>' : ''}${tilt ? ' 🤮' : ''}${heat ? ' 🔥' : ''}</td>
+            <td><b>${escapeHtml(p.name)}</b>${isHeroRecord(xid) ? '<span class="tph-you">you</span>' : ''}${
+              // Ahead of the inferred glyphs, same ordering as the seat badge —
+              // one vocabulary, so a row and a seat can't read differently.
+              (() => { const mt = playerTag(p); return mt ? ' ' + mt.glyph : ''; })()
+            }${tilt ? ' 🤮' : ''}${heat ? ' 🔥' : ''}</td>
             <td>${shortType(classify(p))}</td>
             <td>${p.hands}</td>
             <td>${cell(r.vpip, s.vpip, 'vpip')}/${cell(r.pfr, s.pfr, 'pfr')}</td>
@@ -13461,6 +13622,12 @@
       sizingScaleHtml,
       plShort,
       isHeroRecord,
+      buildReport,
+      buildReportSections,
+      PLAYER_TAGS,
+      playerTag,
+      playerTagDef,
+      setPlayerTag,
       poolAvgFor,
       POOL_AVG_BY_STAKE,
       vpipBars,
