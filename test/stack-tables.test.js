@@ -39,8 +39,14 @@ function withSeats(seats) {
   T.lastSeenBB = 1000000;
   const doc = T._sandbox.document;
 
+  // Each `at` is a separate watcher tick. `seatEls()` memoises the seat sweep
+  // for 150ms so co-firing timers share one document walk, which is shorter
+  // than any real interval but longer than the gap between two lines here —
+  // so a test that swaps the seat DOM has to declare the tick boundary, or it
+  // asserts against the seats the PREVIOUS line installed and proves nothing.
   const at = (amount) => {
     doc.querySelectorAll = (sel) => (/player-/.test(sel) ? [seatWith('player-999', amount)] : []);
+    T.invalidateSeatCache();
     T.trackStacks();
   };
 
@@ -72,6 +78,7 @@ function withSeats(seats) {
   const at = (amount, bb) => {
     T.lastSeenBB = bb;
     doc.querySelectorAll = (sel) => (/player-/.test(sel) ? [seatWith('player-999', amount)] : []);
+    T.invalidateSeatCache();
     T.trackStacks();
   };
 
@@ -94,6 +101,7 @@ function withSeats(seats) {
   const p = T.STORE.players['999'];
   p.stack.at = Date.now() - (5 * 60 * 60 * 1000); // 5h ago, past the session gap
   doc.querySelectorAll = (sel) => (/player-/.test(sel) ? [seatWith('player-999', 300000000)] : []);
+  T.invalidateSeatCache();
   T.trackStacks();
 
   t.eq('a stale sitting is restarted', p.stack.low, 300000000);

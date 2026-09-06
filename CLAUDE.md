@@ -630,6 +630,75 @@ a shared position would stack them. Both need `touch-action: none`, or the drag
 scrolls the page instead of moving the element, and both are recovered by the
 one Settings reset button.
 
+## The seat sweep is memoised, and the TTL is the safety (v1.62.0)
+
+`document.querySelectorAll(SELECTORS.seatContainer)` is the most repeated DOM
+read in the file. **Nothing should call it directly any more — use
+`seatEls()`.** Eight functions did that walk, and several fire back to back
+inside one tick: the 3s watcher ran three to six of them depending on which API
+keys are set, and `renderBadges` did *two* per render (`seatedXids` for the
+affiliation comparison, then its own loop). Worst case was the scroll path —
+`renderBadges` is rAF-driven, so dragging the table ran ~120 full-document
+sweeps a second.
+
+**`SEAT_CACHE_MS` (150) is pinned from both sides, and the lower bound is the
+departure watch.** Every false "player left" alert comes from a sweep reading
+SHORT, so a window long enough to serve one tick's list to the *next* tick would
+invent events. Every interval in the file is 400ms or slower, so a window under
+that can only ever collapse reads inside ONE tick. The distinction that makes
+this safe rather than merely short: a 150ms-old list is a **complete** read of
+the table, and the failure mode the guards exist for is a **partial** one. Don't
+raise it toward any interval.
+
+Badge *positions* are unaffected — `getBoundingClientRect` is still called live
+on each cached element; only the element list is reused. Detached elements
+inside the window are already survivable: `resolveSeatKey` reads the id (which a
+detached node keeps), and both `renderBadges` and `seatRotationFromDom` skip a
+seat whose rect measures zero, which is what a detached node reports.
+
+**`runDeepScan` reads the document directly and must keep doing so.** A
+calibration report describing a table that has already changed is worse than no
+report; `test/seat-sweep.test.js` scans the source for this.
+
+`invalidateSeatCache` lives **on the test seam, inline, not as a top-level
+function**. Production has no use for it — the TTL is the only boundary there —
+and a declared-but-never-called top-level function is exactly what
+`test/no-orphans.test.js` catches. Any test that swaps the seat DOM between
+lines is simulating successive ticks and has to call it, or it asserts against
+the previous line's seats and proves nothing (`test/stack-tables.test.js` hit
+this).
+
+### The showdown poll backs off, it never stops
+
+`harvestShownCards` polls at `SHOWDOWN_POLL_MS` (400) and swept the whole
+document every time, whatever the hand was doing. `showdownPlausible(hand)`
+reads `hand.playersIn.size` first — no DOM at all — and the poll drops to one
+tick in three (`SHOWDOWN_IDLE_SKIP = 2`) once everyone but one player has
+folded, which is how most hands end.
+
+**It degrades rather than skipping outright, and that is the whole design.** The
+claim "no showdown is possible" rests on every fold line having been seen, and
+missed log lines are this file's recurring failure. A wrong `true` would blind
+the primary showdown source on a layout whose reveal lines cannot be trusted
+(see "The seats are the primary source, not the log"). So a hand with no
+readable `playersIn` **fails open** and polls at full rate. 1.2s still catches
+cards that sit face up until the next deal — and it stays inside the 1000ms
+that was already judged too slow when `SHOWDOWN_POLL_MS` was lowered to 400,
+which is why the back-off is two ticks and not five.
+
+**Take the tick, THEN skip.** The poll that first sees the field collapse is the
+one worth keeping — the last fold is when a player is most likely to flash a
+card — so skipping it and taking the third would throttle exactly the wrong
+tick. The settlement re-read in `applyHandResultsAndReset` passes `force: true`:
+it gets one guaranteed look, and a hand that got there by everyone folding is
+precisely the shape the back-off throttles.
+
+One comment corrected on the way in, worth knowing because it misled a cost
+analysis: the interval claimed the poll "does no work at all once a hand's
+reveals are already recorded". It never did. The per-seat `shownCards[xid]`
+check is *inside* the sweep, so a fully recorded hand still walked the document
+and resolved every seat key on every tick; only the deep card read was skipped.
+
 ## Screen real estate (v0.42.0)
 
 Three things the phone forced, all reported from a live table.

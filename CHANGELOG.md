@@ -9,6 +9,75 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.62.0
+
+One seat sweep per tick, and a showdown poll that backs off when nobody is left
+to show. Both are cost reductions on the hottest DOM path in the file, taken
+after counting what the timers actually do rather than assuming.
+
+**`seatEls()` memoises the seat sweep for `SEAT_CACHE_MS` (150).** Eight
+functions ran `document.querySelectorAll(SELECTORS.seatContainer)`, and several
+fire back to back inside a single tick: the 3s watcher ran between three and six
+of them depending on which API keys are set, and `renderBadges` did **two** per
+render — `seatedXids` for the affiliation comparison, then its own loop. Each of
+those is now one walk.
+
+**The scroll case is the big one.** `renderBadges` is rAF-driven on scroll, so
+dragging the table around ran roughly 120 full-document sweeps a second; the
+cache collapses a burst of frames to about seven. Badge *positions* are
+unaffected — `getBoundingClientRect` is still called live on each cached
+element, and only the element list is reused.
+
+**150ms is pinned from both sides, and the reason is the departure watch.**
+Every false "player left" alert comes from a sweep reading SHORT, so a window
+long enough to serve one tick's list to the *next* tick would invent events.
+Every interval in the file is 400ms or slower, so a window under that can only
+ever collapse reads inside ONE tick — and a 150ms-old list is a **complete**
+read of the table, not a partial one, which is the distinction the departure
+guards actually turn on. `runDeepScan` deliberately reads the document
+directly: a calibration report describing a table that has already changed is
+worse than no report.
+
+**`harvestShownCards` now asks an in-memory question before touching the DOM.**
+It polls every 400ms and swept the whole document each time, whatever the hand
+was doing. It checks `hand.playersIn.size` first — a Set read, no DOM — and
+backs off to one poll in three once everyone but one player has folded, which is
+how most hands end.
+
+**It degrades rather than stops, deliberately.** "No showdown is possible" rests
+on every fold line having been seen, and missed log lines are this file's
+recurring failure; a wrong answer there would blind the primary showdown source
+on a layout whose reveal lines cannot be trusted. A hand with no readable
+`playersIn` polls at full rate. Cards stay face up until the next deal, so 1.2s
+still catches them — and that is inside the 1000ms which was already judged too
+slow when `SHOWDOWN_POLL_MS` was lowered to 400, which is why the back-off is
+two ticks and not five.
+
+**Take the tick, THEN skip.** The poll that first sees the field collapse is the
+one worth keeping: the last fold is exactly when a player is most likely to
+flash a card. Skipping it and taking the third would throttle the wrong tick.
+The settlement re-read passes `force: true` — it gets one guaranteed look at the
+table, and a hand that got there by everyone folding is precisely the shape the
+back-off throttles.
+
+**Corrected a comment that was simply false.** The interval claimed the poll
+"does no work at all once a hand's reveals are already recorded". The per-seat
+`shownCards[xid]` check is *inside* the sweep, so a fully recorded hand still
+walked the document and resolved every seat key on every tick; only the deep
+card read was skipped.
+
+`test/seat-sweep.test.js` covers both, mutation-verified against five
+regressions: a reader routed back to a bare sweep, skip-first ordering, `force`
+ignored, failing closed on a missing `playersIn`, and the deep scan reading the
+cache.
+
+`test/stack-tables.test.js` swaps the seat DOM between lines to simulate
+successive ticks, which the cache would otherwise swallow. It now declares the
+tick boundary explicitly (`invalidateSeatCache`, exposed on the test seam only —
+production has no use for it, and a declared-but-uncalled top-level function is
+what `test/no-orphans.test.js` exists to catch). Without that it would have been
+asserting against the *previous* line's seats and proving nothing.
+
 ## 1.61.0
 
 `DONK` and `PFR` coexist. Asked for directly — and v1.60.0 had given the read up

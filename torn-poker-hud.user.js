@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.61.0
+// @version      1.62.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,66 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.62.0 - One seat sweep per tick, and a showdown poll that backs off when
+ *          nobody is left to show. Both are cost reductions on the hottest DOM
+ *          path in the file, taken after counting what the timers actually do
+ *          rather than assuming.
+ *            - seatEls() memoises document.querySelectorAll(seatContainer) for
+ *              SEAT_CACHE_MS (150). Eight functions did that walk, and several
+ *              fire back to back inside one tick: the 3s watcher ran between
+ *              three and six of them depending on which API keys are set, and
+ *              renderBadges did TWO per render (seatedXids for the affiliation
+ *              comparison, then its own loop). Each of those is now one walk.
+ *            - The scroll case is the big one. renderBadges is rAF-driven on
+ *              scroll, so dragging the table ran ~120 full-document sweeps a
+ *              second; the cache collapses a burst of frames to roughly seven.
+ *              Badge POSITIONS are unaffected — getBoundingClientRect is still
+ *              called live on each cached element, and only the element list
+ *              is reused.
+ *            - 150ms is pinned from both sides, and the reason is the
+ *              departure watch. Every false "player left" comes from a sweep
+ *              reading SHORT, so a window long enough to serve one tick's list
+ *              to the next tick would invent events. Every interval here is
+ *              400ms or slower, so a window under that can only ever collapse
+ *              reads inside ONE tick — and a 150ms-old list is a COMPLETE read
+ *              of the table, not a partial one. runDeepScan deliberately reads
+ *              the document directly: a calibration report that describes a
+ *              table which has already changed is worse than no report.
+ *            - harvestShownCards polls every 400ms and swept the whole
+ *              document each time, whatever the hand was doing. It now checks
+ *              hand.playersIn.size first — a Set read, no DOM — and backs off
+ *              to one poll in three once everyone but one player has folded,
+ *              which is how most hands end.
+ *            - It DEGRADES rather than stops, deliberately. "No showdown is
+ *              possible" rests on every fold line having been seen, and missed
+ *              log lines are this file's recurring failure; a wrong answer
+ *              would blind the primary showdown source on a layout whose
+ *              reveal lines cannot be trusted. A hand with no readable
+ *              playersIn polls at full rate. Cards stay up until the next
+ *              deal, so 1.2s still catches them — inside the 1s that was
+ *              already judged too slow, which is why the back-off is two ticks
+ *              and not five.
+ *            - Take the tick, THEN skip. The poll that first sees the field
+ *              collapse is the one worth keeping, since the last fold is when
+ *              a player is most likely to flash a card. The settlement re-read
+ *              passes force:true — it gets one guaranteed look, and a hand
+ *              that got there by everyone folding is exactly the shape the
+ *              back-off throttles.
+ *            - Corrected a comment that was simply false: the poll did NOT
+ *              "do no work at all once a hand's reveals are recorded". The
+ *              per-seat check is inside the sweep, so a fully recorded hand
+ *              still walked the document and resolved every seat key each
+ *              tick; only the deep card read was skipped.
+ *            - test/seat-sweep.test.js, mutation-verified against five
+ *              regressions (a reader routed back to a bare sweep, skip-first
+ *              ordering, force ignored, failing closed on a missing
+ *              playersIn, and the deep scan reading the cache).
+ *            - test/stack-tables.test.js swaps the seat DOM between lines to
+ *              simulate successive ticks, which the cache would otherwise
+ *              swallow. It now declares the tick boundary explicitly; without
+ *              that it would have been asserting against the previous line's
+ *              seats and proving nothing.
  *
  * 1.61.0 - DONK and PFR coexist. Asked for directly, and v1.60.0 had given
  *          the read up on a width assumption that turns out to be wrong.
@@ -72,47 +132,6 @@
  *            - The PFR tooltip no longer claims the holder was not re-raised,
  *              because now they may have been: the highest tier still showing
  *              is what holds the initiative.
- *
- * 1.59.0 - The seat badge gains a bet-size tell and a bluff figure, loses its
- *          capitals, and hero's shifts right. All four asked for directly.
- *            - 📏 marks a player whose bet SIZE is readable. Affordable for
- *              the same reason the hospital glyphs are: it is RARE. Only 8 of
- *              465 qualifying opponents in a real store have one (1.7%), so
- *              it is a decisive mark on the odd seat rather than decoration
- *              on every seat — the test the comment above the hospital badge
- *              already sets ("most players are attackable, so a target on
- *              nearly every seat is noise").
- *            - sizingTellOf() is that gate, split out of liveSizingRead so
- *              the badge and the coach cannot disagree about whether a tell
- *              exists. It takes the seat's already-computed rates so the 4s
- *              badge loop does not pay for a second computeRates per seat.
- *              The badge says a tell EXISTS; the coach says which way the
- *              moment they bet — the same split the blockers already use.
- *            - b19 is the bluff frequency, and it is shown only when notably
- *              HIGH (>= BADGE_BLUFF_MIN_PCT, 20%). Measured first, and the
- *              measurement changed the design: over 186 readable opponents
- *              the pool's bluff rate is median 0%, mean 4.1%, p90 17%. Shown
- *              unconditionally it would have printed "b0" on 40% of seats.
- *              At 20% it lands on ~2% of them.
- *            - ONE-SIDED on purpose. A low measured rate is ambiguous in a
- *              way a high one is not — it can mean they rarely bluff, or that
- *              they bluff constantly and it keeps working, since a bluff that
- *              takes the pot never reaches a showdown to be counted. Only the
- *              high side is safe to act on, so only the high side gets a mark.
- *            - V/P/A -> v/p/a. At 10px the capitals sit at the same height as
- *              the digits and the groups run together; the lower case have
- *              descenders and a smaller x-height, so they break the string up
- *              without costing a pixel.
- *            - SELF_BADGE_RIGHT_NUDGE_PX 60 -> 78, three character widths at
- *              the badge font. Same standing caveat as every other nudge: a
- *              guess informed by the last report, not a fact until the next.
- *            - Width, measured in a real browser against the 118px cap rather
- *              than estimated: a typical seat carrying BOTH new marks renders
- *              93px and fits. The fully-loaded worst case (role chip + 🤮 +
- *              🔥 + 📏 + three-digit everything) is 174px and clips — but it
- *              measured 144px and clipped BEFORE this change too, so the
- *              overflow is pre-existing rather than introduced. badgeStats:
- *              false remains the escape hatch.
  *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
@@ -175,7 +194,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.61.0';
+  const HUD_VERSION = '1.62.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -2790,12 +2809,52 @@
     return !!(state && /sitting\s*out/i.test(state.textContent || ''));
   }
 
+  // ONE seat sweep per tick, shared by everything that needs the seat list.
+  //
+  // `document.querySelectorAll(SELECTORS.seatContainer)` is the most repeated
+  // DOM read in this file — eight functions do it, and the 3s watcher tick
+  // alone fires several of them back to back (seat names, stacks, target
+  // status, departures). Within one synchronous tick the DOM cannot have
+  // changed between those calls, so they are the same list read several times
+  // over, each walk scanning the whole document.
+  //
+  // The TTL is what makes this safe rather than merely clever. Every timer
+  // here runs at 400ms or slower, so a window well under that can only ever
+  // collapse duplicate reads inside ONE tick — it can never serve a list read
+  // during a previous tick. That distinction matters more than general
+  // staleness would suggest: a seat list that reads SHORT is precisely the
+  // input `noteSeatDepartures` turns into a false "player left" alert, so a
+  // stale list here would not be a cosmetic lag, it would invent events. A
+  // list up to 150ms old is still a COMPLETE read of the table as it stood;
+  // the failure mode the departure guards exist for is a partial one.
+  //
+  // Elements can in principle be detached by an SPA re-render inside the
+  // window. Every consumer already survives that: `resolveSeatKey` reads the
+  // id (which a detached node keeps), and both `renderBadges` and
+  // `seatRotationFromDom` skip a seat whose rect measures zero, which is what
+  // a detached node reports.
+  //
+  // `runDeepScan` deliberately does NOT go through this. A diagnostic has to
+  // read the real DOM at the moment it is asked; a cached answer there could
+  // describe a table that has already changed, which is the one thing a
+  // calibration report must never do.
+  const SEAT_CACHE_MS = 150;
+  let seatCacheAt = 0;
+  let seatCacheEls = null;
+  function seatEls() {
+    const now = Date.now();
+    if (seatCacheEls && (now - seatCacheAt) < SEAT_CACHE_MS) return seatCacheEls;
+    seatCacheEls = Array.from(document.querySelectorAll(SELECTORS.seatContainer));
+    seatCacheAt = now;
+    return seatCacheEls;
+  }
+
   // opts.includeSittingOut keeps the old behaviour for callers that want every
   // occupied seat rather than everyone actually in the hand.
   function seatedXids(opts) {
     const includeOut = !!(opts && opts.includeSittingOut);
     const xids = new Set();
-    document.querySelectorAll(SELECTORS.seatContainer).forEach((seat) => {
+    seatEls().forEach((seat) => {
       if (!includeOut && isSeatSittingOut(seat)) return;
       const xid = resolveSeatKey(seat);
       if (xid) xids.add(xid);
@@ -2907,10 +2966,50 @@
   // marker arrives the cards have been cleared, so a read at settlement finds
   // nothing. First sighting wins, so a hand already captured from the log (or
   // from an earlier tick) is not overwritten.
-  function harvestShownCards() {
+  // How many polls to sit out when a showdown is not plausible. Two skipped
+  // for every one taken, i.e. an effective ~1.2s instead of 400ms.
+  const SHOWDOWN_IDLE_SKIP = 2;
+  let showdownIdleTicks = 0;
+
+  // Could this hand still produce a showdown worth looking for?
+  //
+  // `playersIn` shrinks on every fold, so at one player or fewer the pot is
+  // already decided and nobody is turning cards over. Most hands end exactly
+  // that way, which is what makes an in-memory Set-size read worth writing:
+  // it stands between a 400ms poll and a full-document seat sweep, and it
+  // needs no DOM at all to answer.
+  //
+  // It DEGRADES the poll rather than stopping it, and that is deliberate. The
+  // claim "no showdown is possible" rests on this file having seen every fold
+  // line, and missed log lines are the recurring failure in this codebase — a
+  // wrong `true` here would blind the only reliable showdown source on a
+  // layout whose reveal lines cannot be trusted (see "The seats are the
+  // primary source, not the log"). Cards stay face up until the next deal, so
+  // a slower poll still catches them; a stopped one would not.
+  function showdownPlausible(hand) {
+    if (!hand) return false;
+    if (!hand.playersIn || typeof hand.playersIn.size !== 'number') return true;
+    return hand.playersIn.size > 1;
+  }
+
+  // `force` is for the settlement re-read, which gets exactly one look at the
+  // table and must never land on a skipped tick.
+  function harvestShownCards(force) {
     if (!currentHand) return;
+    // TAKE the tick, then skip: the moment the last fold lands is the moment
+    // a player is most likely to flash a card, so the poll that first sees an
+    // implausible hand is the one worth keeping. Skipping it and taking the
+    // third would throttle exactly the wrong tick.
+    if (force || showdownPlausible(currentHand)) {
+      showdownIdleTicks = 0;
+    } else if (showdownIdleTicks > 0) {
+      showdownIdleTicks -= 1;
+      return;
+    } else {
+      showdownIdleTicks = SHOWDOWN_IDLE_SKIP;
+    }
     let found = false;
-    document.querySelectorAll(SELECTORS.seatContainer).forEach((seat) => {
+    seatEls().forEach((seat) => {
       const xid = resolveSeatKey(seat);
       if (!xid || isHeroRecord(xid)) return;      // your own cards are always up
       if (currentHand.shownCards[xid]) return;    // already have this one
@@ -3046,7 +3145,7 @@
   // xid -> stack, for every seat that reports one.
   function readAllStacks() {
     const out = {};
-    document.querySelectorAll(SELECTORS.seatContainer).forEach((seat) => {
+    seatEls().forEach((seat) => {
       const xid = resolveSeatKey(seat);
       if (!xid) return;
       const stack = readSeatStack(seat);
@@ -3179,7 +3278,7 @@
       const configured = (STORE.settings.heroName || '').trim();
       if (configured && name && name.toLowerCase() === configured.toLowerCase()) return heroXid;
     }
-    const seats = Array.from(document.querySelectorAll(SELECTORS.seatContainer));
+    const seats = seatEls();
 
     for (const seat of seats) {
       const link = seat.querySelector(SELECTORS.seatNameLink);
@@ -3258,7 +3357,7 @@
   // SELECTORS.seatName was declared and read by nothing until now.
   function harvestSeatNames() {
     let dirty = false;
-    document.querySelectorAll(SELECTORS.seatContainer).forEach((seat) => {
+    seatEls().forEach((seat) => {
       const xid = resolveXidFromSeat(seat);
       if (!xid) return;
       const name = seatDisplayName(seat);
@@ -3925,7 +4024,11 @@
     // the poll bailed, even though the cards sat on the table for seconds
     // afterwards. That is why a hand could reach showdown and record nobody as
     // having shown anything.
-    harvestShownCards();
+    //
+    // Forced past the idle-rate check: this is the ONE guaranteed look, and a
+    // hand that got here by everyone folding to a raise is exactly the shape
+    // that check throttles.
+    harvestShownCards(true);
     repairBoardFromDom();
     if (currentHand) applyHandResults(currentHand);
     currentHand = freshHandState();
@@ -5234,8 +5337,7 @@
   }
 
   function seatIsOutOfHand(xid) {
-    const seat = Array.from(document.querySelectorAll(SELECTORS.seatContainer))
-      .find((s) => resolveSeatKey(s) === xid);
+    const seat = seatEls().find((s) => resolveSeatKey(s) === xid);
     if (!seat) return true;
     if (isSeatSittingOut(seat)) return true;
     return !!seat.querySelector(SELECTORS.seatFolded)
@@ -5336,9 +5438,18 @@
     // does not save it, because by then the deal has already wiped the seats.
     // Reported as villains' revealed hands missing from History.
     //
-    // The cost is a handful of seat queries three times a second, which is
-    // nothing beside the per-frame layout thrash removed in v1.31.0, and it
-    // does no work at all once a hand's reveals are already recorded.
+    // The cost is a full-document seat sweep two and a half times a second.
+    // That is real — it was the single most frequent DOM walk in the file —
+    // so two things bound it. The sweep itself now goes through `seatEls()`,
+    // so a tick that co-fires with another seat reader pays for one walk
+    // between them; and `showdownPlausible` drops the rate to a third once
+    // everyone but one player has folded, which is how most hands end.
+    //
+    // The comment that used to sit here claimed it "does no work at all once
+    // a hand's reveals are already recorded". That was never true: the
+    // per-seat `shownCards[xid]` check is INSIDE the sweep, so a fully
+    // recorded hand still queried the document and resolved every seat key on
+    // every tick. Only the deep card read was skipped.
     setInterval(harvestShownCards, SHOWDOWN_POLL_MS);
 
     // Same cadence, same reason: the board can be short when the log's flop
@@ -7564,7 +7675,7 @@
   function seatRotationFromDom(hand) {
     if (!hand.sbXid) return null;
     const seats = [];
-    document.querySelectorAll(SELECTORS.seatContainer).forEach((el) => {
+    seatEls().forEach((el) => {
       // A player sitting out holds a seat but is dealt no cards. Leaving them
       // in the ring shifts every label past them by one — the documented
       // remaining exposure in this function, now closed.
@@ -10276,7 +10387,7 @@
     // — and renderBadges is rAF-driven on scroll, so nine per FRAME while the
     // table moved. That made it the worst scroll-jank offender in the file.
     const measured = [];
-    document.querySelectorAll(SELECTORS.seatContainer).forEach((seat) => {
+    seatEls().forEach((seat) => {
       const xid = resolveSeatKey(seat);
       if (!xid) return;
       // Hero's own seat is badged too. It used to be skipped, which made sense
@@ -13070,6 +13181,26 @@
       betSizePctOf,
       TEXTURE_MIN,
       harvestShownCards,
+      showdownPlausible,
+      SHOWDOWN_IDLE_SKIP,
+      SHOWDOWN_POLL_MS,
+      seatEls,
+      seatedXids,
+      harvestSeatNames,
+      readAllStacks,
+      seatRotationFromDom,
+      // What the passage of a tick does, made callable. A test that swaps the
+      // document's seat list out from under the script is simulating a NEW
+      // sweep, and has to say so or it asserts against the list the previous
+      // line installed and quietly proves nothing.
+      //
+      // Written inline rather than as a named function on purpose: production
+      // has no use for it — the TTL is the only boundary that exists there —
+      // and a declared-but-never-called top-level function is precisely what
+      // test/no-orphans.test.js exists to catch. The seam is a test surface,
+      // not an API, so this is the right side of that line to put it on.
+      invalidateSeatCache: () => { seatCacheEls = null; },
+      SEAT_CACHE_MS,
       readSeatFaceUpCards,
       get currentHand() { return currentHand; },
       set currentHand(h) { currentHand = h; },
