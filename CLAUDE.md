@@ -1786,7 +1786,7 @@ lines in `computeShrunkRates`.
 ## Manual player tags are the one read a human asserts (v1.66.0)
 
 Everything else in this file is derived from counters. `PLAYER_TAGS` is four
-reads you set by hand — 🎣 Bluffs, 📞 Station, 🚪 Folds, 🐍 Traps — mutually
+reads you set by hand — 🤥 Bluffs, 📞 Station, 🚪 Folds, 🐍 Traps — mutually
 exclusive, one per player or none, stored sparsely as `p.tag`.
 
 **The bar for adding one is a STRUCTURAL blind spot, not a thin sample.** Each
@@ -1813,6 +1813,12 @@ costs 12px, taking type+numbers from 77 to 89px, +tilt to 101, +tilt+heat to
 113. Only tag+tilt+heat+size clips, at 125px, and that needs a player
 simultaneously tagged, tilting, hot and size-readable. Re-measure rather than
 guess if a sixth glyph is ever proposed.
+
+**A glyph must not argue with the badge it sits on.** 🎣 shipped in v1.66.0
+and was replaced one version later: the archetype beside it renders Fish as
+`FSH`, so a fishing rod on a `NIT` read as the HUD calling that nit a fish.
+Check a candidate against the vocabulary already on the badge, not just against
+the concept.
 
 **Glyphs must be bare single codepoints, Unicode 6.0-era.** A VS16 sequence or
 a 2018 emoji is exactly what renders as a hollow box on the iOS JSC webview
@@ -1842,6 +1848,34 @@ none. Known gap, stated rather than solved: two devices that tag the same
 player differently keep disagreeing until one is cleared. The merge also
 **copies rather than mutates** — `remotePlayer` belongs to the caller's freshly
 parsed gist, and writing through it would edit an object they still hold.
+
+## Removing a state from ATTACK_BLOCKERS does not remove the category (v1.67.0)
+
+`attackReadiness` recognises exactly three answers — blocked, ready, unknown —
+and **only `'Okay'` (plus `NON_BLOCKING_STATES`) is ever ready**. Anything it
+does not recognise falls through to `unknown`, which renders **❔** with the
+label `unrecognised state "<X>"`.
+
+So deleting a key from `ATTACK_BLOCKERS` to stop a state mattering does the
+opposite: it swaps a specific glyph for ❔, and reports a state the file parses
+perfectly well as one it failed to parse. **To make a state stop mattering, add
+it to `NON_BLOCKING_STATES`** — that is why `Jail` lives there rather than
+being deleted. `test/target-status.test.js` pins it by mutation.
+
+The cost of that entry, stated because it runs against the file's usual grain:
+a jailed player reads **attackable**, not unknown. Everywhere else here the
+unknown case deliberately fails toward "don't", because saying go when they
+were untouchable is the expensive direction. Jail is an exception taken on a
+judgement about Torn, not about code.
+
+**`ATTACK_BLOCKERS` is not only about seated players.** It feeds the departure
+watch too, which keeps polling someone for `DEPARTED_WATCH_MS` *after* they
+leave the table. So "that can't happen at a poker table" is not sufficient
+grounds to delete a blocker — `Abroad` and `Federal` were proposed for removal
+on exactly that reasoning and kept, because a player who leaves and then flies
+is precisely what the departed list is for. A state that cannot occur costs
+nothing while it sits unused; deleting it costs a correct answer in the one
+case it can.
 
 ## Shared-affiliation badges, not a behavioural collusion detector (v1.8.0)
 

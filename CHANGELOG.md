@@ -9,6 +9,38 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.67.0
+
+**🎣 → 🤥 for the Bluffs tag.** The first choice was wrong in a specific way,
+not just unintuitive: the archetype system right beside it already renders Fish
+as `FSH`, so a fishing rod on a `NIT` read as the HUD calling that nit a fish —
+a glyph arguing with the three letters next to it. 🤥 says "lying" and collides
+with nothing on the badge.
+
+**Jail no longer flags a seat** — but it is a *recognised state that does not
+block*, not a state deleted from `ATTACK_BLOCKERS`, and that distinction is the
+entire change.
+
+`attackReadiness` treats **only** `'Okay'` as clear; anything it doesn't
+recognise falls through to `unknown`, which renders ❔ with the label
+`unrecognised state "Jail"`. So deleting the key would have swapped one glyph
+for a **noisier** one, and reported a state we parse perfectly well as one we
+failed to parse. `NON_BLOCKING_STATES` is the right home for it.
+`test/target-status.test.js` pins this by mutation — removing `Jail` from that
+list produces `emoji: ❔` where there should be none.
+
+Consequence, stated rather than buried: **a jailed player now reads
+ATTACKABLE**, not unknown. That is the ready-side of an asymmetry this file is
+otherwise careful about, taken deliberately on a judgement about Torn rather
+than about code.
+
+**Abroad and Federal are kept**, against the request to drop them. They can't
+occur for someone sitting at the table, so they already cost nothing there —
+but `attackReadiness` also feeds the **departure watch**, which keeps polling a
+player for `DEPARTED_WATCH_MS` *after* they leave, and someone who leaves the
+table and then flies is exactly what that list exists for. Deleting them would
+turn a correct 🌍/🚫 into ❔ in the one case they can actually happen.
+
 ## 1.66.0
 
 Manual player tags — your own read on a seat, for the things the stats

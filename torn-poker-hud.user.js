@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.66.0
+// @version      1.67.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,34 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.67.0 - The bluff tag is 🤥, and jail stops being a blocker.
+ *            - 🎣 was wrong, and wrong in a specific way: the archetype right
+ *              beside it already renders Fish as FSH, so a fishing rod on a
+ *              NIT read as the HUD calling that nit a fish — a glyph arguing
+ *              with the three letters next to it. 🤥 says "lying" and collides
+ *              with nothing on the badge.
+ *            - Jail no longer flags a seat. It is a recognised state that does
+ *              NOT block, rather than a state deleted from ATTACK_BLOCKERS —
+ *              and that distinction is the whole change. attackReadiness
+ *              treats anything it does not recognise as `unknown` and renders
+ *              ❔ with 'unrecognised state "Jail"', so DELETING the key would
+ *              have swapped one glyph for a noisier one and reported a state
+ *              we parse perfectly well as one we failed to parse. The test
+ *              pins that by mutation: removing Jail from NON_BLOCKING_STATES
+ *              produces emoji ❔ where there should be none.
+ *            - Consequence, stated rather than buried: a jailed player now
+ *              reads ATTACKABLE, not unknown. That is the ready-side of an
+ *              asymmetry this file is otherwise careful about, taken
+ *              deliberately on a judgement about Torn rather than about code.
+ *            - Abroad and Federal are KEPT, against the request to drop them.
+ *              They cannot occur for someone sitting at the table, so they
+ *              already cost nothing there — but attackReadiness also feeds the
+ *              DEPARTURE watch, which keeps polling a player for
+ *              DEPARTED_WATCH_MS after they leave, and someone who leaves the
+ *              table and then flies is exactly what that list is for. Deleting
+ *              them would turn a correct 🌍/🚫 into ❔ in the one case they can
+ *              actually happen.
  *
  * 1.66.0 - Manual player tags: your own read on a seat, for the things the
  *          stats structurally cannot see.
@@ -80,63 +108,6 @@
  *              stylesheet comment terminates the string. node test/run.js
  *              caught it immediately, which is most of why it runs first.
  *
- * 1.65.0 - Players are judged against the pool THEY play in, not one blended
- *          average across three tables that describes none of them.
- *            - Measured over 442 seat-resolved opponents, three stats show a
- *              real monotonic stakes gradient: VPIP 54.9 / 46.2 / 42.6 across
- *              Old Folks Home $500k, River Wizard $1M and Cat's Chance $2.5M,
- *              with fold-to-3-bet and limp share running the same way. Lower
- *              stakes play looser, limp more and fold less to 3-bets. One
- *              POOL_AVG called the $500k pool loose almost by definition.
- *            - POOL_AVG_BY_STAKE plus poolAvgFor(p) picks the anchor. PER
- *              PLAYER, not per current table: an archetype is a claim about
- *              the player, so it must not change because YOU sat down
- *              somewhere else — and every consumer already receives the
- *              player, whereas keying off the live table would mean threading
- *              lastSeenBB into pure classification functions.
- *            - VOLUME-WEIGHTED across the stakes they play, not
- *              winner-take-all. Measured, the two differ by a median 0.02pp
- *              because players are effectively single-stake (median player has
- *              99% of their hands at one table), so the blend buys nothing on
- *              the numbers — but winner-take-all puts a cliff at 50/50, and
- *              this file settled that argument once already in blendedRates.
- *              Same reasoning, same answer.
- *            - ONLY THREE STATS. Span measured against each stat's own SD:
- *              vpip 0.71, foldTo3Bet 1.33, limpShareOfVpip 1.15, all
- *              monotonic. cbet (0.36) and foldToCbet (0.65) are NOT monotonic
- *              across three buckets, which with n=81 in the smallest is what
- *              noise looks like; pfr (0.18) and threeBet (0.09) are flat.
- *              Encoding those would repeat the WTSD anchor mistake.
- *            - Shrinkage and classification move TOGETHER, and that is the
- *              load-bearing part. computeShrunkRates returns the anchor it
- *              used on the rates object, and the archetype bars are derived
- *              from that same object via vpipBars(r). Shrinking a $500k
- *              player toward 54.9 while judging them against a global bar
- *              would push thin $500k players over the "loose" line — the exact
- *              opposite of the intent — so the two cannot be split.
- *            - A.tight/A.loose are now getters onto the global anchor, with
- *              A.tightMul/A.looseMul the actual constants. One source of
- *              truth: "the pool bar" still has a value for anything that means
- *              exactly that, and per-player bars come from the anchor.
- *            - The Stats tab, the players list shading, the tendency report
- *              and the exploit/leak plans all quote the SAME anchor. A
- *              sentence reading "vs a 42% pool" beside a bar computed from
- *              54.9 argues with its own maths.
- *            - 89 of 442 players relabel: 36 Fish -> Balanced, 31 Station ->
- *              Fish, 8 Station -> Balanced, 7 Balanced -> Nit. Every one comes
- *              from Old Folks Home (53) or River Wizard (36) and NONE from
- *              Cat's Chance, whose anchor is within 0.1 of the old global —
- *              the labels moved exactly where the anchor did.
- *            - Memoised per record, keyed on total tabled hands, which is a
- *              real version number for the mix. 0.14ms across 442 players, so
- *              the players-list path v1.63.0 optimised is untouched.
- *            - test/pool-anchor.test.js, mutation-verified against eight
- *              regressions. Two survived the first draft and both were the
- *              test's fault: "shrunk value sits above its anchor" is vacuous
- *              when the observation is above both, and checking only VPIP let
- *              a revert of foldTo3Bet pass. Stated as a DIFFERENCE between two
- *              identical records at different stakes instead, per stat.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -198,7 +169,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.66.0';
+  const HUD_VERSION = '1.67.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -1634,12 +1605,26 @@
   // to read an error response as "no faction".
   const ATTACK_BLOCKERS = {
     Hospital: { emoji: '🏥', label: 'in hospital' },
-    Jail: { emoji: '🚔', label: 'in jail' },
     Traveling: { emoji: '✈️', label: 'travelling' },
     Travelling: { emoji: '✈️', label: 'travelling' }, // both spellings, see below
     Abroad: { emoji: '🌍', label: 'abroad' },
     Federal: { emoji: '🚫', label: 'in federal jail' },
   };
+
+  // Recognised states that do NOT block. This list exists because REMOVING a
+  // state from the map above is not how you stop it mattering — the fallback
+  // in attackReadiness treats anything it does not recognise as `unknown` and
+  // renders ❔ with the label 'unrecognised state "Jail"'. Deleting Jail would
+  // therefore have swapped one glyph for a NOISIER one and misreported a state
+  // we know perfectly well as a state we failed to parse.
+  //
+  // Jail is here on the user's own call: it is not a wait worth flagging at a
+  // poker table. The consequence, stated rather than buried — a jailed player
+  // now reads ATTACKABLE, not 'unknown'. That is the ready-side of the
+  // asymmetry this file is otherwise careful about, and it is deliberate here:
+  // an unread glyph on every jailed seat costs more than the occasional
+  // wasted look, which is a judgement about Torn, not about the code.
+  const NON_BLOCKING_STATES = { Okay: 1, Jail: 1 };
 
   // Which spelling Torn returns for the in-flight state is not confirmed from
   // a live response, and the two are one letter apart. Both are listed above
@@ -1663,7 +1648,7 @@
       if (!stillIn) return { ready: true, blocked: false, unknown: false, emoji: '', label: 'attackable', until: 0 };
       return { ready: false, blocked: true, unknown: false, emoji: blocker.emoji, label: blocker.label, until: status.until };
     }
-    if (state === 'Okay') {
+    if (NON_BLOCKING_STATES[state]) {
       return { ready: true, blocked: false, unknown: false, emoji: '', label: 'attackable', until: 0 };
     }
     return { ready: false, blocked: false, unknown: true, emoji: '❔', label: state ? `unrecognised state "${state}"` : 'unknown', until: 0 };
@@ -6487,12 +6472,18 @@
   // MUTUALLY EXCLUSIVE, one per player or none. Two of these at once is not a
   // read, it is a note — and there is a Notes field two inches below for that.
   //
-  // Glyphs are all Unicode 6.0 single codepoints with no variation selector:
+  // 🎣 was the first choice for `bluff` and was WRONG in a way worth recording:
+  // the archetype system right beside it already renders Fish as `FSH`, so a
+  // fishing rod on a NIT read as the HUD calling that nit a fish — a glyph
+  // arguing with the three letters next to it. 🤥 says "lying" and collides
+  // with nothing.
+  //
+  // Glyphs are single codepoints with no variation selector:
   // this runs on whatever Safari the phone has (see Conventions), and a VS16
   // sequence or a 2018-era emoji is exactly the kind of thing that renders as
   // a hollow box on the one device nobody here can test.
   const PLAYER_TAGS = [
-    { key: 'bluff', glyph: '🎣', label: 'Bluffs', act: 'Call them down lighter.' },
+    { key: 'bluff', glyph: '🤥', label: 'Bluffs', act: 'Call them down lighter.' },
     { key: 'station', glyph: '📞', label: 'Station', act: 'Never bluff them. Value bet thin.' },
     { key: 'folds', glyph: '🚪', label: 'Folds', act: 'Bet at them relentlessly.' },
     { key: 'trap', glyph: '🐍', label: 'Traps', act: 'Beware the check-raise; check back more.' },
@@ -10835,7 +10826,7 @@
       // here, never a stored relationship. Empty for both when no Torn API key
       // is configured, so this is a pure no-op absent that setting.
       const affil = affiliationFlags(xid, seatedList);
-      // 🏥 hospital, 🚔 jail, ✈️ travelling — whatever is BLOCKING an attack on
+      // 🏥 hospital, ✈️ travelling — whatever is BLOCKING an attack on
       // this seat. Empty for hero (never fetched) and for anyone with no Torn
       // API key configured, so this is a pure no-op absent that setting.
       //
@@ -12430,7 +12421,7 @@
       }</div>
       <div style="opacity:.7;margin:2px 0 10px">🔗 marks two seated players sharing a faction, 💍 marks two married
         to each other — both are facts from Torn's own profile data, checked only against whoever is CURRENTLY
-        seated, never stored as a relationship between two players. 🏥 / 🚔 / ✈️ on a seat means something is
+        seated, never stored as a relationship between two players. 🏥 / ✈️ on a seat means something is
         blocking an attack on them (hospital, jail, travelling) — checked for every seated opponent, refreshed
         every 30s. No mark means nothing known to be blocking. Tap a seat badge to open their panel: their name
         there links to their Torn profile, and there's a direct attack link beside their status and level.

@@ -183,12 +183,44 @@ const past = () => Math.floor(Date.now() / 1000) - 600;  // 10 min ago
   const T = load();
   t.eq('nothing cached yet returns null', T.targetStatusFor('999'), null);
 
-  T.targetCache.set('123', { state: 'Jail', until: soon(), level: 30, fetchedAt: Date.now() });
-  t.eq('a cached entry comes back by xid (string)', T.targetStatusFor('123').state, 'Jail');
+  // Hospital, not Jail: this block is about the CACHE feeding readiness, and
+  // jail is deliberately non-blocking now (see below), which would make the
+  // last assertion here about the wrong thing.
+  T.targetCache.set('123', { state: 'Hospital', until: soon(), level: 30, fetchedAt: Date.now() });
+  t.eq('a cached entry comes back by xid (string)', T.targetStatusFor('123').state, 'Hospital');
   t.eq('lookup coerces a numeric xid to the same string key',
-    T.targetStatusFor(123).state, 'Jail');
+    T.targetStatusFor(123).state, 'Hospital');
   t.eq('and it drives the readiness answer',
     T.attackReadiness(T.targetStatusFor('123')).blocked, true);
+}
+
+// --- jail is RECOGNISED and does not block --------------------------------
+
+{
+  // The distinction that matters, and the reason Jail is listed as
+  // non-blocking rather than deleted from ATTACK_BLOCKERS: attackReadiness
+  // treats anything it does not recognise as `unknown` and renders ❔ with
+  // 'unrecognised state'. Deleting the key would have swapped one glyph for a
+  // noisier one and reported a state we parse perfectly well as one we don't.
+  const T = load();
+  const r = T.attackReadiness({ state: 'Jail', until: soon(), fetchedAt: Date.now() });
+  t.eq('jail does not block an attack', r.blocked, false);
+  t.eq('jail is NOT reported as unknown — that is the whole point', r.unknown, false);
+  t.eq('jail reads as attackable', r.ready, true);
+  t.eq('and carries no glyph, so it cannot clutter a badge', r.emoji, '');
+
+  // The states that DO still block, so a future edit can't quietly empty the map.
+  ['Hospital', 'Traveling', 'Travelling', 'Abroad', 'Federal'].forEach((state) => {
+    const b = T.attackReadiness({ state, until: soon(), fetchedAt: Date.now() });
+    t.eq(state + ' still blocks', b.blocked, true);
+    t.ok(state + ' still carries a glyph', !!b.emoji);
+  });
+
+  // And the fallback is untouched: a state nobody listed is still unknown
+  // rather than assumed attackable, which is the direction that wastes a hit.
+  const u = T.attackReadiness({ state: 'Fallen', fetchedAt: Date.now() });
+  t.eq('an unlisted state is still unknown', u.unknown, true);
+  t.eq('and never ready', u.ready, false);
 }
 
 // --- refreshSeatedTargetStatus: no key configured is a hard no-op ---------
