@@ -9,6 +9,40 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.63.1
+
+The pool report said "75,721 hands of evidence" and was read as hands played.
+Reported directly, and correctly: *"I don't think I have seen 75 thousand
+hands."*
+
+**Both numbers were right.** That sum is each qualifying player's **own**
+lifetime hand count, added up — and those counts come from `hand.dealtInXids`,
+a snapshot of the seats at your table. So one real hand counts once for every
+opponent seated in it. On the store this was measured against, 75,721 of them
+sat behind **11,781** hands actually played: 6.4 tracked opponents per hand,
+which is exactly what a seven-handed table looks like.
+
+**A reporting bug, not a wrong figure.** Nothing downstream divides by it:
+`observedPoolAverages()` returns **unweighted** means across players, each
+counting once however long you have tracked them, so the sum annotates the
+sample and never scales it. Every pool percentage is unchanged.
+
+`totalHands` is now `playerHands`, printed as "PLAYER-hands", beside a new
+`heroHands` and the ratio between them — with the export stating outright that
+the two are not the same number and that the larger one is not hands you have
+played. The name and the label are the fix: the old ones only ever got one
+test, from the first person to read them, and failed it.
+
+The ratio is guarded rather than assumed. "Reset my stats" (v1.5.0) zeroes
+hero's record while opponent records survive, which would make it meaningless.
+
+`test/pool-tendency.test.js` pins the **distinction**, not the spelling — that
+the two figures are separate and can differ by a lot, that the mean stays
+unweighted (one 3000-hand player at VPIP 100 against three 30-hand players at 0
+must average 25, not 36), and that the old conflating wording is gone.
+Mutation-verified against a weighted mean, a mis-wired `heroHands`, and a
+reverted label.
+
 ## 1.63.0
 
 The players list was the most expensive thing in the HUD, and the cost was

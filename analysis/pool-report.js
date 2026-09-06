@@ -103,7 +103,15 @@ const obs = T.observedPoolAverages();
 if (!obs) {
   line('Fewer than 3 qualifying opponents — no pool read possible.');
 } else {
-  line(`Qualifying opponents (>=25 hands, hero excluded): ${obs.players}, ${obs.totalHands} hands of evidence.`);
+  // PLAYER-hands, not distinct hands: one real hand counts once per opponent
+  // seated in it, so this runs ~6x hero's own hand count at a seven-handed
+  // table. Printed together precisely so the two cannot be confused.
+  line(`Qualifying opponents (>=25 hands, hero excluded): ${obs.players}.`);
+  line(`Sample: ${obs.playerHands} PLAYER-hands (each player's own lifetime count, summed) observed across `
+    + `${obs.heroHands} hands you were dealt into`
+    + (obs.heroHands ? ` — ~${(obs.playerHands / obs.heroHands).toFixed(1)} tracked opponents per hand.` : '.'));
+  line(`The averages below are UNWEIGHTED means across PLAYERS, so the player-hand figure annotates the sample`);
+  line(`and never weights it — a 3000-hand regular and a 25-hand stranger count the same.`);
   line();
   ['vpip', 'pfr', 'threeBet', 'foldTo3Bet', 'cbet', 'foldToCbet', 'limpShareOfVpip'].forEach((k) => {
     const v = obs[k];

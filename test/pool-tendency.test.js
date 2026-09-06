@@ -101,7 +101,15 @@ function mk(T, xid, o) {
   t.near('hero\'s own extreme numbers do not pull the average', obs.vpip, 50);
 }
 
-// --- totalHands: sum of each qualifying player's own lifetime hand count ---
+// --- playerHands are SEAT OBSERVATIONS, not hands played --------------------
+//
+// This field used to be called totalHands and printed as "hands of evidence",
+// and the first person to read that report took it to mean hands they had
+// played. They had played 11,781; the figure said 75,721. Both were correct —
+// one real hand counts once for every opponent seated in it, so at a
+// seven-handed table the sum runs ~6x ahead — but the label only gets one
+// test, and it failed it. These assertions pin the distinction rather than the
+// spelling, so a future rename that loses it fails here.
 
 {
   const T = load();
@@ -114,9 +122,32 @@ function mk(T, xid, o) {
   T.heroXid = 'hero1';
   mk(T, 'hero1', { hands: 9999, vpip: 50, pfr: 15 });
   mk(T, 'thin', { hands: 5, vpip: 50, pfr: 15 });
+  T.STORE.hero.hands = 120;
 
   const obs = T.observedPoolAverages();
-  t.eq('totalHands sums only the qualifying players', obs.totalHands, 100 + 250 + 40);
+  t.eq('playerHands sums only the qualifying players', obs.playerHands, 100 + 250 + 40);
+  t.eq('heroHands reports hero\'s own count, untouched', obs.heroHands, 120);
+  t.ok('the two are reported separately and can differ by a lot',
+    obs.playerHands > obs.heroHands * 3);
+}
+
+{
+  // The average must be UNWEIGHTED across players — a long-tracked regular and
+  // a barely-tracked stranger count the same. If playerHands ever started
+  // weighting the mean, this is what would catch it: one player with ten times
+  // the sample cannot drag the average toward their own figure.
+  const T = load();
+  T.STORE = T.emptyStore();
+  T.heroXid = 'hero1';
+  mk(T, 'whale', { hands: 3000, vpip: 3000, pfr: 0 }); // VPIP 100 over a huge sample
+  mk(T, 'a', { hands: 30, vpip: 0, pfr: 0 });          // VPIP 0
+  mk(T, 'b', { hands: 30, vpip: 0, pfr: 0 });
+  mk(T, 'c', { hands: 30, vpip: 0, pfr: 0 });
+
+  const obs = T.observedPoolAverages();
+  t.near('four players, one at 100 and three at 0, average 25', obs.vpip, 25);
+  t.ok('and the player-hand figure is dominated by the whale it did NOT weight',
+    obs.playerHands > 3000);
 }
 
 // --- poolStakesBreakdown: which stakes the pool read is drawn from ---------
@@ -174,7 +205,13 @@ function mk(T, xid, o) {
   }
   const text = T.poolTendencyExport();
   t.ok('names the player count', text.indexOf('5 tracked opponent') !== -1);
-  t.ok('names the total hand count', text.indexOf('500 hand(s) of evidence total') !== -1);
+  // Both figures, and the word that stops them being conflated. "500 hands of
+  // evidence" was the old line, and it read as 500 hands played.
+  t.ok('names the player-hand figure as PLAYER-hands', text.indexOf('500 PLAYER-hands') !== -1);
+  t.ok('and says what it was observed across', text.indexOf('hand(s) you were dealt into') !== -1);
+  t.ok('and states outright that the two are not the same number',
+    text.indexOf('not the same number') !== -1);
+  t.ok('the old conflating wording is gone', text.indexOf('hand(s) of evidence total') === -1);
   t.ok('reports VPIP', text.indexOf('VPIP: 50.0%') !== -1);
   t.ok('reports a deviation label against the assumed pool figure', text.indexOf('extreme up') !== -1);
   t.ok('AFq is reported without a pool comparison', text.indexOf('AFq') !== -1

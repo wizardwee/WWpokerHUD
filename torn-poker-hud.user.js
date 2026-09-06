@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.63.0
+// @version      1.63.1
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,36 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.63.1 - The pool report said "75,721 hands of evidence" and was read as
+ *          hands played. Reported directly, and correctly: "I don't think I
+ *          have seen 75 thousand hands."
+ *            - Both numbers were right. That sum is each qualifying player's
+ *              OWN lifetime hand count, added up, and those counts come from
+ *              hand.dealtInXids — a snapshot of the seats at your table. So
+ *              one real hand counts once for every opponent seated in it. On
+ *              the store this was measured against, 75,721 of them sat behind
+ *              11,781 hands actually played: 6.4 tracked opponents per hand,
+ *              which is just what a seven-handed table looks like.
+ *            - A reporting bug, not a wrong figure. Nothing divides by it:
+ *              observedPoolAverages returns UNWEIGHTED means across players,
+ *              each counting once however long they have been tracked, so the
+ *              sum annotates the sample and never scales it. Every pool
+ *              percentage is unchanged.
+ *            - `totalHands` is now `playerHands`, printed as "PLAYER-hands",
+ *              beside a new `heroHands` and the ratio between them, with the
+ *              export saying outright that the two are not the same number.
+ *              The name and the label are the fix — the old ones only ever
+ *              got one test, from the first person to read them, and failed
+ *              it.
+ *            - The ratio is guarded rather than assumed: "Reset my stats"
+ *              zeroes hero's record while opponent records survive, which
+ *              would make it meaningless.
+ *            - test/pool-tendency.test.js pins the DISTINCTION, not the
+ *              spelling: that the two figures are separate and can differ by
+ *              a lot, that the mean stays unweighted (a 3000-hand player at
+ *              VPIP 100 against three 30-hand players at 0 must average 25,
+ *              not 36), and that the old conflating wording is gone.
  *
  * 1.63.0 - The players list was the most expensive thing in the HUD, and the
  *          cost was invisible: no error, no warning, just a panel that took a
@@ -133,40 +163,6 @@
  *              that it would have been asserting against the previous line's
  *              seats and proving nothing.
  *
- * 1.61.0 - DONK and PFR coexist. Asked for directly, and v1.60.0 had given
- *          the read up on a width assumption that turns out to be wrong.
- *            - Half of v1.60.0's rule was right and stays: the LAST preflop
- *              raiser betting postflop is a c-bet, expected, and a marker on
- *              an expected action carries no information.
- *            - The other half was not. Applying it to EVERY preflop raiser
- *              meant an opener who called a 3-bet and then led the flop was
- *              unmarked — that player is donking into whoever took the
- *              betting lead off them, one of the sharpest reads on the table,
- *              and it was given up on the grounds that the badge had room for
- *              one chip.
- *            - It has room for two. Measured in a real browser against the
- *              118px cap rather than assumed: PFR+DONK is 133px and clips,
- *              PFR+DK is 119px and does not, 4B+DK is 113px. So DONK
- *              compresses to DK ONLY when sharing the badge with a preflop
- *              chip — alone it stays spelled out, because the badge sheds only
- *              when width actually demands it, and the tooltip spells both out
- *              either way. DK also matches its sibling RR, which was already
- *              two characters.
- *            - Rare by construction: needs a multi-raise pot AND a non-last
- *              raiser taking the lead, so the extra width is almost never
- *              paid. Known interaction, honest about it: a seat carrying two
- *              chips AND the rare b-figure (136px) or the 📏 glyph (127px)
- *              does clip, and badgeStats:false remains the escape hatch.
- *            - The last-raiser filter runs AFTER the action walk, not during
- *              it, because which player that is is only known once preflop has
- *              been walked. Recording during and deleting after is what keeps
- *              the rule expressible in one line.
- *            - test/hand-roles.test.js pinned the OLD rule and failed on this
- *              change, which is the test doing its job. Replaced with the new
- *              rule pinned from both sides — the out-tiered raiser IS marked,
- *              the c-bettor still is not — plus a case proving a raise from
- *              that player still reads RR rather than DONK.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -228,7 +224,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.63.0';
+  const HUD_VERSION = '1.63.1';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -6524,12 +6520,30 @@
     };
     return {
       players: ps.length,
-      // Sum of each qualifying player's OWN lifetime hand count — the same
-      // "hands observed" denominator computeRates uses, not a count of
-      // actions or a hand-history length. This is "how many hands of
-      // evidence sit behind this average" in the same units the rest of the
-      // UI already reports per-player sample size in.
-      totalHands: ps.reduce((a, p) => a + (p.hands || 0), 0),
+      // PLAYER-hands (seat observations), NOT distinct hands — and the name
+      // says so because the old one (`totalHands`, printed as "hands of
+      // evidence") was read as distinct hands by the first person to look at
+      // it, which is the only test a label ever gets.
+      //
+      // Each qualifying player's own lifetime `hands` count, summed. Those
+      // counts come from hand.dealtInXids, a snapshot of the seats at YOUR
+      // table, so one real hand contributes one to every opponent dealt into
+      // it: at a seven-handed table this sum grows ~6x faster than the number
+      // of hands actually played. Measured on a real store, 75,721 of these
+      // sat behind 11,781 hands — 6.4 tracked opponents per hand.
+      //
+      // Nothing downstream divides by it. The averages below are UNWEIGHTED
+      // means across players (each player counts once, however long you have
+      // tracked them), so this figure annotates the sample and never scales
+      // it. That is why the misleading name was a reporting bug and not a
+      // wrong number.
+      playerHands: ps.reduce((a, p) => a + (p.hands || 0), 0),
+      // Printed beside it so the two can be compared on sight and the ratio
+      // read off. Guarded at the point of use rather than divided here: a
+      // hero record reset by "Reset my stats" while opponent records survived
+      // would make the ratio meaningless, and quoting a number that assumes
+      // otherwise is what this whole field is being fixed for.
+      heroHands: (STORE.hero && STORE.hero.hands) || 0,
       vpip: mean((r) => r.vpip),
       pfr: mean((r) => r.pfr),
       threeBet: mean((r) => r.threeBet),
@@ -6599,9 +6613,14 @@
       return header.join('\n') + '\n';
     }
     header.push(`Averaged across ${obs.players} tracked opponent(s) with ${POOL_OBS_MIN_HANDS}+ hands each `
-      + `(hero excluded), ${obs.totalHands} hand(s) of evidence total (each qualifying player's own lifetime `
-      + 'hand count, summed). Each stat is a RAW average — not sample-adjusted — and only counts players who '
-      + 'actually had that opportunity at all, same rule computeRates uses everywhere else in this file.');
+      + `(hero excluded). Sample: ${obs.playerHands} PLAYER-hands — each qualifying player's own lifetime hand `
+      + `count, summed — observed across ${obs.heroHands} hand(s) you were dealt into`
+      + (obs.heroHands ? ` (~${(obs.playerHands / obs.heroHands).toFixed(1)} tracked opponents per hand)` : '')
+      + '. Those are not the same number and the larger one is not hands you have played: one real hand '
+      + 'counts once for every opponent seated in it. Each stat is a RAW average — not sample-adjusted — '
+      + 'across PLAYERS, each counting once however long you have tracked them, so the player-hand figure '
+      + 'describes the sample and never weights it. Only players who actually had that opportunity at all '
+      + 'are counted, same rule computeRates uses everywhere else in this file.');
     header.push('');
     const row = (label, key, hasPoolFigure) => {
       const v = obs[key];
