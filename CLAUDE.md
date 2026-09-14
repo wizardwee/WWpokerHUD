@@ -554,6 +554,79 @@ rewritten whenever a row is appended. It is append-only and FIFO-evicted, so
 chunking it would take that to ~450 KB. Not done here — once per hand is not
 four times a second, and this file's rule is to measure before moving a number.
 
+### The backend is PDA_storage when the app offers it (v1.70.0)
+
+`bootStore()` picks ONE backend at load and never mixes them. A store half in
+`localStorage` and half in the native store is the split-brain this file has
+already paid for once with hero's identity.
+
+- **Native when `PDA_storage` exposes `loadAll` AND `setMany`.** A partial
+  injection falls back rather than half-adopting a store it can neither read in
+  one round trip nor write in one batch — those two calls are what the design
+  rests on.
+- **`localStorage` otherwise**, fully synchronous, exactly as before. That is
+  also what runs under the test harness and in a desktop userscript manager.
+
+**A failed load must NEVER be followed by a write.** This is the one
+irreversible mistake available here: carrying on with an empty store and saving
+it writes nothing over data that is perfectly intact on the other side of a
+bridge that happened to be slow. `storeLoadFailed` blocks writes in
+`flushShardsAsync` **and** in `saveStore` — at the place that does the writing,
+not only at the usual entry point. A failed load costs the session's recording,
+never the history.
+
+**Values are stored as OBJECTS, not JSON strings.** `PDA_storage` takes anything
+JSON-serialisable and the bridge encodes it once; a pre-stringified value is
+encoded *again*, escaping every quote and roughly doubling what each record
+costs — giving back much of the headroom this backend exists to gain.
+
+**One `setMany` per pass.** The docs say hot paths should batch, and `setMany`
+is documented to reject as a whole on quota — so a pass lands entirely or
+changes nothing, and the marks follow: all cleared or all kept. Same invariant
+as the sync path, reached differently.
+
+**Flushes are serialised, never overlapped.** An async write is in flight for an
+unknown time; a second pass starting inside that window builds its plan from
+marks the first is about to clear. One in flight, anything requested meanwhile
+coalesced into a single follow-up. The test pins this by recording what each
+batch CONTAINS — `flushInFlight` is set by both branches, so asserting on it
+proves nothing.
+
+**The localStorage copy is cleared only after the first native save lands**, the
+same rule as the legacy blob. Until then it is the only copy. **The consequence
+is a one-way door and is stated rather than hidden:** after that point,
+downgrading to an app without `PDA_storage` finds an empty localStorage.
+
+**`storageStats()` reports real bytes on this backend** — `usage()` gives
+`{used, quota}`, so `STORAGE_QUOTA_EST` stops being load-bearing and the UI
+drops the word "roughly". Without an answer yet it falls back to the estimate
+rather than reporting 0, because a meter reading empty silently disables the
+prune threshold.
+
+**`init()` awaits `storeReady` before its first line.** Everything below it
+reads `STORE`, and on the native backend it is empty until the `loadAll` round
+trip returns.
+
+`bootStore()` is **called after every binding it touches**, not beside the
+`STORE` declaration — it assigns `pdaBackend` and reads `legacyLocalPending`,
+both declared further down. Writing it in the obvious place threw the
+temporal-dead-zone `ReferenceError` this file documents as the way to break the
+script at load, and nothing ran at all. The comment on the call says so.
+
+**What these tests do and don't prove.** `test/pda-storage-backend.test.js`
+drives a stand-in implementing the documented contract, so it proves the code
+is right GIVEN the docs. Whether the API behaves as documented on the device is
+what the deep scan's `PDA_storage:` block is for — same rule as any selector
+here. **It still needs one report back.**
+
+### `test/run.js` fails a file that exits without reporting
+
+Every test file ends `process.exit(t.report())`. An async file whose `await`
+never settles dies silently when node's event loop empties and **exits 0 having
+asserted nothing** — a mutation that should have failed the suite scored clean
+that way. The runner now treats a missing `N passed, M failed` line as a
+failure in its own right.
+
 ### Pruning (v0.41.0)
 
 `prunePlayers()` in three passes: under 10 hands *and* unseen 30 days → unseen
@@ -2174,6 +2247,12 @@ secret-Gist mirror. Clearing the app's browser data wipes it.
 v1.69.0 — see "The store is sharded" above for the layout and the invariants.
 `tornPokerHUD_v1` itself is the pre-v1.69.0 single blob, read once on upgrade
 and removed after the first successful sharded save.
+
+**Since v1.70.0 the backing store is Torn PDA's native `PDA_storage` when the
+app provides it** — app-held (SQLite), 10 MB and raisable, its own namespace,
+and NOT wiped by clearing the app's browser data. `localStorage` remains the
+fallback and is what runs everywhere else. One backend is chosen at load and
+they are never mixed; see "The backend is PDA_storage when the app offers it".
 
 `store.version` (currently `STORE_VERSION = 2`) drives one-time repairs in
 `migrateStore`, run from both `loadStore` and `importJson`. Two rules:

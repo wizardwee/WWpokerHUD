@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.69.0
+// @version      1.70.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,43 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.70.0 - Keep the data in Torn PDA itself, not in the browser.
+ *            - PDA_storage is app-held (SQLite): 10 MB by default and
+ *              raisable, in this script's own namespace, and NOT wiped when
+ *              the app's browser data is cleared — which until now took
+ *              everything this HUD had ever recorded with it. localStorage is
+ *              ~5 MB SHARED with torn.com and evictable under pressure, and a
+ *              near-full store here measures 2.9 MB.
+ *            - ONE backend is chosen at load and they are never mixed. Native
+ *              only when loadAll AND setMany are both present; a partial
+ *              injection falls back rather than half-adopting a store it can
+ *              neither read in one round trip nor write in one batch.
+ *            - A FAILED LOAD IS NEVER FOLLOWED BY A WRITE. Carrying on with an
+ *              empty store and saving it would write nothing over data that is
+ *              perfectly intact behind a bridge that was merely slow. Blocked
+ *              at the place that writes, not only at saveStore. A failed load
+ *              costs the session's recording, never the history.
+ *            - Values stored as OBJECTS, not JSON strings: the bridge encodes
+ *              once, and handing it a pre-stringified value encodes it AGAIN,
+ *              escaping every quote and roughly doubling what a record costs.
+ *            - One setMany per pass, which the docs call for and which rejects
+ *              as a whole on quota — so a pass lands entirely or changes
+ *              nothing, and the dirty marks follow it either way.
+ *            - Flushes are serialised. A second pass starting while one is in
+ *              flight would build its plan from marks the first is about to
+ *              clear; anything requested meanwhile is coalesced into one
+ *              follow-up.
+ *            - The localStorage copy is cleared only after the first native
+ *              save lands. Consequence stated rather than hidden: after that,
+ *              downgrading to an app without PDA_storage finds it empty.
+ *            - storageStats now reports REAL bytes from usage(), so the
+ *              5 MB estimate stops being load-bearing and the UI drops the
+ *              word "roughly".
+ *            - Unverified on the device, same as any selector here. The tests
+ *              drive a stand-in built from Torn PDA's published contract, so
+ *              they prove the code is right GIVEN the docs — the deep scan's
+ *              PDA_storage block is what settles the rest.
  *
  * 1.69.0 - Stop rewriting the whole 2.9 MB store on every single action.
  *            - The store was ONE localStorage key, re-serialised in full on
@@ -74,34 +111,6 @@
  *              off once from init() and refreshed by each scan, so the first
  *              scan of a session already has it.
  *            - Nothing reads the store differently yet. This only reports.
- *
- * 1.67.0 - The bluff tag is 🤥, and jail stops being a blocker.
- *            - 🎣 was wrong, and wrong in a specific way: the archetype right
- *              beside it already renders Fish as FSH, so a fishing rod on a
- *              NIT read as the HUD calling that nit a fish — a glyph arguing
- *              with the three letters next to it. 🤥 says "lying" and collides
- *              with nothing on the badge.
- *            - Jail no longer flags a seat. It is a recognised state that does
- *              NOT block, rather than a state deleted from ATTACK_BLOCKERS —
- *              and that distinction is the whole change. attackReadiness
- *              treats anything it does not recognise as `unknown` and renders
- *              ❔ with 'unrecognised state "Jail"', so DELETING the key would
- *              have swapped one glyph for a noisier one and reported a state
- *              we parse perfectly well as one we failed to parse. The test
- *              pins that by mutation: removing Jail from NON_BLOCKING_STATES
- *              produces emoji ❔ where there should be none.
- *            - Consequence, stated rather than buried: a jailed player now
- *              reads ATTACKABLE, not unknown. That is the ready-side of an
- *              asymmetry this file is otherwise careful about, taken
- *              deliberately on a judgement about Torn rather than about code.
- *            - Abroad and Federal are KEPT, against the request to drop them.
- *              They cannot occur for someone sitting at the table, so they
- *              already cost nothing there — but attackReadiness also feeds the
- *              DEPARTURE watch, which keeps polling a player for
- *              DEPARTED_WATCH_MS after they leave, and someone who leaves the
- *              table and then flies is exactly what that list is for. Deleting
- *              them would turn a correct 🌍/🚫 into ❔ in the one case they can
- *              actually happen.
  *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
@@ -164,7 +173,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.69.0';
+  const HUD_VERSION = '1.70.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -987,6 +996,32 @@
     return store;
   }
 
+  // Reassemble a store from its shards. `read(key, fallback, label)` hands back
+  // the already-decoded value for one key, and `onBad(key)` is called for a
+  // player shard that could not be read at all.
+  //
+  // Shared by BOTH loaders on purpose. Two code paths assembling a store
+  // independently is how a field ends up handled on one backend and not the
+  // other — the same reasoning that put finalizeStore in one place.
+  function assembleShards(keys, read, onBad) {
+    const store = read(SHARD_CORE, {}, 'core');
+    // Defence in depth: if a core shard somehow carries these (a hand-edited
+    // store, a future format change), the dedicated shards still win, so a
+    // stale copy inside core can never shadow the real one.
+    SHARD_SPLIT_KEYS.forEach((k) => { delete store[k]; });
+    store.hands = read(SHARD_HANDS, [], 'hands');
+    store.plLedger = read(SHARD_PL, [], 'plLedger');
+    store.players = {};
+    keys.forEach((k) => {
+      if (k.indexOf(SHARD_PLAYER) !== 0) return;
+      const xid = k.slice(SHARD_PLAYER.length);
+      const p = read(k, null, 'player ' + xid);
+      if (p && typeof p === 'object') store.players[xid] = p;
+      else if (onBad) onBad(k); // corrupt: don't leave it holding quota
+    });
+    return store;
+  }
+
   function loadStore() {
     const keys = shardKeys();
 
@@ -1017,21 +1052,8 @@
     keys.forEach((k) => { raws[k] = shardRead(k); });
     keys.forEach((k) => noteShardBytes(k, (raws[k] || '').length));
 
-    const store = parseShard(raws[SHARD_CORE], {}, 'core');
-    // Defence in depth: if a core shard somehow carries these (a hand-edited
-    // store, a future format change), the dedicated shards still win, so a
-    // stale copy inside core can never shadow the real one.
-    SHARD_SPLIT_KEYS.forEach((k) => { delete store[k]; });
-    store.hands = parseShard(raws[SHARD_HANDS], [], 'hands');
-    store.plLedger = parseShard(raws[SHARD_PL], [], 'plLedger');
-    store.players = {};
-    keys.forEach((k) => {
-      if (k.indexOf(SHARD_PLAYER) !== 0) return;
-      const xid = k.slice(SHARD_PLAYER.length);
-      const p = parseShard(raws[k], null, 'player ' + xid);
-      if (p && typeof p === 'object') store.players[xid] = p;
-      else shardRemove(k); // corrupt and unreadable: don't leave it holding quota
-    });
+    const store = assembleShards(keys, (k, fallback, label) => parseShard(raws[k], fallback, label),
+      (k) => shardRemove(k));
 
     STORE = finalizeStore(store);
     // migrateStore may have rewritten records in place, and nothing has been
@@ -1041,12 +1063,98 @@
     return STORE;
   }
 
-  // Declared before loadStore() runs, because loadStore assigns to it as well
+  // Declared before any loader runs, because the loaders assign to it as well
   // as returning it — finalizeStore() calls migrateStore(), and a migration
   // that reads STORE would otherwise see the temporal dead zone rather than
   // the store being migrated.
   let STORE = emptyStore();
-  STORE = loadStore();
+
+  // Set when the async load could not complete. NOTHING may be written while
+  // this is true.
+  //
+  // The temptation on a failed load is to carry on with an empty store, and
+  // that is the one genuinely destructive option available here: the next save
+  // would write that empty store over data that is perfectly intact on the
+  // other side of a bridge that happened to be slow. So a failed load costs
+  // the session's recording, never the history — the HUD still reads the table
+  // and coaches, the banner says the data could not be read, and the user can
+  // reload.
+  let storeLoadFailed = null;
+
+  // Resolves when STORE holds the real data. Synchronous backends resolve
+  // immediately; init() awaits it before anything reads STORE.
+  let storeReady = null;
+
+  // Loading from PDA_storage is one loadAll() round trip, which the docs
+  // recommend over per-key reads for exactly this case.
+  function loadStoreAsync() {
+    const s = pdaBackend;
+    return Promise.resolve(s.loadAll()).then((all) => {
+      const bag = all && typeof all === 'object' ? all : {};
+      const keys = Object.keys(bag).filter((k) => k.indexOf(SHARD_PREFIX) === 0);
+
+      if (!keys.length) {
+        // Nothing native yet: first run on this backend. Everything currently
+        // in localStorage is the store, and it gets written across on the
+        // first save. Until that lands, localStorage remains the only copy.
+        STORE = loadStore();
+        legacyLocalPending = true;
+        markAllDirty();
+        return STORE;
+      }
+
+      // Values come back already decoded — PDA_storage stores JSON-serialisable
+      // values, not strings — so there is no per-shard parse to fail. A shard
+      // of the wrong TYPE is still possible (a hand-edited store), and falls
+      // back the same way a corrupt one does on the sync path.
+      const read = (k, fallback) => {
+        const v = bag[k];
+        if (v == null) return fallback;
+        if (Array.isArray(fallback) && !Array.isArray(v)) return fallback;
+        return v;
+      };
+      STORE = finalizeStore(assembleShards(keys, read, null));
+      markAllDirty();
+      return STORE;
+    });
+  }
+
+  // Chooses the backend ONCE and never mixes the two. A store half in
+  // localStorage and half in PDA_storage is the kind of split-brain this file
+  // has already paid for once with hero's identity.
+  function bootStore() {
+    const native = pdaStorage();
+    if (!native || typeof native.loadAll !== 'function' || typeof native.setMany !== 'function') {
+      // No usable native store — the localStorage path, unchanged, fully
+      // synchronous. This is also what runs in a desktop userscript manager.
+      pdaBackend = null;
+      STORE = loadStore();
+      storeReady = Promise.resolve(STORE);
+      return storeReady;
+    }
+    pdaBackend = native;
+    storeReady = loadStoreAsync().catch((e) => {
+      // Do NOT fall back to an empty store and start saving over the top. See
+      // storeLoadFailed.
+      storeLoadFailed = { at: Date.now(), message: (e && e.message) || String(e) };
+      console.warn('[TornPokerHUD] Could not read native storage; recording is paused.', e);
+      try { renderStorageWarning(); } catch (e2) { /* no DOM yet */ }
+      return STORE;
+    });
+    return storeReady;
+  }
+
+  // Set when the store was read out of localStorage but is being written to
+  // the native store from now on. The localStorage copy is the only one until
+  // the first native save lands, so it is cleared only after that.
+  let legacyLocalPending = false;
+
+  function clearLocalStorageCopy() {
+    legacyLocalPending = false;
+    shardKeys().forEach((k) => shardRemove(k));
+    shardRemove(STORAGE_KEY);
+  }
+
   let saveScheduled = false;
 
   // Set when localStorage REFUSES a write, cleared when one succeeds again.
@@ -1071,43 +1179,168 @@
     return out;
   }
 
-  // Write every shard currently marked dirty.
+  // What a flush intends to do, worked out ONCE and then handed to whichever
+  // backend is active. Built rather than executed inline because the two
+  // backends apply it very differently — localStorage one key at a time and
+  // synchronously, PDA_storage as a single batched round trip across the app
+  // bridge — and the decision about WHAT to persist must not be duplicated in
+  // two places that can drift.
   //
-  // Each mark is cleared only by its own successful write, so a refusal
-  // part-way through leaves exactly the unwritten shards dirty and the next
-  // save retries them. The first error is re-thrown once the pass is over, so
-  // the caller still sees the failure — but the shards that DID fit are
-  // persisted rather than being abandoned because a later one didn't.
-  function flushShards() {
-    let firstError = null;
-    const attempt = (fn) => {
-      try { fn(); return true; } catch (e) { if (!firstError) firstError = e; return false; }
-    };
+  // Marks are NOT cleared here. Only a backend that has actually written
+  // something may clear its mark.
+  function buildFlushPlan() {
+    const writes = [];
+    const removes = [];
 
     // Removals first: they FREE space, so on a store under quota pressure
     // doing them last would fail the very writes the prune was run to make
     // room for.
-    Array.from(removedPlayers).forEach((xid) => {
-      if (attempt(() => shardRemove(SHARD_PLAYER + xid))) removedPlayers.delete(xid);
-    });
+    removedPlayers.forEach((xid) => removes.push({ key: SHARD_PLAYER + xid, mark: { kind: 'removed', xid } }));
 
-    if (dirtyCore && attempt(() => shardWrite(SHARD_CORE, JSON.stringify(coreSnapshot())))) dirtyCore = false;
-    if (dirtyHands && attempt(() => shardWrite(SHARD_HANDS, JSON.stringify(STORE.hands || [])))) dirtyHands = false;
-    if (dirtyPl && attempt(() => shardWrite(SHARD_PL, JSON.stringify(STORE.plLedger || [])))) dirtyPl = false;
+    if (dirtyCore) writes.push({ key: SHARD_CORE, value: coreSnapshot(), mark: { kind: 'core' } });
+    if (dirtyHands) writes.push({ key: SHARD_HANDS, value: STORE.hands || [], mark: { kind: 'hands' } });
+    if (dirtyPl) writes.push({ key: SHARD_PL, value: STORE.plLedger || [], mark: { kind: 'pl' } });
 
-    Array.from(dirtyPlayers).forEach((xid) => {
+    dirtyPlayers.forEach((xid) => {
       const p = STORE.players[xid];
-      if (!p) {
-        // Deleted without going through markPlayerRemoved. Treat the mark as a
-        // removal rather than writing `undefined` over the record.
-        if (attempt(() => shardRemove(SHARD_PLAYER + xid))) dirtyPlayers.delete(xid);
-        return;
-      }
-      if (attempt(() => shardWrite(SHARD_PLAYER + xid, JSON.stringify(p)))) dirtyPlayers.delete(xid);
+      // Deleted without going through markPlayerRemoved. Treat the mark as a
+      // removal rather than writing `undefined` over the record.
+      if (!p) removes.push({ key: SHARD_PLAYER + xid, mark: { kind: 'dirty', xid } });
+      else writes.push({ key: SHARD_PLAYER + xid, value: p, mark: { kind: 'dirty', xid } });
     });
 
+    return { writes, removes };
+  }
+
+  // Clear one entry's dirty mark — and ONLY after its own write has landed.
+  function clearMark(mark) {
+    if (!mark) return;
+    if (mark.kind === 'core') dirtyCore = false;
+    else if (mark.kind === 'hands') dirtyHands = false;
+    else if (mark.kind === 'pl') dirtyPl = false;
+    else if (mark.kind === 'removed') removedPlayers.delete(mark.xid);
+    else if (mark.kind === 'dirty') dirtyPlayers.delete(mark.xid);
+  }
+
+  // Apply a plan against localStorage, one key at a time.
+  //
+  // A refusal part-way through leaves exactly the unwritten shards dirty and
+  // the next save retries them. The first error is re-thrown once the pass is
+  // over, so the caller still sees the failure — but the shards that DID fit
+  // are persisted rather than being abandoned because a later one didn't.
+  function applyPlanSync(plan) {
+    let firstError = null;
+    const attempt = (fn, mark) => {
+      try { fn(); clearMark(mark); } catch (e) { if (!firstError) firstError = e; }
+    };
+    plan.removes.forEach((r) => attempt(() => shardRemove(r.key), r.mark));
+    plan.writes.forEach((w) => attempt(() => shardWrite(w.key, JSON.stringify(w.value)), w.mark));
     if (firstError) throw firstError;
   }
+
+  function flushShards() {
+    applyPlanSync(buildFlushPlan());
+  }
+
+  // --- Backend: PDA_storage --------------------------------------------------
+  //
+  // Torn PDA's native per-script store. Chosen at load and never mixed with the
+  // localStorage path — see bootStore.
+  //
+  // Values are stored as OBJECTS, not as JSON strings. PDA_storage takes
+  // anything JSON-serialisable and the bridge encodes it once; handing it a
+  // pre-stringified string would encode the string AGAIN, escaping every quote
+  // in the record and roughly doubling what each player costs. That would give
+  // back a large part of the headroom this backend exists to gain.
+  //
+  // Every write in a pass goes through ONE setMany. The docs are explicit that
+  // reads and writes cross the app bridge and that hot paths should batch, and
+  // setMany is documented to reject as a whole on quota — so a pass either
+  // lands entirely or changes nothing, and the marks follow that: all cleared,
+  // or all kept for the next save. That is the same invariant as the sync path
+  // reached by a different route, not a weaker one.
+
+  let pdaBackend = null; // set by bootStore when PDA_storage is usable
+
+  function applyPlanAsync(plan) {
+    const s = pdaBackend;
+    if (!s) return Promise.reject(new Error('PDA storage backend not available'));
+
+    // Removals first, for the same reason as the sync path: they free space
+    // the writes may need. Failures are tolerated individually — a delete that
+    // does not land leaves an orphan key, which costs quota but corrupts
+    // nothing, and the mark stays set so the next pass retries it.
+    const deletions = plan.removes.map((r) => Promise.resolve()
+      .then(() => s.delete(r.key))
+      .then(() => { clearMark(r.mark); }, () => { /* retried next pass */ }));
+
+    return Promise.all(deletions).then(() => {
+      if (!plan.writes.length) return null;
+      const batch = {};
+      plan.writes.forEach((w) => { batch[w.key] = w.value; });
+      return Promise.resolve(s.setMany(batch)).then(() => {
+        plan.writes.forEach((w) => clearMark(w.mark));
+        return null;
+      });
+    });
+  }
+
+  // Serialise flushes. An async write is in flight across a bridge for an
+  // unknown time, and a second pass starting inside that window would build a
+  // plan from marks the first pass is about to clear — writing the same
+  // records twice, and clearing marks for writes that had not landed when the
+  // plan was built. One in flight at a time; anything requested meanwhile is
+  // coalesced into a single follow-up pass.
+  let flushInFlight = false;
+  let flushAgain = false;
+
+  function flushShardsAsync() {
+    // Guarded here as well as in saveStore, not only there. saveStore is the
+    // normal entry point but not the only possible one, and writing an empty
+    // store over intact data is the one irreversible mistake available on this
+    // path — so the check belongs at the place that does the writing.
+    if (storeLoadFailed) return Promise.resolve();
+    if (flushInFlight) { flushAgain = true; return Promise.resolve(); }
+    flushInFlight = true;
+    return applyPlanAsync(buildFlushPlan()).then(() => {
+      flushInFlight = false;
+      if (saveFailure) { saveFailure = null; renderStorageWarning(); }
+      if (legacyLocalPending) clearLocalStorageCopy();
+      // Feeds storageStats — and through it the prune threshold — with real
+      // bytes rather than a proportion of a guess. Fire-and-forget: the figure
+      // lands for the NEXT read, which is soon enough for a meter and a
+      // threshold that only matters at 75%.
+      probePdaStorageUsage();
+      if (flushAgain) { flushAgain = false; return flushShardsAsync(); }
+      // Pruning reads storageStats, which for this backend is refreshed from
+      // usage() rather than tracked per write — see refreshPdaUsage.
+      if (maybePrune(false)) { flushAgain = false; return flushShardsAsync(); }
+      return null;
+    }, (e) => {
+      flushInFlight = false;
+      flushAgain = false;
+      console.warn('[TornPokerHUD] Save failed', e);
+      if (!saveFailure) saveFailure = { at: Date.now(), message: (e && e.message) || String(e) };
+      renderStorageWarning();
+      // Same emergency path as the sync backend: a refused write means prune
+      // now rather than waiting out the throttle. Terminates because a second
+      // pass finds nothing to drop.
+      if (maybePrune(true)) return flushShardsAsync();
+      return null;
+    });
+  }
+
+  // Placed AFTER every binding it touches, not beside the STORE declaration.
+  // bootStore assigns pdaBackend and reads legacyLocalPending, both declared
+  // below their own sections — and a `let` read before its declaration is the
+  // temporal-dead-zone ReferenceError CLAUDE.md names as the documented way to
+  // break this script at load: it throws at module scope, so NOTHING runs. It
+  // was hit writing exactly this line, which is why it carries this comment.
+  //
+  // On the localStorage backend this assigns STORE synchronously, exactly as
+  // `let STORE = loadStore()` used to. On the native backend STORE stays empty
+  // until storeReady resolves, and init() awaits it before anything reads it.
+  bootStore();
 
   function saveStore() {
     if (saveScheduled) return;
@@ -1123,6 +1356,10 @@
         markAllDirty();
         lastReconcileAt = now;
       }
+      // A load that failed must never be followed by a write: the store in
+      // memory is empty and the real one is intact on disk.
+      if (storeLoadFailed) return;
+      if (pdaBackend) { flushShardsAsync(); return; }
       try {
         flushShards();
         // Only now is the legacy blob redundant: its contents are in shards
@@ -1156,21 +1393,33 @@
   const STORAGE_WARN_PCT = 75;
 
   function storageStats() {
-    // The running total maintained by noteShardBytes, not a re-read. Re-reading
-    // would mean ~900 getItem calls off the back of every save.
-    const chars = Math.round(shardBytesTotal);
+    // On the native backend these are REAL bytes from PDA_storage.usage(), not
+    // a proportion of a guess — the measurement STORAGE_QUOTA_EST has only ever
+    // stood in for, because the Storage Manager API is absent in this webview.
+    // Refreshed after each successful save; `estimated` says which one this is,
+    // so the UI can stop claiming "roughly" about a figure the app told us.
+    const native = pdaBackend && pdaStorageUsage && !pdaStorageUsage.error
+      && pdaStorageUsage.quota > 0 ? pdaStorageUsage : null;
+    // Browsers charge localStorage in UTF-16 code units, which is what
+    // String#length reports — so the fallback is the figure the quota actually
+    // sees, and it is ~1 byte per character for the ASCII this store is mostly
+    // of. The running total maintained by noteShardBytes, not a re-read:
+    // re-reading would mean ~900 getItem calls off the back of every save.
+    const chars = native ? native.used : Math.round(shardBytesTotal);
+    const quota = native ? native.quota : STORAGE_QUOTA_EST;
     const players = Object.keys((STORE && STORE.players) || {}).length;
+    const pct = quota ? (100 * chars) / quota : 0;
     return {
-      // Browsers charge localStorage in UTF-16 code units, which is what
-      // String#length reports — so this is the figure the quota actually sees,
-      // and it is ~1 byte per character for the ASCII this store is mostly of.
       chars,
+      quota,
+      estimated: !native,
+      native: !!pdaBackend,
       players,
       hands: ((STORE && STORE.hands) || []).length,
-      pct: (100 * chars) / STORAGE_QUOTA_EST,
+      pct,
       perPlayer: players ? chars / players : 0,
       failed: !!saveFailure,
-      level: saveFailure ? 'bad' : ((100 * chars) / STORAGE_QUOTA_EST >= STORAGE_WARN_PCT ? 'warn' : 'ok'),
+      level: saveFailure ? 'bad' : (pct >= STORAGE_WARN_PCT ? 'warn' : 'ok'),
     };
   }
 
@@ -12901,8 +13150,12 @@
         : '')
       + `<div class="tph-storebar"><div class="tph-storebar-fill tph-store-${s.level}" `
       + `style="width:${Math.min(100, s.pct).toFixed(1)}%"></div></div>`
-      + `<div class="tph-store-line">${fmtBytes(s.chars)} of roughly ${fmtBytes(STORAGE_QUOTA_EST)} `
+      + `<div class="tph-store-line">${fmtBytes(s.chars)} of ${s.estimated ? 'roughly ' : ''}${fmtBytes(s.quota)} `
       + `(${s.pct.toFixed(0)}%) · ${plural(s.players, 'player')} · ${plural(s.hands, 'hand')} in history</div>`
+      + (s.native
+        ? '<div class="tph-store-line">Stored by Torn PDA itself, not in the browser — it survives clearing '
+          + 'the app\'s browser data, and the limit above is the real one, raisable in PDA\'s script settings.</div>'
+        : '')
       + (s.level === 'warn'
         ? '<div class="tph-store-line tph-store-warntext">Getting full. A cleanup runs automatically past '
           + `${STORAGE_WARN_PCT}% — copy a backup below first if you want everything kept.</div>`
@@ -14251,8 +14504,24 @@
       emptyPlayer,
       // --- Sharded persistence -------------------------------------------
       loadStore,
+      loadStoreAsync,
+      bootStore,
+      assembleShards,
       replaceStore,
       finalizeStore,
+      buildFlushPlan,
+      applyPlanSync,
+      applyPlanAsync,
+      flushShardsAsync,
+      clearLocalStorageCopy,
+      get pdaBackend() { return pdaBackend; },
+      set pdaBackend(v) { pdaBackend = v; },
+      get storeReady() { return storeReady; },
+      get storeLoadFailed() { return storeLoadFailed; },
+      set storeLoadFailed(v) { storeLoadFailed = v; },
+      get legacyLocalPending() { return legacyLocalPending; },
+      set legacyLocalPending(v) { legacyLocalPending = v; },
+      get flushInFlight() { return flushInFlight; },
       coreSnapshot,
       flushShards,
       shardWrite,
@@ -14300,7 +14569,17 @@
   // BOOTSTRAP
   // ===========================================================================
 
-  function init() {
+  async function init() {
+    // FIRST, before anything reads STORE. On the localStorage backend this is
+    // an already-resolved promise and costs one microtask; on the native
+    // backend it is the loadAll() round trip, and every line below — the gear,
+    // the styles, the watchers — would otherwise run against an empty store
+    // and render a HUD that knows nothing about you.
+    //
+    // It never rejects: bootStore catches, sets storeLoadFailed, and the save
+    // path refuses to write over data it could not read. So the HUD still
+    // comes up on a failed load rather than not coming up at all.
+    try { await storeReady; } catch (e) { /* bootStore has already handled it */ }
     injectStyles();
     renderGear();
     // Fire-and-forget: answers into pdaStorageUsage so the FIRST deep scan of
@@ -14354,9 +14633,16 @@
     }
   }
 
+  // init() is async now (it awaits storeReady before anything reads STORE), so
+  // a throw inside it surfaces as an unhandled promise rejection rather than an
+  // uncaught error. Same visibility either way in a webview, but caught
+  // explicitly so it is logged with this script's own tag instead of arriving
+  // as an anonymous rejection somebody would have to trace back here.
+  const boot = () => { Promise.resolve(init()).catch((e) => console.warn('[TornPokerHUD] init failed', e)); };
+
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
-    setTimeout(init, 500);
+    setTimeout(boot, 500);
   } else {
-    document.addEventListener('DOMContentLoaded', () => setTimeout(init, 500));
+    document.addEventListener('DOMContentLoaded', () => setTimeout(boot, 500));
   }
 })();

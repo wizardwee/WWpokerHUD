@@ -26,14 +26,31 @@ try {
   process.exit(1);
 }
 
+// Every test file ends with `process.exit(t.report())`, which prints a
+// "<name>: N passed, M failed" line. A file that exits 0 WITHOUT that line
+// never reached its own report — an async test whose await never settles dies
+// silently when node's event loop empties, and exits 0 while having asserted
+// nothing. That was found by a mutation that a passing suite scored as clean,
+// so the absence of the line is treated as a failure in its own right.
+const REPORT_RE = /^[\w-]+: \d+ passed, \d+ failed$/m;
+
 for (const f of files) {
+  let out = '';
+  let ok = true;
   try {
-    process.stdout.write(execFileSync(process.execPath, [path.join(__dirname, f)], { stdio: 'pipe' }));
+    out = execFileSync(process.execPath, [path.join(__dirname, f)], { stdio: 'pipe' }).toString();
   } catch (e) {
-    process.stdout.write((e.stdout || '').toString());
-    process.stdout.write((e.stderr || '').toString());
-    failed++;
+    out = (e.stdout || '').toString() + (e.stderr || '').toString();
+    ok = false;
   }
+  process.stdout.write(out);
+  if (ok && !REPORT_RE.test(out)) {
+    console.log(`  FAIL: ${f} exited without reporting — it never reached `
+      + 'process.exit(t.report()). An unsettled await or an unhandled rejection '
+      + 'ends the process quietly with status 0.');
+    ok = false;
+  }
+  if (!ok) failed++;
 }
 
 console.log(failed ? `\n${failed} test file(s) failed` : `\nall ${files.length} test file(s) passed`);

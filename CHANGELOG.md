@@ -9,6 +9,88 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.70.0
+
+**Keep the data in Torn PDA itself, not in the browser.**
+[`PDA_storage`](https://github.com/Manuito83/torn-pda/blob/master/userscripts/TornPDA_Storage.md)
+is app-held (SQLite): 10 MB by default and raisable by the user, in this
+script's own namespace, and **not wiped when the app's browser data is
+cleared** — which until now took everything this HUD had ever recorded with it.
+`localStorage` is ~5 MB *shared* with torn.com and every other userscript, and
+evictable under memory pressure; a near-full store here measures 2.9 MB.
+
+**One backend is chosen at load, and they are never mixed.** A store half in
+`localStorage` and half in the native store is the split-brain this file has
+already paid for once with hero's identity. Native only when `loadAll` **and**
+`setMany` are both present — a partial injection on an older app version falls
+back rather than half-adopting a store it can neither read in one round trip
+nor write in one batch, which is what the whole design rests on. Everywhere
+else — a desktop userscript manager, the test harness — the synchronous
+`localStorage` path runs exactly as before.
+
+**A failed load is never followed by a write.** This is the one irreversible
+mistake available on this path, and the tempting one: carry on with an empty
+store, and the next save writes nothing over data that is perfectly intact on
+the other side of a bridge that happened to be slow. `storeLoadFailed` blocks
+writes in `flushShardsAsync` **as well as** in `saveStore` — at the place that
+does the writing, not only at the usual entry point. A failed load costs the
+session's recording, never the history: the HUD still reads the table and
+coaches, and the banner says the data could not be read.
+
+**Values are stored as objects, not JSON strings.** `PDA_storage` takes anything
+JSON-serialisable and the bridge encodes it once. Handing it a pre-stringified
+value encodes it *again*, escaping every quote in the record and roughly
+doubling what each player costs — giving back a large part of the headroom this
+backend exists to gain.
+
+**One `setMany` per pass.** The docs are explicit that reads and writes cross
+the app bridge and that hot paths should batch, and `setMany` is documented to
+reject as a whole on quota — so a pass either lands entirely or changes nothing,
+and the dirty marks follow it: all cleared, or all kept for the next save. The
+same invariant as the synchronous path, reached by a different route.
+
+**Flushes are serialised, never overlapped.** An async write is in flight across
+the bridge for an unknown time, and a second pass starting inside that window
+would build its plan from marks the first pass is about to clear — writing the
+same records twice and clearing marks for writes that had not landed when the
+plan was built. One in flight at a time; anything requested meanwhile is
+coalesced into a single follow-up.
+
+**The localStorage copy is cleared only after the first native save lands**,
+the same rule the legacy blob already follows — until then it is the only copy.
+**The consequence is a one-way door, and is stated rather than hidden:** after
+that point, downgrading to an app version without `PDA_storage` finds an empty
+`localStorage`.
+
+**`storageStats()` reports real bytes.** `usage()` returns `{used, quota}`, so
+`STORAGE_QUOTA_EST` stops being load-bearing on this backend and the settings
+line drops the word "roughly". Without an answer yet it falls back to the
+estimate rather than reporting 0 — a meter reading empty would silently disable
+the prune threshold.
+
+`init()` now awaits the store before its first line, since everything in it
+reads `STORE`. And `bootStore()` is called *after* every binding it touches
+rather than beside the `STORE` declaration: writing it in the obvious place
+threw the temporal-dead-zone `ReferenceError` CLAUDE.md names as the documented
+way to break this script at load, and nothing ran at all.
+
+**Unverified on the device, same as any selector here.**
+`test/pda-storage-backend.test.js` drives a stand-in built from Torn PDA's
+published contract, so it proves the code is right *given the docs*. Whether the
+API behaves as documented on a real phone is what the deep scan's `PDA_storage:`
+block is for, and it still needs one report back.
+
+Mutation-verified against five regressions: writing after a failed load,
+clearing the localStorage copy before the native write lands, letting flushes
+overlap, double-encoding values across the bridge, and clearing dirty marks
+regardless of whether `setMany` resolved.
+
+**`test/run.js` now fails a file that exits without reporting.** Every test file
+ends `process.exit(t.report())`. An async file whose `await` never settles dies
+quietly when node's event loop empties and **exits 0 having asserted nothing** —
+the double-encoding mutation above was scored as clean that way before this
+landed. A missing `N passed, M failed` line is now a failure in its own right.
+
 ## 1.69.0
 
 **Stop rewriting the whole 2.9 MB store on every single action.** The store was
