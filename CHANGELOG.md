@@ -9,6 +9,57 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.68.0
+
+**Probe whether Torn PDA's native storage is available on this phone.** Nothing
+reads or writes differently yet — this version only reports, because whether the
+API is injected at all on the user's app version is exactly the kind of question
+this repo has always answered with a deep scan and a report back, the same rule
+as any selector.
+
+Torn PDA offers [`PDA_storage`](https://github.com/Manuito83/torn-pda/blob/master/userscripts/TornPDA_Storage.md):
+a per-script key/value store held by the app (SQLite) rather than the webview's
+`localStorage`. 10 MB by default and raisable by the user, in its own namespace,
+and **not wiped when the browser cache is cleared** — which today takes
+everything this HUD has ever recorded with it.
+
+**The reason to care is measured, not assumed.** A store built at the sizes
+CLAUDE.md already documents — 900 players, 200 hands, `plLedger` at
+`PL_LEDGER_CAP` — serialises to **2.9 MB**:
+
+| | |
+|---|---|
+| serialised store | 2.87 MB |
+| `players` | 1,270 KB |
+| `plLedger` | 1,259 KB |
+| `hands` | 412 KB |
+| `JSON.stringify(STORE)` | 23.0 ms (desktop x86) |
+
+That is against a `localStorage` budget of roughly 5 MB **shared with torn.com
+itself** and every other userscript, which the engine may evict under memory
+pressure. `STORAGE_QUOTA_EST` has only ever been a guess at that ceiling,
+because the Storage Manager API is absent in the PDA webview; `usage()` returns
+real `{used, quota}` bytes and ends the guessing.
+
+**Reported as three states, never a boolean.** `ABSENT`, `PRESENT`, and
+`PRESENT BUT UNUSABLE` (an object under the name with no `get`/`set`), plus the
+individual method list against the eight documented calls. A *partial*
+injection on an older app version is precisely what a boolean would read as
+"present" and then fail on at runtime, and `PRESENT BUT UNUSABLE` is kept
+distinct from `ABSENT` because the latter sends someone hunting for an app
+upgrade when the object is sitting right there.
+
+`usage()` is async and the scan builds its report synchronously, so the answer
+is cached the same way `lastShareResult` is: kicked off once from `init()` and
+refreshed by every scan, so the **first** scan of a session already carries it.
+It is defended on both sides — a rejected promise, a synchronous throw, a
+non-promise return and an unrecognised shape are each captured rather than
+escaping, because this runs from `init()` where an unhandled throw takes the
+rest of bootstrap with it.
+
+`test/pda-storage-probe.test.js`, mutation-verified: treating any object as a
+usable store, and swallowing a rejection instead of recording it, both fail it.
+
 ## 1.67.0
 
 **🎣 → 🤥 for the Bluffs tag.** The first choice was wrong in a specific way,

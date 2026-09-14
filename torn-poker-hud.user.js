@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.67.0
+// @version      1.68.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,29 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.68.0 - Probe whether Torn PDA's native storage is available on this phone.
+ *            - Groundwork, and a question this repo cannot answer from here.
+ *              Torn PDA offers PDA_storage: a per-script key/value store held
+ *              by the app (SQLite) instead of the webview's localStorage,
+ *              10 MB by default and user-raisable, in its own namespace, and
+ *              NOT wiped when the browser cache is cleared.
+ *            - The reason to care is measured, not assumed. A store at the
+ *              sizes CLAUDE.md documents (900 players, 200 hands, plLedger at
+ *              cap) serialises to 2.9 MB — against a localStorage budget of
+ *              roughly 5 MB that is SHARED with torn.com itself and can be
+ *              evicted under memory pressure. STORAGE_QUOTA_EST has always
+ *              been a guess for want of the Storage Manager API; usage()
+ *              returns real {used, quota} bytes.
+ *            - Reported as three states, not a boolean. ABSENT, PRESENT, and
+ *              PRESENT BUT UNUSABLE — plus the individual method list, because
+ *              a partial injection on an older app version is exactly what a
+ *              boolean would read as "present" and then fail on later.
+ *            - usage() is async and the scan builds its report synchronously,
+ *              so the answer is cached the same way lastShareResult is: kicked
+ *              off once from init() and refreshed by each scan, so the first
+ *              scan of a session already has it.
+ *            - Nothing reads the store differently yet. This only reports.
  *
  * 1.67.0 - The bluff tag is 🤥, and jail stops being a blocker.
  *            - 🎣 was wrong, and wrong in a specific way: the archetype right
@@ -169,7 +192,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.67.0';
+  const HUD_VERSION = '1.68.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -204,6 +227,92 @@
     return typeof window.flutter_inappwebview !== 'undefined'
       || typeof window.PDA_httpGet === 'function'
       || typeof window.PDA_httpPost === 'function';
+  }
+
+  // Torn PDA's native per-script key/value store, documented at
+  // userscripts/TornPDA_Storage.md in Manuito83/torn-pda. It is SQLite-backed
+  // on the app side rather than the webview's localStorage, which matters here
+  // for three reasons this file has already paid for:
+  //
+  //   - localStorage is ~5 MB shared with torn.com itself and every other
+  //     userscript, and the engine may evict it under memory pressure. A near-
+  //     full store here measures 2.9 MB, so that ceiling is not theoretical.
+  //   - It survives the user clearing the app's browser data, which today
+  //     wipes everything this HUD has ever recorded.
+  //   - usage() returns real {used, quota} bytes, which is the measurement
+  //     STORAGE_QUOTA_EST has only ever been a guess at.
+  //
+  // UNVERIFIED on this device, exactly like every selector in this file: the
+  // API is read from Torn PDA's own docs, not from a response anybody working
+  // on this has seen. That is what the deep-scan probe below is for — one
+  // report settles whether it is injected at all on the user's app version.
+  //
+  // Injected as a bare global (like PDA_httpGet), so read it off window rather
+  // than referencing it unqualified — an undeclared identifier throws, and a
+  // throw at module scope in a userscript means nothing runs at all.
+  function pdaStorage() {
+    const s = window.PDA_storage;
+    return (s && typeof s.get === 'function' && typeof s.set === 'function') ? s : null;
+  }
+
+  // Method names from the docs, in the order the table lists them. Reported
+  // individually rather than as one boolean, because a partial injection (an
+  // older app version with only some of these) is the failure this cannot
+  // otherwise tell apart from a total absence.
+  const PDA_STORAGE_METHODS = ['get', 'getMany', 'loadAll', 'list', 'set', 'setMany', 'delete', 'usage'];
+
+  // Last result of PDA_storage.usage(), or the error it rejected with. Cached
+  // the same way lastShareResult is, and for the same reason: the scan builds
+  // its report synchronously, so an async answer has to be sitting here by the
+  // time the user runs one. Kicked off from init() and refreshed by each scan,
+  // so the first scan of a session reports it and every later one is current.
+  let pdaStorageUsage = null;
+
+  function probePdaStorageUsage() {
+    const s = pdaStorage();
+    if (!s || typeof s.usage !== 'function') return Promise.resolve(null);
+    let out;
+    // Defensive on BOTH sides of the bridge: usage() is documented to return a
+    // promise, but an older or partial injection could return a plain value or
+    // throw synchronously, and this runs from init() where an escaped throw
+    // would take the rest of bootstrap with it.
+    try { out = s.usage(); } catch (e) {
+      pdaStorageUsage = { at: Date.now(), error: (e && e.message) || String(e) };
+      return Promise.resolve(pdaStorageUsage);
+    }
+    return Promise.resolve(out).then((u) => {
+      pdaStorageUsage = (u && typeof u.used === 'number')
+        ? { at: Date.now(), used: u.used, quota: u.quota }
+        : { at: Date.now(), error: 'unrecognised shape: ' + JSON.stringify(u) };
+      return pdaStorageUsage;
+    }, (e) => {
+      pdaStorageUsage = { at: Date.now(), error: (e && e.message) || String(e) };
+      return pdaStorageUsage;
+    });
+  }
+
+  // One block for the deep scan. Returns lines, so the scan stays a list of
+  // pushes and this stays testable without a DOM.
+  function pdaStorageScanLines() {
+    const s = pdaStorage();
+    const raw = window.PDA_storage;
+    const L = [];
+    L.push('PDA_storage: ' + (s ? 'PRESENT' : (raw ? 'PRESENT BUT UNUSABLE (no get/set)' : 'ABSENT'))
+      + '  (typeof ' + (typeof raw) + ')');
+    if (raw) {
+      const have = PDA_STORAGE_METHODS.filter((m) => typeof raw[m] === 'function');
+      const missing = PDA_STORAGE_METHODS.filter((m) => typeof raw[m] !== 'function');
+      L.push('  methods: ' + (have.join(',') || '(none)')
+        + (missing.length ? '   MISSING: ' + missing.join(',') : ''));
+    }
+    if (pdaStorageUsage) {
+      L.push('  usage(): ' + (pdaStorageUsage.error
+        ? 'ERROR ' + pdaStorageUsage.error
+        : fmtBytes(pdaStorageUsage.used) + ' of ' + fmtBytes(pdaStorageUsage.quota)));
+    } else if (s) {
+      L.push('  usage(): not answered yet — re-run this scan');
+    }
+    return L;
   }
 
   // Hand a text file to the user.
@@ -13029,6 +13138,10 @@
     L.push('stacks read: ' + Object.keys(stacks).length + ' -> '
       + (Object.keys(stacks).map((x) => x + '=' + fmtMoney(stacks[x])).join(' ') || '(none)'));
     L.push('isPDA: ' + isPDA() + '  (flutter bridge: ' + (typeof window.flutter_inappwebview !== 'undefined') + ')');
+    // Refresh for the NEXT scan as well as reporting the cached answer now —
+    // usage() is async and this report is built synchronously.
+    probePdaStorageUsage();
+    pdaStorageScanLines().forEach((l) => L.push(l));
     // The share bridge is the one unverified handler left here. Its contract is
     // unknown (see downloadTextFile), so the scan reports what it actually
     // returned rather than whether we think it worked — that is the only thing
@@ -13564,6 +13677,12 @@
       set lastSeatedSnapshot(v) { lastSeatedSnapshot = v; },
       pdaCall,
       PDA_CALL_TIMEOUT_MS,
+      pdaStorage,
+      PDA_STORAGE_METHODS,
+      probePdaStorageUsage,
+      pdaStorageScanLines,
+      get pdaStorageUsage() { return pdaStorageUsage; },
+      set pdaStorageUsage(v) { pdaStorageUsage = v; },
       seedBlindFromVisibleLog,
       tickStep,
       tickErrors,
@@ -13853,6 +13972,10 @@
   function init() {
     injectStyles();
     renderGear();
+    // Fire-and-forget: answers into pdaStorageUsage so the FIRST deep scan of
+    // a session can report it. Never awaited and never allowed to reject —
+    // this is a diagnostic, and nothing below it may depend on the answer.
+    probePdaStorageUsage();
     // Wire the equity engine's completion hook to the panel that consumes it.
     // Done here rather than at the call site so the engine itself stays free
     // of any dependency on the UI — see onEquityReady.

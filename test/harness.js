@@ -183,6 +183,13 @@ function load(opts = {}) {
     __TPH_TEST_HOOKS: true,
     document,
     localStorage,
+    // opts.pdaStorage: a stand-in for Torn PDA's injected PDA_storage global.
+    // Absent by default, which is the honest default — this harness is not a
+    // PDA webview, and the script's localStorage path is what runs without it.
+    // Pass an object to drive the PDA branch; pass a PARTIAL one to simulate
+    // an older app version that injects only some methods, which is the case
+    // the probe exists to tell apart from a total absence.
+    PDA_storage: opts.pdaStorage,
     innerWidth: 390,
     innerHeight: 844,
     addEventListener() {},
