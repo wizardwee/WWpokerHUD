@@ -16,7 +16,11 @@ const t = runner('storage-warning');
   const T = load();
   T.STORE = T.emptyStore();
 
-  const stored = (s) => { T._sandbox.localStorage.setItem('tornPokerHUD_v1', s); };
+  // Goes through the REAL shard writer, so the running total storageStats
+  // reads is maintained the same way production maintains it. Writing straight
+  // to localStorage would test nothing: the store is sharded now, and the meter
+  // deliberately does not re-read ~900 keys off the back of every save.
+  const stored = (s) => { T.shardWrite(T.SHARD_CORE, s); };
 
   stored('x'.repeat(1024));
   let s = T.storageStats();
@@ -48,7 +52,7 @@ const t = runner('storage-warning');
   const T = load();
   T.STORE = T.emptyStore();
   T.STORE.players = { 1: {}, 2: {}, 3: {}, 4: {} };
-  T._sandbox.localStorage.setItem('tornPokerHUD_v1', 'x'.repeat(4000));
+  T.shardWrite(T.SHARD_CORE, 'x'.repeat(4000));
   const s = T.storageStats();
   t.eq('players are counted', s.players, 4);
   t.eq('and the per-player figure divides through', s.perPlayer, 1000);
@@ -109,7 +113,7 @@ const t = runner('storage-warning');
   const T = load();
   T.STORE = T.emptyStore();
   T.STORE.players = { 1: {}, 2: {} };
-  T._sandbox.localStorage.setItem('tornPokerHUD_v1', 'x'.repeat(2048));
+  T.shardWrite(T.SHARD_CORE, 'x'.repeat(2048));
 
   T.saveFailure = null;
   let html = T.storageSettingsHtml();

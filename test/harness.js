@@ -147,6 +147,10 @@ function stubStorage() {
     removeItem: (k) => { map.delete(k); },
     clear: () => map.clear(),
     get length() { return map.size; },
+    // Real localStorage API, not a test helper. The script enumerates its own
+    // keys by prefix through length/key(i) rather than keeping an index key,
+    // so without this the sharded loader sees a fresh install every time.
+    key: (i) => { const ks = Array.from(map.keys()); return i < ks.length ? ks[i] : null; },
     _map: map, // exposed so a test can assert on what was persisted
   };
 }

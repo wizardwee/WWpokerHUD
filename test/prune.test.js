@@ -140,21 +140,24 @@ function T_CAP_OVERSHOOT() { return 2050; }
   // Below the pressure threshold nothing is deleted, however prunable it looks.
   // The user chose "auto past 75%", and deleting on a day it was not needed is
   // exactly what that rules out.
-  T._sandbox.localStorage.setItem('tornPokerHUD_v1', 'x'.repeat(1024));
+  // Through the real shard writer: the pressure figure is a running total
+  // maintained on write, not a re-read of storage.
+  T.shardWrite(T.SHARD_CORE, 'x'.repeat(1024));
   T.lastPruneCheck = 0;
   t.eq('no pressure, no prune', T.maybePrune(false), false);
   t.ok('and the prunable record is untouched', !!T.STORE.players.old);
 
   // Over the threshold it runs.
-  T._sandbox.localStorage.setItem('tornPokerHUD_v1',
+  T.shardWrite(T.SHARD_CORE,
     'x'.repeat(Math.ceil(T.STORAGE_QUOTA_EST * (T.STORAGE_WARN_PCT / 100)) + 1000));
   T.lastPruneCheck = 0;
   t.eq('under pressure it prunes', T.maybePrune(false), true);
   t.ok('the record is gone', !T.STORE.players.old);
   t.ok('and the run is reported', !!T.STORE.lastPrune && T.STORE.lastPrune.dropped === 1);
 
-  // Throttled: the pressure test reads the whole stored string, so it must not
-  // run on every debounced save.
+  // Throttled: the pressure test used to read the whole stored string. It is a
+  // running total now, but the throttle still matters — prunePlayers itself
+  // walks every record, and that is not a per-save cost either.
   T.STORE.players.old2 = Object.assign(T.emptyPlayer('old2', 'O2'), { hands: 1, lastSeen: Date.now() - 90 * DAY });
   t.eq('a second call inside the interval is skipped', T.maybePrune(false), false);
   t.ok('so the record is still there', !!T.STORE.players.old2);
@@ -184,9 +187,20 @@ function T_CAP_OVERSHOOT() { return 2050; }
   }
 
   const ls = T._sandbox.localStorage;
+  // Count FLUSH PASSES, not setItem calls. One save used to be exactly one
+  // setItem, so counting calls was a faithful proxy for "how many times did
+  // the save path run". Sharding breaks that proxy — a single pass now writes
+  // core, hands, the ledger and one key per dirty player — and leaving the
+  // assertion on raw setItem count would have turned a correct terminating
+  // loop into a failure, or worse, hidden a non-terminating one behind a
+  // number nobody could interpret. The invariant being pinned is unchanged:
+  // the emergency retry must run twice and then stop.
+  // Counted by the CORE shard write, which is exactly one attempt per flush
+  // pass: flushShards always tries core (dirtyCore stays set while the write
+  // keeps being refused), and removals go through removeItem, not setItem.
   let attempts = 0;
-  ls.setItem = () => {
-    attempts += 1;
+  ls.setItem = (k) => {
+    if (k === T.SHARD_CORE) attempts += 1;
     const e = new Error('QuotaExceededError');
     e.name = 'QuotaExceededError';
     throw e;

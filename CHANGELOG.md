@@ -9,6 +9,90 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.69.0
+
+**Stop rewriting the whole 2.9 MB store on every single action.** The store was
+one `localStorage` key, re-serialised in full on every save — and `saveStore` is
+called from `recordStreetAction`, `maybeCountVpip`/`Pfr`/`Cbet`,
+`harvestShownCards` (a 400ms poll), `trackStacks` and `harvestSeatNames`. So a
+busy hand was serialising 2.9 MB and discarding a 3 MB string up to four times a
+second to record that one player called one bet.
+
+Each piece now has its own key, and only the changed ones are written:
+
+| key | holds | changes |
+|---|---|---|
+| `tornPokerHUD_v1:core` | settings, hero, session, flags (~2 KB) | most saves, cheap |
+| `tornPokerHUD_v1:hands` | `STORE.hands` (~412 KB) | once per hand |
+| `tornPokerHUD_v1:pl` | `STORE.plLedger` (~1259 KB) | once per hand |
+| `tornPokerHUD_v1:p:<xid>` | one player record (~1.4 KB) | individually |
+
+Measured through the real save path against 900 players, 200 hands and a ledger
+at `PL_LEDGER_CAP`:
+
+| | before | after |
+|---|---|---|
+| one action | 19.0 ms | **0.037 ms** |
+| hand settlement | 19.0 ms | 11.0 ms |
+| full reconcile (once a minute) | 19.0 ms | 23.3 ms |
+
+**A missed dirty mark is not data loss, and that is the design.** Players are
+marked in `getPlayer()` — on *every* call, including read-only ones, because it
+hands out the live record and cannot see whether the caller wrote to it — plus
+the handful of sites that reach `STORE.players[xid]` directly. Proving that list
+exhaustive forever is exactly the kind of claim this file has been burned by, so
+it is not relied on: a **full reconcile** writes every shard every
+`STORE_RECONCILE_MS` (60s) regardless of marks. `STORE` is in memory, so a missed
+mark costs one reconcile interval of durability rather than the record.
+Over-marking is free; under-marking is bounded.
+
+**A mark is cleared only by its own successful write.** A refused write leaves
+that shard dirty for the next save instead of clearing the flag and losing the
+record permanently, and `flushShards` keeps going after a failure and re-throws
+at the end — so the shards that fit are persisted rather than abandoned because
+a later one didn't. Removals are flushed **before** writes, because they free
+space the writes may need.
+
+**Fixed on the way in, and it would have been a live data bug:** every path that
+*rebinds* `STORE` — `importJson`, `resetAllData`, the gist merge — now goes
+through `replaceStore()`. Under a single blob this needed nothing, because
+overwriting the key destroyed what it held by definition. Sharded, a player who
+exists on disk but not in the incoming store keeps their key and is read straight
+back on the next load: **"Reset all data" would have cleared the screen and then
+silently restored every record on the next reload**, and an import would have
+unioned itself with what it was supposed to replace. The removal list is diffed
+against what is actually *persisted*, not against the outgoing in-memory store.
+
+**The pre-1.69.0 blob is removed only after a full save has actually landed.**
+It is the only copy until the shards exist, so deleting it any earlier turns a
+refused write into total data loss — and leaving it forever would hold 2.9 MB of
+the quota this split exists to free.
+
+**A corrupt shard now costs one shard.** The old blob's only failure mode was
+`Corrupt storage, resetting` — one bad byte anywhere wiped every player, every
+hand and the whole ledger. A bad player shard is dropped with a warning and the
+other 899 load fine.
+
+`storageStats().chars` is a running total maintained on write rather than a
+re-read, since re-reading ~900 keys off the back of every save is the cost this
+change exists to remove. All `localStorage` access now lives in
+`shardRead`/`shardWrite`/`shardRemove`/`shardKeys`, and a literal source scan in
+the tests fails on any other touch — that seam is what makes the backend
+swappable. Keys are **enumerated**, never tracked in an index key: an index is a
+second source of truth that drifts silently in both directions.
+
+`test/store-shards.test.js`, mutation-verified against six regressions —
+clearing a dirty mark regardless of write success, dropping the reconcile,
+removing the legacy blob at load instead of after a good write, a prune that
+forgets to delete the shard key, writing every player on every save, and
+rebinding `STORE` directly instead of through `replaceStore`.
+
+**Still open, and the next lever if hand settlement is ever reported as a
+hitch:** settlement costs 11ms because `plLedger` is one 1.26 MB shard rewritten
+whenever a row is appended. It is append-only and FIFO-evicted, so chunking it
+would take that to roughly 450 KB. Not done here — once per hand is not four
+times a second, and the rule in this repo is to measure before moving a number.
+
 ## 1.68.0
 
 **Probe whether Torn PDA's native storage is available on this phone.** Nothing

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.68.0
+// @version      1.69.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,40 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.69.0 - Stop rewriting the whole 2.9 MB store on every single action.
+ *            - The store was ONE localStorage key, re-serialised in full on
+ *              every save. Measured at the documented sizes (900 players, 200
+ *              hands, plLedger at cap) that is 2.9 MB and 23ms per stringify —
+ *              and saveStore is called from the per-action counters and a
+ *              400ms poll, so a busy hand was serialising 2.9 MB and throwing
+ *              away a 3 MB string up to four times a second to record that one
+ *              player called one bet.
+ *            - Each piece now has its own key (:core, :hands, :pl, :p:<xid>)
+ *              and only the changed ones are written. Measured through the
+ *              real save path: one action 19ms -> 0.037ms, hand settlement
+ *              11ms, full reconcile 23ms once a minute.
+ *            - A missed dirty mark is NOT data loss. getPlayer marks on every
+ *              call (it hands out the live record and cannot see whether the
+ *              caller wrote to it), and a FULL reconcile writes everything
+ *              every STORE_RECONCILE_MS regardless of marks. Over-marking
+ *              costs one small write; under-marking costs one interval of
+ *              durability, never the data.
+ *            - A mark is cleared only by its OWN successful write, and a
+ *              refusal part-way through no longer abandons the shards that
+ *              fit. Removals flush FIRST, because they free space the writes
+ *              may need.
+ *            - Fixed on the way in: every path that REBINDS STORE (import,
+ *              reset, gist merge) now goes through replaceStore(). Under one
+ *              blob this needed nothing — sharded, "Reset all data" would have
+ *              cleared the screen and then silently restored every record on
+ *              the next reload, because the old player keys were still there.
+ *            - The pre-1.69.0 blob is read once on upgrade and removed only
+ *              after a full save has actually landed. Removing it earlier
+ *              turns a refused write into total data loss.
+ *            - A corrupt shard now costs one shard. The old blob's only
+ *              failure mode was "Corrupt storage, resetting" — one bad byte
+ *              wiped every player, hand and ledger row.
  *
  * 1.68.0 - Probe whether Torn PDA's native storage is available on this phone.
  *            - Groundwork, and a question this repo cannot answer from here.
@@ -68,68 +102,6 @@
  *              table and then flies is exactly what that list is for. Deleting
  *              them would turn a correct 🌍/🚫 into ❔ in the one case they can
  *              actually happen.
- *
- * 1.66.0 - Manual player tags: your own read on a seat, for the things the
- *          stats structurally cannot see.
- *            - Four, mutually exclusive, one per player or none. 🎣 Bluffs
- *              (call them down lighter), 📞 Station (never bluff them, value
- *              bet thin), 🚪 Folds (bet at them relentlessly), 🐍 Traps
- *              (beware the check-raise). Each carries the ACTION, not just a
- *              label — a tag that doesn't change what you do is a note, and
- *              there is a Notes field directly below it for that.
- *            - The justification for letting a human overwrite a measurement
- *              is that each covers a STRUCTURAL blind spot rather than a thin
- *              sample. bluffRate only ever counts bets that reached a real
- *              showdown, so a bluff that took the pot uncontested is invisible
- *              to it — already documented as an asymmetric floor. Likewise
- *              texture.checkMade needs a showdown to record a slowplay, so the
- *              check-raise that made you fold never enters the sample.
- *            - Set in the player panel's Notes tab, which was already the tab
- *              for what YOU know about a player. Re-tapping the active chip
- *              clears it, so there is no separate "none" chip to hunt for.
- *            - The glyph sits AHEAD of the inferred state emoji (🤮🔥📏) on
- *              the badge and in the players list, not among them. Position is
- *              the only cheap signal that separates what you asserted from
- *              what the HUD worked out, and telling those apart matters: an
- *              inferred read can be wrong about a player, a manual one can
- *              only be out of date. It shows on a NEW seat too — a tag from
- *              last session is exactly the read worth having before a single
- *              hand is tracked.
- *            - Width MEASURED in a browser against the 118px cap, not
- *              estimated. The tag costs 12px. Type+numbers goes 77 -> 89px,
- *              +tilt 101px, +tilt+heat 113px, all fitting. The first case that
- *              clips is tag+tilt+heat+size at 125px — a player simultaneously
- *              tagged, tilting, running hot AND carrying a readable size tell,
- *              which is rare by construction; badgeStats:false stays the
- *              escape hatch. (Chromium metrics; iOS emoji may differ a little.)
- *            - Glyphs are all Unicode 6.0 single codepoints with no variation
- *              selector, because this renders on whatever Safari the phone
- *              has and a VS16 sequence is exactly what turns into a hollow box
- *              on the one device nobody here can test. The test scans for that.
- *            - Deliberately NOT fed to the coach. The panel and the seat say
- *              it; the coach keeps ranking measured reads.
- *            - FIXED ON THE WAY IN, a pre-existing bug this would have
- *              inherited: mergeStores swaps the WHOLE player record for
- *              whichever side has more hands, so a gist merge from a device
- *              that had seen a player more silently destroyed anything typed
- *              here — p.notes has been losable that way for as long as notes
- *              have existed. Manual fields are now carried across the swap.
- *              A counter is rebuilt by playing more hands; judgement is not.
- *            - LOCAL wins when both devices tagged the same player
- *              differently. There is no timestamp to order them by, and the
- *              alternative overwrites what you can see on the device you are
- *              sitting at with something you cannot. The remote value is
- *              adopted only where local has none. Known gap, stated rather
- *              than solved: two devices disagreeing keep disagreeing until one
- *              is cleared.
- *            - test/player-tags.test.js, mutation-verified against eight
- *              regressions including the merge losing a manual field, the
- *              merge mutating the caller's remote store, and a glyph gaining a
- *              variation selector.
- *            - The CSS comment for the new chips hit the documented
- *              template-literal trap on the first write: a backtick inside a
- *              stylesheet comment terminates the string. node test/run.js
- *              caught it immediately, which is most of why it runs first.
  *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
@@ -192,7 +164,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.68.0';
+  const HUD_VERSION = '1.69.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -809,29 +781,272 @@
     };
   }
 
-  function loadStore() {
-    let raw;
-    try { raw = localStorage.getItem(STORAGE_KEY); } catch (e) { raw = null; }
-    if (!raw) return emptyStore();
+  // ===========================================================================
+  // SHARDED PERSISTENCE
+  // ===========================================================================
+  //
+  // The store used to be ONE localStorage key holding the whole thing as JSON,
+  // rewritten in full on every save. Measured at the sizes documented in
+  // CLAUDE.md — 900 players, 200 hands, plLedger at PL_LEDGER_CAP — that blob
+  // serialises to 2.9 MB and costs 23ms per JSON.stringify on desktop x86.
+  // saveStore is called from recordStreetAction, maybeCountVpip/Pfr/Cbet,
+  // harvestShownCards (a 400ms poll), trackStacks and harvestSeatNames, so in
+  // a busy hand the HUD was serialising 2.9 MB and throwing away a 3 MB string
+  // up to four times a second to record that one player called one bet.
+  //
+  // Now each piece has its own key and only the changed ones are written:
+  //
+  //   <key>:core     everything small — settings, hero, session, flags (~2 KB)
+  //   <key>:hands    STORE.hands            (~412 KB, changes once per hand)
+  //   <key>:pl       STORE.plLedger        (~1259 KB, changes once per hand)
+  //   <key>:p:<xid>  one player record       (~1.4 KB, changes individually)
+  //
+  // A single action now writes ~1.4 KB instead of 2.9 MB. Hand settlement is
+  // the expensive tick (hands + ledger + everyone dealt in), and it happens
+  // once a minute or so rather than four times a second.
+  //
+  // THREE THINGS HOLD THIS UP, and all three are load-bearing:
+  //
+  // 1. A missed dirty mark must not be data loss. Players are marked dirty in
+  //    getPlayer(), which is where almost all mutation goes through, plus the
+  //    handful of sites that reach STORE.players[xid] directly. Proving that
+  //    list is exhaustive forever is exactly the kind of claim this file has
+  //    been burned by, so it is not relied on: a FULL reconcile writes every
+  //    shard every STORE_RECONCILE_MS regardless of marks. STORE is in memory,
+  //    so a missed mark costs at most one reconcile interval of durability,
+  //    not the data. Over-marking is free; under-marking is bounded.
+  // 2. A mark is cleared only by its OWN successful write. A refused write
+  //    (quota) leaves that shard dirty so the next save retries it, rather
+  //    than clearing the flag and losing the record permanently.
+  // 3. Deletions are tracked, not inferred. A pruned player whose key is left
+  //    behind is a record that comes back from the dead on the next load AND
+  //    keeps occupying the quota the prune was run to free.
+  //
+  // A corrupt shard now costs one shard. The old blob's only failure mode was
+  // "Corrupt storage, resetting" — one bad byte anywhere wiped everything. A
+  // bad player shard is dropped with a warning and the other 899 load fine.
+
+  const SHARD_PREFIX = STORAGE_KEY + ':';
+  const SHARD_CORE = SHARD_PREFIX + 'core';
+  const SHARD_HANDS = SHARD_PREFIX + 'hands';
+  const SHARD_PL = SHARD_PREFIX + 'pl';
+  const SHARD_PLAYER = SHARD_PREFIX + 'p:';
+
+  // Held in their own shards, so they are stripped out of `core` on write and
+  // put back on read. Listed once so the two directions cannot disagree.
+  const SHARD_SPLIT_KEYS = ['players', 'hands', 'plLedger'];
+
+  // Full rewrite interval — the safety net described above. 60s is chosen
+  // against what it is protecting: a missed mark on a stat that is itself
+  // derived from a counter already in memory. Shorter buys durability nobody
+  // would notice; longer widens the one window where a crash loses a mark.
+  const STORE_RECONCILE_MS = 60000;
+
+  let dirtyCore = true;
+  let dirtyHands = true;
+  let dirtyPl = true;
+  const dirtyPlayers = new Set();
+  const removedPlayers = new Set();
+  let lastReconcileAt = 0;
+
+  // Written by the legacy migration below and cleared once a full save has
+  // actually landed. The old blob is NOT removed before that: it is the only
+  // copy until the shards exist, and deleting it first turns a refused write
+  // into total data loss.
+  let legacyBlobPending = false;
+
+  function markPlayerDirty(xid) {
+    if (xid == null) return;
+    const k = String(xid);
+    dirtyPlayers.add(k);
+    removedPlayers.delete(k);
+  }
+
+  function markPlayerRemoved(xid) {
+    if (xid == null) return;
+    const k = String(xid);
+    removedPlayers.add(k);
+    dirtyPlayers.delete(k);
+  }
+
+  function markAllDirty() {
+    dirtyCore = true;
+    dirtyHands = true;
+    dirtyPl = true;
+    Object.keys((STORE && STORE.players) || {}).forEach((x) => dirtyPlayers.add(x));
+  }
+
+  // Swap STORE for a different store wholesale — an import, a reset, a gist
+  // merge. Every path that REBINDS STORE rather than mutating it must come
+  // through here.
+  //
+  // Under the old single blob this needed nothing: one key was overwritten and
+  // whatever it used to hold was gone by definition. Sharded, a player who
+  // exists on disk but not in the incoming store keeps their key, and that key
+  // is read back on the next load — so "Reset all data" would clear the screen
+  // and then quietly restore every record on the next reload, and an import
+  // would silently union itself with whatever it was supposed to replace.
+  //
+  // The removal list is diffed against what is actually PERSISTED, not against
+  // the outgoing in-memory store: those are the keys that would be read back,
+  // and a record that never reached disk has nothing to clean up.
+  function replaceStore(next) {
+    const keep = (next && next.players) || {};
+    shardKeys().forEach((k) => {
+      if (k.indexOf(SHARD_PLAYER) !== 0) return;
+      const xid = k.slice(SHARD_PLAYER.length);
+      if (!Object.prototype.hasOwnProperty.call(keep, xid)) markPlayerRemoved(xid);
+    });
+    STORE = next;
+    // After the assignment, so this marks the INCOMING players. Removals were
+    // taken first and markPlayerDirty/markPlayerRemoved are mutually exclusive,
+    // so a player present in both stores ends up dirty and not removed.
+    markAllDirty();
+    return STORE;
+  }
+
+  // Running total of what is actually stored, in UTF-16 code units — the unit
+  // localStorage charges in, and what String#length reports.
+  //
+  // Kept incrementally rather than measured on demand. storageStats() is read
+  // by maybePrune off the back of a save, and re-reading every one of ~900
+  // keys to answer it would reintroduce the per-save full-store cost this
+  // whole section exists to remove.
+  const shardBytes = new Map();
+  let shardBytesTotal = 0;
+
+  function noteShardBytes(key, chars) {
+    shardBytesTotal += chars - (shardBytes.get(key) || 0);
+    if (chars) shardBytes.set(key, chars); else shardBytes.delete(key);
+    if (shardBytesTotal < 0) shardBytesTotal = 0;
+  }
+
+  // --- Backend: localStorage -------------------------------------------------
+  //
+  // Every read and write of persisted state goes through these four, so the
+  // backend is swappable at one seam rather than at forty call sites.
+
+  function shardRead(key) {
+    try { return localStorage.getItem(key); } catch (e) { return null; }
+  }
+
+  function shardWrite(key, raw) {
+    localStorage.setItem(key, raw);
+    noteShardBytes(key, raw.length);
+  }
+
+  function shardRemove(key) {
+    try { localStorage.removeItem(key); } catch (e) { /* already gone */ }
+    noteShardBytes(key, 0);
+  }
+
+  // Every key this HUD owns. Enumerated rather than tracked in an index key,
+  // because an index is a second source of truth that can drift from the
+  // shards it claims to describe — and the drift is silent in both directions
+  // (a listed-but-missing player, or an orphan key nothing ever cleans up).
+  function shardKeys() {
+    const out = [];
     try {
-      const parsed = JSON.parse(raw);
-      parsed.settings = { ...DEFAULT_SETTINGS, ...(parsed.settings || {}) };
-      parsed.players = parsed.players || {};
-      parsed.hands = parsed.hands || [];
-      parsed.hero = ensureHeroShape(parsed.hero);
-      parsed.session = ensureSessionShape(parsed.session);
-      parsed.sessionHistory = Array.isArray(parsed.sessionHistory) ? parsed.sessionHistory : [];
-      parsed.plLedger = Array.isArray(parsed.plLedger) ? parsed.plLedger : [];
-      normalizePlayers(parsed);
-      migrateStore(parsed);
-      return parsed;
+      for (let i = 0; i < localStorage.length; i += 1) {
+        const k = localStorage.key(i);
+        if (k && k.indexOf(SHARD_PREFIX) === 0) out.push(k);
+      }
+    } catch (e) { /* unreadable; treated as a fresh install */ }
+    return out;
+  }
+
+  // --- Load ------------------------------------------------------------------
+
+  function parseShard(raw, fallback, label) {
+    if (raw == null) return fallback;
+    try {
+      const v = JSON.parse(raw);
+      return v == null ? fallback : v;
     } catch (e) {
-      console.warn('[TornPokerHUD] Corrupt storage, resetting.', e);
-      return emptyStore();
+      // One bad shard, not the whole store. This is the case the old single
+      // blob could not survive.
+      console.warn('[TornPokerHUD] Dropping corrupt shard ' + label, e);
+      return fallback;
     }
   }
 
-  let STORE = loadStore();
+  // Shared by both load paths so a store read from shards and a store migrated
+  // from the legacy blob get the identical shape treatment. Two code paths
+  // normalising independently is how a field ends up backfilled on one and not
+  // the other.
+  function finalizeStore(store) {
+    store.settings = { ...DEFAULT_SETTINGS, ...(store.settings || {}) };
+    store.players = store.players || {};
+    store.hands = Array.isArray(store.hands) ? store.hands : [];
+    store.hero = ensureHeroShape(store.hero);
+    store.session = ensureSessionShape(store.session);
+    store.sessionHistory = Array.isArray(store.sessionHistory) ? store.sessionHistory : [];
+    store.plLedger = Array.isArray(store.plLedger) ? store.plLedger : [];
+    normalizePlayers(store);
+    migrateStore(store);
+    return store;
+  }
+
+  function loadStore() {
+    const keys = shardKeys();
+
+    // No shards: either a fresh install, or a store written by a version
+    // before this one. Both are handled by reading the legacy blob — absent,
+    // that is just emptyStore().
+    if (!keys.length) {
+      const raw = shardRead(STORAGE_KEY);
+      let store;
+      if (raw) {
+        try {
+          store = JSON.parse(raw);
+          // Keep the blob until the shards are safely written. saveStore
+          // removes it once a full pass has actually landed.
+          legacyBlobPending = true;
+          noteShardBytes(STORAGE_KEY, raw.length);
+        } catch (e) {
+          console.warn('[TornPokerHUD] Corrupt storage, resetting.', e);
+          store = null;
+        }
+      }
+      STORE = finalizeStore(store || emptyStore());
+      markAllDirty();
+      return STORE;
+    }
+
+    const raws = {};
+    keys.forEach((k) => { raws[k] = shardRead(k); });
+    keys.forEach((k) => noteShardBytes(k, (raws[k] || '').length));
+
+    const store = parseShard(raws[SHARD_CORE], {}, 'core');
+    // Defence in depth: if a core shard somehow carries these (a hand-edited
+    // store, a future format change), the dedicated shards still win, so a
+    // stale copy inside core can never shadow the real one.
+    SHARD_SPLIT_KEYS.forEach((k) => { delete store[k]; });
+    store.hands = parseShard(raws[SHARD_HANDS], [], 'hands');
+    store.plLedger = parseShard(raws[SHARD_PL], [], 'plLedger');
+    store.players = {};
+    keys.forEach((k) => {
+      if (k.indexOf(SHARD_PLAYER) !== 0) return;
+      const xid = k.slice(SHARD_PLAYER.length);
+      const p = parseShard(raws[k], null, 'player ' + xid);
+      if (p && typeof p === 'object') store.players[xid] = p;
+      else shardRemove(k); // corrupt and unreadable: don't leave it holding quota
+    });
+
+    STORE = finalizeStore(store);
+    // migrateStore may have rewritten records in place, and nothing has been
+    // persisted yet this session, so the first save writes everything. After
+    // that the dirty marks carry it.
+    markAllDirty();
+    return STORE;
+  }
+
+  // Declared before loadStore() runs, because loadStore assigns to it as well
+  // as returning it — finalizeStore() calls migrateStore(), and a migration
+  // that reads STORE would otherwise see the temporal dead zone rather than
+  // the store being migrated.
+  let STORE = emptyStore();
+  STORE = loadStore();
   let saveScheduled = false;
 
   // Set when localStorage REFUSES a write, cleared when one succeeds again.
@@ -843,13 +1058,78 @@
   // first refusal vanishes on reload, with no symptom until it is gone.
   let saveFailure = null;
 
+  // Everything in STORE that is not held in its own shard. Built by omission
+  // rather than by listing what core contains, so a field added to the store
+  // later is persisted automatically instead of being silently dropped until
+  // somebody notices — which for a store field means noticing months later
+  // that a setting never survived a reload.
+  function coreSnapshot() {
+    const out = {};
+    Object.keys(STORE).forEach((k) => {
+      if (SHARD_SPLIT_KEYS.indexOf(k) === -1) out[k] = STORE[k];
+    });
+    return out;
+  }
+
+  // Write every shard currently marked dirty.
+  //
+  // Each mark is cleared only by its own successful write, so a refusal
+  // part-way through leaves exactly the unwritten shards dirty and the next
+  // save retries them. The first error is re-thrown once the pass is over, so
+  // the caller still sees the failure — but the shards that DID fit are
+  // persisted rather than being abandoned because a later one didn't.
+  function flushShards() {
+    let firstError = null;
+    const attempt = (fn) => {
+      try { fn(); return true; } catch (e) { if (!firstError) firstError = e; return false; }
+    };
+
+    // Removals first: they FREE space, so on a store under quota pressure
+    // doing them last would fail the very writes the prune was run to make
+    // room for.
+    Array.from(removedPlayers).forEach((xid) => {
+      if (attempt(() => shardRemove(SHARD_PLAYER + xid))) removedPlayers.delete(xid);
+    });
+
+    if (dirtyCore && attempt(() => shardWrite(SHARD_CORE, JSON.stringify(coreSnapshot())))) dirtyCore = false;
+    if (dirtyHands && attempt(() => shardWrite(SHARD_HANDS, JSON.stringify(STORE.hands || [])))) dirtyHands = false;
+    if (dirtyPl && attempt(() => shardWrite(SHARD_PL, JSON.stringify(STORE.plLedger || [])))) dirtyPl = false;
+
+    Array.from(dirtyPlayers).forEach((xid) => {
+      const p = STORE.players[xid];
+      if (!p) {
+        // Deleted without going through markPlayerRemoved. Treat the mark as a
+        // removal rather than writing `undefined` over the record.
+        if (attempt(() => shardRemove(SHARD_PLAYER + xid))) dirtyPlayers.delete(xid);
+        return;
+      }
+      if (attempt(() => shardWrite(SHARD_PLAYER + xid, JSON.stringify(p)))) dirtyPlayers.delete(xid);
+    });
+
+    if (firstError) throw firstError;
+  }
+
   function saveStore() {
     if (saveScheduled) return;
     saveScheduled = true;
     setTimeout(() => {
       saveScheduled = false;
+      // The reconcile described at the top of this section: every
+      // STORE_RECONCILE_MS, write everything regardless of marks, so a
+      // mutation that never marked its player is persisted anyway. This is
+      // what makes the dirty-marking safe rather than merely fast.
+      const now = Date.now();
+      if (now - lastReconcileAt >= STORE_RECONCILE_MS) {
+        markAllDirty();
+        lastReconcileAt = now;
+      }
       try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(STORE));
+        flushShards();
+        // Only now is the legacy blob redundant: its contents are in shards
+        // that have actually been accepted. Removing it any earlier turns a
+        // refused write into total data loss, and leaving it forever would
+        // hold 2.9 MB of the quota this split exists to free.
+        if (legacyBlobPending) { shardRemove(STORAGE_KEY); legacyBlobPending = false; }
         if (saveFailure) { saveFailure = null; renderStorageWarning(); }
         // After the write, because the write is what made it bigger. Throttled
         // inside, and a no-op until storage is actually under pressure.
@@ -876,8 +1156,9 @@
   const STORAGE_WARN_PCT = 75;
 
   function storageStats() {
-    let chars = 0;
-    try { chars = (localStorage.getItem(STORAGE_KEY) || '').length; } catch (e) { /* unreadable */ }
+    // The running total maintained by noteShardBytes, not a re-read. Re-reading
+    // would mean ~900 getItem calls off the back of every save.
+    const chars = Math.round(shardBytesTotal);
     const players = Object.keys((STORE && STORE.players) || {}).length;
     return {
       // Browsers charge localStorage in UTF-16 code units, which is what
@@ -929,11 +1210,16 @@
     const players = (STORE && STORE.players) || {};
     const day = 24 * 60 * 60 * 1000;
     const r = { at: t, thin: 0, stale: 0, lru: 0, dropped: 0, kept: 0 };
-    const drop = (xid, bucket) => { delete players[xid]; r[bucket] += 1; r.dropped += 1; };
+    const drop = (xid, bucket) => {
+      delete players[xid];
+      markPlayerRemoved(xid);
+      r[bucket] += 1;
+      r.dropped += 1;
+    };
 
     Object.keys(players).forEach((xid) => {
       const p = players[xid];
-      if (!p) { delete players[xid]; return; }
+      if (!p) { delete players[xid]; markPlayerRemoved(xid); return; }
       // Hero's own record is never a candidate — it holds your own tendencies
       // and the coach reads it.
       if (isHeroRecord(xid)) return;
@@ -942,7 +1228,7 @@
       // and reading epoch-0 as "very old" would let a gist import delete a
       // year of good data on the first save after it. Stamp it and let the
       // next prune judge it against a real timestamp.
-      if (!p.lastSeen) { p.lastSeen = t; return; }
+      if (!p.lastSeen) { p.lastSeen = t; markPlayerDirty(xid); return; }
       const age = t - p.lastSeen;
       if ((p.hands || 0) < PRUNE_THIN_HANDS && age > PRUNE_THIN_DAYS * day) { drop(xid, 'thin'); return; }
       if (age > PRUNE_MAX_DAYS * day) drop(xid, 'stale');
@@ -1135,6 +1421,11 @@
     else ensurePlayerShape(STORE.players[xid], xid);
     if (name) STORE.players[xid].name = name;
     STORE.players[xid].lastSeen = Date.now();
+    // Marked on every call, not only on the ones that mutate. The caller is
+    // handed the live record and may write to it, and this function cannot see
+    // whether it did — so it assumes the worst. An unnecessary mark costs one
+    // ~1.4 KB write; a missing one costs durability until the next reconcile.
+    markPlayerDirty(xid);
     return STORE.players[xid];
   }
 
@@ -1168,12 +1459,12 @@
     parsed.plLedger = Array.isArray(parsed.plLedger) ? parsed.plLedger : [];
     normalizePlayers(parsed); // imported JSON is hand-editable and often stale
     migrateStore(parsed);     // a backup taken before 0.20.0 carries frozen P/L
-    STORE = parsed;
+    replaceStore(parsed);
     saveStore();
   }
 
   function resetAllData() {
-    STORE = emptyStore({ ...STORE.settings });
+    replaceStore(emptyStore({ ...STORE.settings }));
     saveStore();
   }
 
@@ -1222,9 +1513,13 @@
   function resetHeroStats() {
     if (!heroUnresolved() && heroXid && STORE.players[heroXid]) {
       STORE.players[heroXid] = emptyPlayer(heroXid, STORE.players[heroXid].name);
+      markPlayerDirty(heroXid);
     }
     const uname = (STORE.settings.heroName || '').trim();
-    if (uname && STORE.players['name:' + uname]) delete STORE.players['name:' + uname];
+    if (uname && STORE.players['name:' + uname]) {
+      delete STORE.players['name:' + uname];
+      markPlayerRemoved('name:' + uname);
+    }
     // Identity is carried over, not reset: this clears your STATS, it does not
     // make you a different player. Dropping it here would silently un-reach
     // your own Stats and Trends until the next time you sat down at a table.
@@ -1458,7 +1753,7 @@
       if (!file || !file.content) return;
       try {
         const remote = JSON.parse(file.content);
-        STORE = mergeStores(STORE, remote);
+        replaceStore(mergeStores(STORE, remote));
       } catch (e) { /* ignore malformed remote content */ }
     },
 
@@ -1585,7 +1880,7 @@
     let cleared = 0;
     Object.keys(STORE.players).forEach((xid) => {
       const p = STORE.players[xid];
-      if (p && p.affilFetchedAt) { p.affilFetchedAt = 0; cleared++; }
+      if (p && p.affilFetchedAt) { p.affilFetchedAt = 0; markPlayerDirty(xid); cleared++; }
     });
     STORE.affilCacheRepaired = true;
     saveStore();
@@ -2204,7 +2499,7 @@
     const target = ('name:' + uname).toLowerCase();
     let dropped = false;
     Object.keys(STORE.players).forEach((k) => {
-      if (k.toLowerCase() === target) { delete STORE.players[k]; dropped = true; }
+      if (k.toLowerCase() === target) { delete STORE.players[k]; markPlayerRemoved(k); dropped = true; }
     });
     if (dropped) saveStore();
     return dropped;
@@ -3483,7 +3778,9 @@
     if (!pseudo) return;
     pseudo.xid = xid;
     STORE.players[xid] = pseudo;
+    markPlayerDirty(xid);
     delete STORE.players[pseudoKey];
+    markPlayerRemoved(pseudoKey);
     saveStore();
   }
 
@@ -5819,6 +6116,7 @@
         const p = STORE.players[a.x];
         if (!p) return; // a player pruned since; nothing to attribute to
         noteBoardTexture(p, a.a, a.s, h.board);
+        markPlayerDirty(a.x);
         seeded += 1;
       });
     });
@@ -13951,6 +14249,39 @@
       getPlayer,
       emptyStore,
       emptyPlayer,
+      // --- Sharded persistence -------------------------------------------
+      loadStore,
+      replaceStore,
+      finalizeStore,
+      coreSnapshot,
+      flushShards,
+      shardWrite,
+      shardRemove,
+      shardRead,
+      shardKeys,
+      SHARD_PREFIX,
+      SHARD_CORE,
+      SHARD_HANDS,
+      SHARD_PL,
+      SHARD_PLAYER,
+      SHARD_SPLIT_KEYS,
+      STORE_RECONCILE_MS,
+      markPlayerDirty,
+      markPlayerRemoved,
+      markAllDirty,
+      dirtyPlayers,
+      removedPlayers,
+      get dirtyCore() { return dirtyCore; },
+      set dirtyCore(v) { dirtyCore = v; },
+      get dirtyHands() { return dirtyHands; },
+      set dirtyHands(v) { dirtyHands = v; },
+      get dirtyPl() { return dirtyPl; },
+      set dirtyPl(v) { dirtyPl = v; },
+      get lastReconcileAt() { return lastReconcileAt; },
+      set lastReconcileAt(v) { lastReconcileAt = v; },
+      get legacyBlobPending() { return legacyBlobPending; },
+      set legacyBlobPending(v) { legacyBlobPending = v; },
+      get shardBytesTotal() { return shardBytesTotal; },
 
       // --- DOM-touching, exercised against the harness's minimal document ---
       renderPanel,
