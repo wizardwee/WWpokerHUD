@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.70.0
+// @version      1.71.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,40 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.71.0 - Unblock a store that is too full to migrate, and stop counting
+ *          hands you only watched.
+ *            - Reported live: "HUD storage is full - nothing is being saved"
+ *              at 2.9 MB, 58% of the estimate. Cause: during the upgrade the
+ *              old single blob and the shards replacing it hold the SAME data
+ *              and are both in storage for the length of that write, so a
+ *              2.9 MB store needs 5.8 MB to migrate against ~5 MB shared with
+ *              torn.com. The store most in need of the split was exactly the
+ *              one that could not complete it.
+ *            - On a refusal while the migration is pending, the blob is now
+ *              dropped and the write retried once. Safe only here: loadStore
+ *              already parsed it into memory, and it is the largest thing that
+ *              can be freed to let its own replacement land. After a refusal,
+ *              never pre-emptively.
+ *            - bbHands could exceed hero.hands, which is impossible by
+ *              construction (18,584 against 17,940 in the scan). The whole
+ *              block was gated on heroXid being SET rather than hero being in
+ *              the hand, so 644 hands hero merely watched inflated the bb/100
+ *              denominator and filed 644 zero rows into the ledger, evicting
+ *              real ones. The money was always right; the counts were not.
+ *            - The gate is "dealt in OR money moved". Dealt-in alone misses a
+ *              hand joined mid-way; money alone misses a hand dealt in and
+ *              folded for nothing, which is a real played hand.
+ *            - The Storage panel said "History is capped at 200 hands"
+ *              directly under "500 hands in history". Both numbers were right
+ *              and the sentence was wrong - notable hands are kept past the
+ *              limit up to HISTORY_PINNED_CEILING. It now says so, and breaks
+ *              the total down into players / history / P/L ledger so a full
+ *              store shows you where the space went.
+ *            - Torn's profile API field names for the affiliation badges are
+ *              CONFIRMED by the same scan (faction_id, faction_name,
+ *              married.spouse_id, five players resolved). Unverified since
+ *              v1.8.0.
  *
  * 1.70.0 - Keep the data in Torn PDA itself, not in the browser.
  *            - PDA_storage is app-held (SQLite): 10 MB by default and
@@ -89,29 +123,6 @@
  *              failure mode was "Corrupt storage, resetting" — one bad byte
  *              wiped every player, hand and ledger row.
  *
- * 1.68.0 - Probe whether Torn PDA's native storage is available on this phone.
- *            - Groundwork, and a question this repo cannot answer from here.
- *              Torn PDA offers PDA_storage: a per-script key/value store held
- *              by the app (SQLite) instead of the webview's localStorage,
- *              10 MB by default and user-raisable, in its own namespace, and
- *              NOT wiped when the browser cache is cleared.
- *            - The reason to care is measured, not assumed. A store at the
- *              sizes CLAUDE.md documents (900 players, 200 hands, plLedger at
- *              cap) serialises to 2.9 MB — against a localStorage budget of
- *              roughly 5 MB that is SHARED with torn.com itself and can be
- *              evicted under memory pressure. STORAGE_QUOTA_EST has always
- *              been a guess for want of the Storage Manager API; usage()
- *              returns real {used, quota} bytes.
- *            - Reported as three states, not a boolean. ABSENT, PRESENT, and
- *              PRESENT BUT UNUSABLE — plus the individual method list, because
- *              a partial injection on an older app version is exactly what a
- *              boolean would read as "present" and then fail on later.
- *            - usage() is async and the scan builds its report synchronously,
- *              so the answer is cached the same way lastShareResult is: kicked
- *              off once from init() and refreshed by each scan, so the first
- *              scan of a session already has it.
- *            - Nothing reads the store differently yet. This only reports.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -173,7 +184,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.70.0';
+  const HUD_VERSION = '1.71.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -1372,6 +1383,33 @@
         // inside, and a no-op until storage is actually under pressure.
         if (maybePrune(false)) saveStore();
       } catch (e) {
+        // MIGRATION DEADLOCK, and it is the one case where dropping the legacy
+        // blob early is the correct move rather than the reckless one.
+        //
+        // During the upgrade the blob and the shards that replace it hold the
+        // SAME data, and for the length of this write both are in storage at
+        // once — a measured 2.9 MB store therefore needs 5.8 MB to migrate,
+        // against a budget of roughly 5 MB shared with torn.com. So the store
+        // most in need of this split is exactly the one that cannot complete
+        // it: every attempt is refused, the blob is kept because the write
+        // failed, and the next attempt hits the same wall forever.
+        //
+        // Ordinarily the blob is the only copy and must outlive a refused
+        // write. Here it is not: loadStore parsed it into STORE before any of
+        // this, so memory holds it, and the blob is the single largest thing
+        // that can be freed to let its own replacement land. The risk taken is
+        // a crash inside the retry below — milliseconds — against a deadlock
+        // that is certain. Taken ONLY after a refusal, never pre-emptively.
+        if (legacyBlobPending) {
+          shardRemove(STORAGE_KEY);
+          legacyBlobPending = false;
+          try {
+            flushShards();
+            if (saveFailure) { saveFailure = null; renderStorageWarning(); }
+            if (maybePrune(false)) saveStore();
+            return;
+          } catch (e2) { /* still refused — fall through to the normal path */ }
+        }
         console.warn('[TornPokerHUD] Save failed', e);
         // Keep the FIRST failure's timestamp: it marks how far back the
         // in-memory-only data goes, which is what the user needs to know.
@@ -1391,6 +1429,25 @@
   // guessing low would refuse data that would have fitted.
   const STORAGE_QUOTA_EST = 5 * 1024 * 1024;
   const STORAGE_WARN_PCT = 75;
+
+  // Where the space actually went, by shard group. Built from the per-key
+  // sizes noteShardBytes already maintains, so it costs a walk of the size map
+  // and no storage reads at all.
+  //
+  // Added because a user at the quota wall was looking at "2.9 MB of roughly
+  // 5.0 MB" with saves being refused, and the panel offered nothing to act on.
+  // The three components are very differently priced, and only one of them
+  // (history) has a setting you can turn down.
+  function storageBreakdown() {
+    const out = { players: 0, hands: 0, ledger: 0, core: 0 };
+    shardBytes.forEach((n, key) => {
+      if (key.indexOf(SHARD_PLAYER) === 0) out.players += n;
+      else if (key === SHARD_HANDS) out.hands += n;
+      else if (key === SHARD_PL) out.ledger += n;
+      else out.core += n;
+    });
+    return out;
+  }
 
   function storageStats() {
     // On the native backend these are REAL bytes from PDA_storage.usage(), not
@@ -4810,6 +4867,20 @@
         const heroWon = wonByXid[heroXid] || 0;
         const heroContributed = hand.contributions[heroXid] || 0;
         const heroDelta = heroWon - heroContributed;
+        // Did hero actually take part? Everything below nets to 0 when they
+        // did not, so the MONEY is right either way — but bbHands and the
+        // ledger are COUNTS, and counting a hand hero merely watched inflates
+        // a denominator and files a meaningless row.
+        //
+        // Reported from a live table as bbHands (18,584) exceeding hero.hands
+        // (17,940), which is impossible by construction: hero.hands increments
+        // on heroDealtIn, bbHands did not check it at all. 644 hands of pure
+        // denominator, dragging bb/100 ~3.5% toward zero.
+        //
+        // Both halves are needed. dealtInXids alone misses a hand joined
+        // mid-way; the money test alone misses a hand dealt in and folded for
+        // nothing, which is a real played hand and belongs in the rate.
+        const heroInHand = heroDealtIn || heroWon > 0 || heroContributed > 0;
         STORE.hero.netChips += heroDelta;
         touchSession(heroDelta, false);
 
@@ -4823,7 +4894,7 @@
         const rawBB = hand.bbAmount || lastSeenBB;
         const bb = plausibleBB(rawBB) ? rawBB : 0;
         const heroDeltaBB = bb > 0 ? heroDelta / bb : 0;
-        if (bb > 0) {
+        if (bb > 0 && heroInHand) {
           STORE.hero.netBB += heroDeltaBB;
           STORE.hero.bbHands += 1; // denominator for bb/100, only over hands we could price
         }
@@ -4836,7 +4907,7 @@
         // keyed by a pseudo-id), which is fine as a no-op but would otherwise
         // fill the ledger with meaningless zero rows for a hero who was never
         // actually resolved to a seat.
-        if (!heroUnresolved()) pushLedgerEntry(heroDelta, bb, hand.gameId || null);
+        if (!heroUnresolved() && heroInHand) pushLedgerEntry(heroDelta, bb, hand.gameId || null);
 
         // P/L attribution, stored from HERO's perspective: positive plChipsEst
         // means you are up against that player.
@@ -13160,8 +13231,21 @@
         ? '<div class="tph-store-line tph-store-warntext">Getting full. A cleanup runs automatically past '
           + `${STORAGE_WARN_PCT}% — copy a backup below first if you want everything kept.</div>`
         : '')
-      + `<div class="tph-store-line">About ${fmtBytes(Math.round(s.perPlayer))} per player. History is capped at `
-      + `${STORE.settings.historyLimit || 200} hands. Past ${STORAGE_WARN_PCT}% a cleanup drops players seen `
+      + (() => {
+        const b = storageBreakdown();
+        if (!(b.players + b.hands + b.ledger + b.core)) return '';
+        return '<div class="tph-store-line">'
+          + `${fmtBytes(b.players)} players · ${fmtBytes(b.hands)} history · `
+          + `${fmtBytes(b.ledger)} P/L ledger</div>`;
+      })()
+      // The old line read "History is capped at 200 hands" directly under
+      // "500 hands in history". Both numbers were right and the SENTENCE was
+      // wrong: notable hands are kept past the limit, up to
+      // HISTORY_PINNED_CEILING. A panel that argues with itself gets read as a
+      // bug in the thing it is describing.
+      + `<div class="tph-store-line">History keeps the last `
+      + `${STORE.settings.historyLimit || 200} hands, plus notable ones up to ${HISTORY_PINNED_CEILING}. `
+      + `Past ${STORAGE_WARN_PCT}% a cleanup drops players seen `
       + `under ${PRUNE_THIN_HANDS} hands and not in ${PRUNE_THIN_DAYS} days, then anything not seen in `
       + `${PRUNE_MAX_DAYS} days, then the least recently seen down to ${PRUNE_PLAYER_CAP}. Thin records cost `
       + 'about half what a long-tracked one does and tell you nothing, so they go first. You are never dropped. '
@@ -14503,8 +14587,8 @@
       emptyStore,
       emptyPlayer,
       // --- Sharded persistence -------------------------------------------
-      loadStore,
       loadStoreAsync,
+      storageBreakdown,
       bootStore,
       assembleShards,
       replaceStore,

@@ -531,9 +531,36 @@ what is **persisted**, not against the outgoing in-memory store.
 copy until the shards exist, so deleting it first turns a refused write into
 total data loss.
 
+**With one exception, and it was found the hard way (v1.71.0).** During the
+upgrade the blob and the shards replacing it hold the SAME data, and both are
+in storage for the length of that write — a measured 2.9 MB store therefore
+needs **5.8 MB** to migrate, against ~5 MB shared with torn.com. **The store
+most in need of this split is exactly the one that cannot complete it**: every
+attempt refused, the blob kept because the write failed, the next attempt
+hitting the same wall forever. Reported from a live table as "HUD storage is
+full — nothing is being saved" at 58% of the estimate, which is roughly what
+"needs double its own size" predicts.
+
+So on a refusal **while `legacyBlobPending`**, the blob is dropped and the
+write retried once. That is safe here and nowhere else: `loadStore` already
+parsed it into `STORE`, so memory holds it, and it is the single largest thing
+that can be freed to let its own replacement land. The risk taken is a crash
+inside the retry — milliseconds — against a deadlock that is certain. **Only
+after a refusal, never pre-emptively**, and `test/store-shards.test.js` pins
+both directions with a real byte budget rather than a blanket failure, because
+"fails until the blob goes, then succeeds" IS the bug.
+
 **A corrupt shard now costs one shard.** The old blob's only failure mode was
 `Corrupt storage, resetting` — one bad byte wiped every player, hand and ledger
 row. A bad player shard is dropped with a warning and the rest load.
+
+`storageBreakdown()` splits that total by shard group (players / history /
+ledger / core) and the panel shows it, because a user at the quota wall was
+looking at "2.9 MB of roughly 5.0 MB" with saves refused and nothing on screen
+to act on. The three are priced very differently and only history has a setting
+you can turn down. It is built from the per-key sizes already maintained, and
+the test pins that the parts **sum to the headline figure** — a breakdown that
+does not add up is worse than none.
 
 `storageStats().chars` is a **running total** maintained on write, not a
 re-read: re-reading ~900 keys off the back of every save is the cost this
@@ -2053,17 +2080,37 @@ on the existing 3s watcher tick (same one as `harvestSeatNames`), gated by a
 24-hour per-player staleness check so it costs a handful of API calls per
 session rather than one per seat per tick.
 
-**Unconfirmed, same as any DOM selector in this file.** The parsed field
-names (`faction.faction_id`/`faction_name`, `married.spouse_id`) are written
-from Torn's documented API v1 profile shape, not a response anyone working on
-this has actually seen — nobody holds a key to check one live yet.
-`parseAffiliationProfile` fails to `null` on anything it doesn't recognise
-rather than throwing, including Torn's `{"error": {...}}` shape for a bad or
-rate-limited key — reading that as "no faction, no marriage" would cache a
-false negative that then sits for a full `AFFIL_REFRESH_MS` window. **Needs a
-report from someone who has actually set a key and sat at a table with a
-known faction-mate or spouse**, the same way every selector here got
-confirmed: try it, paste back what the badge (or its absence) actually showed.
+**CONFIRMED on a live table (scan, v1.70.0 cycle).** This carried as
+unverified for sixty-odd versions and is now settled — a key was set, 30
+lookups succeeded, and the scan printed the real response shape:
+
+```
+affiliation sub-keys: faction{position,faction_id,days_in_faction,faction_name,
+                              faction_tag,faction_tag_image}
+                      married{spouse_id,spouse_name,duration}
+affiliation cache (5):
+  1758760 -> factionId=14365 factionName="Just Fer Khaos" spouseXid=2683211
+  3444759 -> factionId=50399 factionName="Hello High"     spouseXid=3460497
+```
+
+`faction.faction_id`, `faction.faction_name` and `married.spouse_id` are
+exactly the names `parseAffiliationProfile` reads, and all five seated players
+resolved. The guess taken from Torn's documented v1 profile shape was right.
+
+Two things the scan also settles: `diagnostic: OK — working` means the
+`pdaFetchJson` transport carries this fine, and the response carries
+`faction_tag`/`faction_tag_image`/`days_in_faction`/`spouse_name`/`duration`
+that nothing here reads — available if a richer badge tooltip is ever wanted,
+without a second request.
+
+`parseAffiliationProfile` still fails to `null` on anything it doesn't
+recognise rather than throwing, including Torn's `{"error": {...}}` shape for a
+bad or rate-limited key — reading that as "no faction, no marriage" would cache
+a false negative that then sits for a full `AFFIL_REFRESH_MS` window. **What
+remains unconfirmed is only the BADGE**: no scan has yet been taken at a table
+where two seated players actually share a faction or a marriage, so
+`affiliationFlags` matching has not been seen to fire. The field names — the
+part that was actually in doubt — are no longer a guess.
 
 ## Next task
 

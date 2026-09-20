@@ -266,15 +266,64 @@ function seeded(n) {
 }
 
 {
-  // The direction that matters: a REFUSED save must leave the legacy blob
-  // alone. Deleting it here would destroy the only copy.
+  // MIGRATION DEADLOCK — reported from a live table as "HUD storage is full,
+  // nothing is being saved", on a store the settings panel put at 2.9 MB.
+  //
+  // During the upgrade the legacy blob and the shards replacing it hold the
+  // same data, and both are in storage for the length of the write: a 2.9 MB
+  // store needs 5.8 MB to migrate, against ~5 MB shared with torn.com. The
+  // store most in need of the split was exactly the one that could not
+  // complete it. This models that budget directly rather than failing every
+  // write, because "fails until the blob goes, then succeeds" IS the bug.
+  const bulk = 'x'.repeat(4000);
+  const legacy = JSON.stringify({
+    version: 3, settings: {},
+    players: { a1: { xid: 'a1', hands: 9, pad: bulk }, a2: { xid: 'a2', hands: 9, pad: bulk } },
+    hands: [], plLedger: [],
+  });
+  const T = load({ storageSeed: legacy });
+  const ls = T._sandbox.localStorage;
+  const realSet = ls.setItem.bind(ls);
+  // A byte budget just under twice the blob: enough for the shards alone,
+  // never enough for the shards PLUS the blob.
+  const BUDGET = Math.floor(legacy.length * 1.4);
+  const used = () => {
+    let n = 0;
+    for (let i = 0; i < ls.length; i += 1) n += (ls.getItem(ls.key(i)) || '').length;
+    return n;
+  };
+  ls.setItem = (k, v) => {
+    const delta = String(v).length - (ls.getItem(k) || '').length;
+    if (used() + delta > BUDGET) { const e = new Error('QuotaExceededError'); e.name = 'QuotaExceededError'; throw e; }
+    return realSet(k, v);
+  };
+
+  t.ok('the blob is present before any write is attempted', !!raw(T, KEY));
+  flush(T);
+
+  // The blob is dropped only AFTER a refusal, never pre-emptively — memory
+  // already holds its contents, and it is the largest thing that can be freed
+  // to let its own replacement land.
+  t.eq('the deadlock is broken: the blob is gone', raw(T, KEY), null);
+  t.ok('and it is no longer pending', !T.legacyBlobPending);
+  t.ok('the players actually landed in shards', !!raw(T, KEY + ':p:a1') && !!raw(T, KEY + ':p:a2'));
+  t.eq('so the save is no longer reported as failing', T.saveFailure, null);
+
+  T.STORE = T.emptyStore();
+  const back = T.loadStore();
+  t.eq('and nothing was lost', Object.keys(back.players).sort().join(','), 'a1,a2');
+}
+
+{
+  // When even dropping the blob does not make room, the failure must still be
+  // reported rather than swallowed by the recovery path.
   const legacy = JSON.stringify({ version: 3, settings: {}, players: { a1: { xid: 'a1', hands: 9 } }, hands: [], plLedger: [] });
   const T = load({ storageSeed: legacy });
   const ls = T._sandbox.localStorage;
   ls.setItem = () => { const e = new Error('QuotaExceededError'); e.name = 'QuotaExceededError'; throw e; };
   flush(T);
-  t.ok('a refused migration keeps the legacy blob', !!raw(T, KEY));
-  t.ok('and stays pending so the next save retries it', T.legacyBlobPending);
+  t.ok('a refusal that survives the recovery is still reported', !!T.saveFailure);
+  t.ok('and the store is still in memory to be backed up', !!T.STORE.players.a1);
 }
 
 // --- One corrupt shard costs one shard --------------------------------------
@@ -373,6 +422,31 @@ function seeded(n) {
   let actual = 0;
   keysUnder(T).forEach((k) => { actual += (ls.getItem(k) || '').length; });
   t.eq('the running total equals what is actually stored', T.storageStats().chars, actual);
+}
+
+// --- The breakdown must sum to the total ------------------------------------
+//
+// Added after a live report: the panel read "2.9 MB of roughly 5.0 MB" with
+// saves being refused, and offered nothing to act on. The three components are
+// priced very differently and only history has a setting you can turn down.
+// A breakdown that does not add up to the headline figure is worse than none.
+
+{
+  const T = seeded(8);
+  for (let i = 0; i < 20; i += 1) T.STORE.hands.push({ g: 'h' + i, actions: [{ x: 'a', a: 'call' }] });
+  for (let i = 0; i < 200; i += 1) T.STORE.plLedger.push({ t: i, d: -1, b: 1, g: 'l' + i });
+  T.markAllDirty();
+  flush(T);
+
+  const b = T.storageBreakdown();
+  const total = b.players + b.hands + b.ledger + b.core;
+  t.eq('the parts sum to the headline figure', total, T.storageStats().chars);
+  t.ok('players are attributed', b.players > 0);
+  t.ok('history is attributed', b.hands > 0);
+  t.ok('the ledger is attributed', b.ledger > 0);
+  t.ok('core is attributed', b.core > 0);
+  t.ok('and no player shard is miscounted as core — 8 records dwarf the settings blob',
+    b.players > b.core);
 }
 
 // --- The backend stays behind one seam --------------------------------------

@@ -226,4 +226,87 @@ function hand(o) {
   t.ok('PL_LEDGER_CAP is a real, sane number', T.PL_LEDGER_CAP >= 1000);
 }
 
+// --- A hand hero merely WATCHED is not a hand hero played -------------------
+//
+// Reported from a live table: the deep scan printed STORE.hero as
+// "17940 hands, bbHands 18584". bbHands exceeding hands is impossible by
+// construction — hero.hands increments on heroDealtIn, and bbHands is supposed
+// to be the subset of those that carried a readable blind.
+//
+// Cause: the whole block is gated on `heroXid` being set, not on hero being IN
+// the hand. Everything financial nets to 0 for a spectator (nothing in
+// contributions or wonByXid is keyed to them), so the MONEY was always right —
+// but bbHands and the ledger are counts, and both were counting hands hero sat
+// out. 644 of them: a pure denominator dragging bb/100 ~3.5% toward zero, and
+// 644 zero rows evicting real ones from a FIFO ledger.
+
+{
+  const T = fresh('HERO');
+  T.lastSeenBB = 1000000;
+  T.applyHandResults(hand({
+    gameId: 'watched', bbAmount: 1000000,
+    contributions: { A: 10000000, B: 10000000 },
+    dealtInXids: new Set(['A', 'B']),
+    winners: [{ xid: 'A', amount: 20000000 }],
+  }));
+
+  t.eq('a hand hero was not in does not count toward hands', T.STORE.hero.hands, 0);
+  t.eq('nor toward the bb/100 denominator', T.STORE.hero.bbHands, 0);
+  t.eq('and files no ledger row', T.STORE.plLedger.length, 0);
+  t.eq('the money is untouched either way', T.STORE.hero.netChips, 0);
+}
+
+{
+  // The half that must NOT be lost: dealt in and folded preflop for nothing is
+  // a real played hand. Money moved neither way, so a money-only test would
+  // drop it from the denominator and overstate bb/100.
+  const T = fresh('HERO');
+  T.lastSeenBB = 1000000;
+  T.applyHandResults(hand({
+    gameId: 'folded', bbAmount: 1000000,
+    contributions: { A: 10000000, B: 10000000 },
+    dealtInXids: new Set(['HERO', 'A', 'B']),
+    winners: [{ xid: 'A', amount: 20000000 }],
+  }));
+
+  t.eq('dealt in counts toward hands', T.STORE.hero.hands, 1);
+  t.eq('and toward the denominator even at zero cost', T.STORE.hero.bbHands, 1);
+  t.eq('and files its row', T.STORE.plLedger.length, 1);
+}
+
+{
+  // The other half: money moved but dealtInXids never saw hero — a hand joined
+  // mid-way. A dealt-in-only test would drop a hand hero actually paid for.
+  const T = fresh('HERO');
+  T.lastSeenBB = 1000000;
+  T.applyHandResults(hand({
+    gameId: 'joined', bbAmount: 1000000,
+    contributions: { HERO: 5000000, A: 5000000 },
+    dealtInXids: new Set(['A']),
+    winners: [{ xid: 'A', amount: 10000000 }],
+  }));
+
+  t.eq('a hand hero paid into counts toward the denominator', T.STORE.hero.bbHands, 1);
+  t.eq('and is filed', T.STORE.plLedger.length, 1);
+  t.eq('with the real loss', (T.STORE.plLedger[0] || {}).d, -5000000);
+}
+
+{
+  // The invariant the scan violated, stated directly.
+  const T = fresh('HERO');
+  T.lastSeenBB = 1000000;
+  for (let i = 0; i < 12; i += 1) {
+    const heroIn = i % 3 !== 0; // hero sits out a third of them
+    T.applyHandResults(hand({
+      gameId: 'g' + i, bbAmount: 1000000,
+      contributions: heroIn ? { HERO: 1000000, A: 1000000 } : { A: 1000000, B: 1000000 },
+      dealtInXids: new Set(heroIn ? ['HERO', 'A'] : ['A', 'B']),
+      winners: [{ xid: 'A', amount: 2000000 }],
+    }));
+  }
+  t.eq('hands counts only what hero was in', T.STORE.hero.hands, 8);
+  t.ok('bbHands can never exceed hands', T.STORE.hero.bbHands <= T.STORE.hero.hands);
+  t.eq('and here they agree exactly, every hand being priced', T.STORE.hero.bbHands, 8);
+}
+
 process.exit(t.report());

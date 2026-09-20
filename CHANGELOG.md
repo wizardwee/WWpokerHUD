@@ -9,6 +9,75 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.71.0
+
+All three of these came out of one live report — a red banner reading **"HUD
+storage is full — nothing is being saved"**, a settings panel showing 2.9 MB at
+58%, and a deep scan.
+
+**A store too full to migrate could never migrate.** During the v1.69.0 upgrade
+the old single blob and the shards replacing it hold the *same data*, and both
+sit in storage for the length of that write. A measured 2.9 MB store therefore
+needs **5.8 MB** to complete the migration, against roughly 5 MB shared with
+torn.com — so the store most in need of the split was precisely the one that
+could not perform it. Every attempt refused; the blob kept *because* the write
+failed; the next attempt into the same wall, forever. Failing at 58% of the
+estimate is about what "needs double its own size" predicts.
+
+On a refusal **while the migration is still pending**, the blob is now dropped
+and the write retried once. That is safe here and nowhere else: `loadStore`
+already parsed it into `STORE`, so memory holds the data, and the blob is the
+single largest thing that can be freed to let its own replacement land. The
+risk taken is a crash inside the retry — milliseconds — against a deadlock that
+is certain. **Only after a refusal, never pre-emptively.**
+`test/store-shards.test.js` models it with a real byte budget rather than a
+blanket failure, because "fails until the blob goes, then succeeds" *is* the
+bug; reverting the recovery makes the test report total data loss on reload.
+
+**`bbHands` could exceed `hero.hands`, which is impossible by construction.**
+The scan printed `STORE.hero: 17940 hands, bbHands 18584`. `hero.hands`
+increments on `heroDealtIn`; `bbHands` is meant to be the subset of those
+carrying a readable blind. The whole block was gated on `heroXid` being *set*
+rather than on hero being *in the hand* — and for a spectator everything
+financial nets to zero (nothing in `contributions` or `wonByXid` is keyed to
+them), so **the money was always right and only the counts were wrong**. 644
+hands hero merely watched inflated the bb/100 denominator, dragging the win
+rate about 3.5% toward zero, and filed 644 zero rows into the ledger, evicting
+real ones from its FIFO cap.
+
+The gate is **dealt in OR money moved**, and both halves are load-bearing:
+dealt-in alone misses a hand joined mid-way, money alone misses a hand dealt in
+and folded preflop for nothing — which is a real played hand and belongs in the
+rate. Mutation-verified against all three wrong versions.
+
+Note this does not repair figures already banked. Going forward the two agree;
+the existing 644-hand gap stays until "Reset my stats".
+
+**The Storage panel argued with itself.** It read *"500 hands in history"*
+directly above *"History is capped at 200 hands"*. Both numbers were right and
+the sentence was wrong — notable hands are kept past `historyLimit` up to
+`HISTORY_PINNED_CEILING` (500), which is the ceiling this store had reached. A
+panel that contradicts itself gets read as a bug in the thing it describes.
+
+It now says what actually happens, and breaks the total into **players /
+history / P/L ledger** from the per-key sizes already maintained. Added because
+someone at the quota wall was looking at "2.9 MB of roughly 5.0 MB" with saves
+being refused and nothing on screen to act on: the three components are priced
+very differently and only history has a setting you can turn down. The test
+pins that the parts sum to the headline figure — a breakdown that does not add
+up is worse than none.
+
+**The affiliation API field names are confirmed**, after carrying as unverified
+since v1.8.0. The same scan, with a key set and 30 successful lookups, printed
+the real response shape: `faction{position,faction_id,days_in_faction,`
+`faction_name,faction_tag,faction_tag_image}` and
+`married{spouse_id,spouse_name,duration}` — exactly the names
+`parseAffiliationProfile` reads, with all five seated players resolving to real
+faction IDs and names. The guess taken from Torn's documented v1 profile shape
+was right. What remains unconfirmed is only the badge itself: no scan has yet
+been taken at a table where two seated players actually share a faction or a
+marriage, so the matching has not been seen to fire.
+
 ## 1.70.0
 
 **Keep the data in Torn PDA itself, not in the browser.**
