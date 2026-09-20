@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.71.0
+// @version      1.72.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,43 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.72.0 - Recover a store left half-migrated: your players are still on the
+ *          phone.
+ *            - Reported live: "history hasn't continued", after a store went
+ *              from 1,190 tracked players to 54. The HUD ran normally,
+ *              recorded into memory, and persisted NOTHING.
+ *            - Cause: a PARTIALLY migrated store has both the shards and the
+ *              old single blob, and the sharded load path never looked at the
+ *              blob. So it sat there holding ~2.9 MB of a ~5 MB budget that
+ *              nothing would ever reclaim, shardBytes never counted it, and
+ *              every write was refused forever. v1.70.0's migration deadlock
+ *              is what created that state: it wrote as many shards as fit, was
+ *              refused for the rest, and kept the blob because the write
+ *              failed. The shards then existed, so the next load ignored it.
+ *            - The blob is a COMPLETE copy as of the failed migration, so this
+ *              is a RECOVERY, not a cleanup. Players, hands, ledger rows and
+ *              hero's totals that the refused writes lost are read back out of
+ *              it. Simulated against the reported store: 926 players restored,
+ *              back to the full 1,190, with the ledger's 20,000 rows.
+ *            - More hands wins where both sides have a record, the same rule
+ *              mergeStores uses, and manual notes/tags come across.
+ *            - A recovery must never LOSE data: mergeHands re-applies the
+ *              history trim, so a store legitimately over the limit (pinned
+ *              hands ride past it) came back SHORTER. The merged list is now
+ *              taken only when it actually adds.
+ *            - The blob is NOT deleted at load. It is handed to the same
+ *              machinery the first-time migration uses: removed once a save
+ *              lands, dropped early only if a write is refused.
+ *            - Neither the prune nor this recovery was in the deep scan, which
+ *              is how "did my players transfer?" became unanswerable from a
+ *              report. The scan now carries storage size, the breakdown, live
+ *              counts, whether a legacy blob is still present, and what the
+ *              last prune and last reclaim did.
+ *            - reclaimReportHtml shipped calling `plural`, a const scoped
+ *              inside storageSettingsHtml - a ReferenceError the moment
+ *              Settings was opened, on the one panel someone in trouble goes
+ *              to. No test rendered that panel. One does now.
  *
  * 1.71.0 - Unblock a store that is too full to migrate, and stop counting
  *          hands you only watched.
@@ -89,40 +126,6 @@
  *              they prove the code is right GIVEN the docs — the deep scan's
  *              PDA_storage block is what settles the rest.
  *
- * 1.69.0 - Stop rewriting the whole 2.9 MB store on every single action.
- *            - The store was ONE localStorage key, re-serialised in full on
- *              every save. Measured at the documented sizes (900 players, 200
- *              hands, plLedger at cap) that is 2.9 MB and 23ms per stringify —
- *              and saveStore is called from the per-action counters and a
- *              400ms poll, so a busy hand was serialising 2.9 MB and throwing
- *              away a 3 MB string up to four times a second to record that one
- *              player called one bet.
- *            - Each piece now has its own key (:core, :hands, :pl, :p:<xid>)
- *              and only the changed ones are written. Measured through the
- *              real save path: one action 19ms -> 0.037ms, hand settlement
- *              11ms, full reconcile 23ms once a minute.
- *            - A missed dirty mark is NOT data loss. getPlayer marks on every
- *              call (it hands out the live record and cannot see whether the
- *              caller wrote to it), and a FULL reconcile writes everything
- *              every STORE_RECONCILE_MS regardless of marks. Over-marking
- *              costs one small write; under-marking costs one interval of
- *              durability, never the data.
- *            - A mark is cleared only by its OWN successful write, and a
- *              refusal part-way through no longer abandons the shards that
- *              fit. Removals flush FIRST, because they free space the writes
- *              may need.
- *            - Fixed on the way in: every path that REBINDS STORE (import,
- *              reset, gist merge) now goes through replaceStore(). Under one
- *              blob this needed nothing — sharded, "Reset all data" would have
- *              cleared the screen and then silently restored every record on
- *              the next reload, because the old player keys were still there.
- *            - The pre-1.69.0 blob is read once on upgrade and removed only
- *              after a full save has actually landed. Removing it earlier
- *              turns a refused write into total data loss.
- *            - A corrupt shard now costs one shard. The old blob's only
- *              failure mode was "Corrupt storage, resetting" — one bad byte
- *              wiped every player, hand and ledger row.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -184,7 +187,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.71.0';
+  const HUD_VERSION = '1.72.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -1033,6 +1036,105 @@
     return store;
   }
 
+  // A PARTIALLY migrated store leaves BOTH the shards and the legacy blob, and
+  // the sharded load path used to ignore the blob entirely — so it sat there
+  // forever, holding ~2.9 MB of a ~5 MB budget that nothing would ever reclaim
+  // and `shardBytes` never counted. The store then cannot write, the meter
+  // under-reports the reason, and the prune threshold is computed against a
+  // total that is missing the largest single item in storage.
+  //
+  // Reported from a live table as "history hasn't continued": the HUD ran
+  // normally, recorded into memory, and silently persisted nothing.
+  //
+  // How a store gets into that state: v1.70.0's migration deadlock (see
+  // saveStore) wrote as many shards as fit, was refused for the rest, and kept
+  // the blob because the write failed. The shards then existed, so the next
+  // load took this path and never looked at the blob again.
+  //
+  // The blob is not just deadweight — it is a COMPLETE copy of the store as of
+  // the failed migration, so anything the shards are missing is still in it.
+  // That makes this a recovery, not a cleanup: players, hands and the ledger
+  // lost to the refused writes come back.
+  //
+  // It is NOT removed here. `legacyBlobPending` hands it to the same machinery
+  // the first-time migration uses — removed once a save actually lands, and
+  // dropped early only if a write is refused. Reusing that path rather than
+  // deleting here is what keeps the only copy alive until its replacement is
+  // known to have been accepted.
+  function reclaimLegacyBlob(store) {
+    const raw = shardRead(STORAGE_KEY);
+    if (!raw) return store;
+
+    let old;
+    try {
+      old = JSON.parse(raw);
+    } catch (e) {
+      // Unreadable: it can teach us nothing and it is holding the quota shut.
+      console.warn('[TornPokerHUD] Dropping unreadable legacy blob', e);
+      shardRemove(STORAGE_KEY);
+      return store;
+    }
+    noteShardBytes(STORAGE_KEY, raw.length);
+    legacyBlobPending = true;
+
+    const report = { at: Date.now(), players: 0, hands: 0, ledger: 0 };
+
+    // Same rule as mergeStores: more hands wins. A shard written part-way
+    // through the failed migration is not automatically newer than the blob,
+    // and hand count is the one ordering this file already trusts.
+    const oldPlayers = (old && old.players) || {};
+    Object.keys(oldPlayers).forEach((xid) => {
+      const fromBlob = oldPlayers[xid];
+      if (!fromBlob || typeof fromBlob !== 'object') return;
+      const current = store.players[xid];
+      if (!current || (fromBlob.hands || 0) > (current.hands || 0)) {
+        store.players[xid] = fromBlob;
+        if (!current) report.players += 1;
+      }
+    });
+
+    // Deduped on Torn's game id by mergeHands, so a hand present in both is
+    // kept once — the same union the gist merge performs.
+    const oldHands = Array.isArray(old && old.hands) ? old.hands : [];
+    if (oldHands.length) {
+      const before = (store.hands || []).length;
+      const merged = mergeHands(store.hands || [], oldHands,
+        (store.settings && store.settings.historyLimit) || 200);
+      // A RECOVERY MUST NEVER LOSE DATA. mergeHands re-applies the history
+      // trim, and trimming a list that is already over the limit for a good
+      // reason (pinned hands ride past it, up to HISTORY_PINNED_CEILING) can
+      // return FEWER hands than the shards already held. Taking the shorter
+      // list would mean this function deleted history in the middle of
+      // restoring it — so the merge is accepted only when it actually adds.
+      if (merged.length >= before) {
+        store.hands = merged;
+        report.hands = merged.length - before;
+      }
+    }
+
+    // The ledger is append-only and carries no cross-copy dedup key, so it is
+    // taken WHOLE and only when the shard side has less — which is the case
+    // this exists for: a refused migration can leave the ledger shard empty
+    // while the blob still holds every row.
+    const oldLedger = Array.isArray(old && old.plLedger) ? old.plLedger : [];
+    if (oldLedger.length > ((store.plLedger || []).length)) {
+      report.ledger = oldLedger.length - ((store.plLedger || []).length);
+      store.plLedger = oldLedger;
+    }
+
+    // Hero's own totals: same more-hands rule.
+    if (old && old.hero && (old.hero.hands || 0) > ((store.hero && store.hero.hands) || 0)) {
+      store.hero = old.hero;
+    }
+
+    if (report.players || report.hands || report.ledger) {
+      store.lastReclaim = report;
+      console.warn('[TornPokerHUD] Recovered from a partially migrated store: '
+        + `${report.players} players, ${report.hands} hands, ${report.ledger} ledger rows.`);
+    }
+    return store;
+  }
+
   function loadStore() {
     const keys = shardKeys();
 
@@ -1063,8 +1165,9 @@
     keys.forEach((k) => { raws[k] = shardRead(k); });
     keys.forEach((k) => noteShardBytes(k, (raws[k] || '').length));
 
-    const store = assembleShards(keys, (k, fallback, label) => parseShard(raws[k], fallback, label),
-      (k) => shardRemove(k));
+    const store = reclaimLegacyBlob(assembleShards(keys,
+      (k, fallback, label) => parseShard(raws[k], fallback, label),
+      (k) => shardRemove(k)));
 
     STORE = finalizeStore(store);
     // migrateStore may have rewritten records in place, and nothing has been
@@ -13250,7 +13353,28 @@
       + `${PRUNE_MAX_DAYS} days, then the least recently seen down to ${PRUNE_PLAYER_CAP}. Thin records cost `
       + 'about half what a long-tracked one does and tell you nothing, so they go first. You are never dropped. '
       + 'The limit is an estimate; the browser does not report the real one here.</div>'
+      + reclaimReportHtml()
       + pruneReportHtml();
+  }
+
+  // A recovery must not be silent. This one restores records the user could
+  // see were missing, so it says so where they went looking for them.
+  function reclaimReportHtml() {
+    const r = STORE && STORE.lastReclaim;
+    if (!r) return '';
+    // `plural` is a const INSIDE storageSettingsHtml, not a shared helper —
+    // referencing it from here threw a ReferenceError the moment Settings was
+    // opened, and no test renders this panel to catch it.
+    const n = (v, word) => `${v} ${word}${v === 1 ? '' : 's'}`;
+    const parts = [];
+    if (r.players) parts.push(n(r.players, 'player record'));
+    if (r.hands) parts.push(n(r.hands, 'hand'));
+    if (r.ledger) parts.push(n(r.ledger, 'P/L row'));
+    if (!parts.length) return '';
+    return '<div class="tph-store-line tph-store-warntext">Recovered '
+      + `${parts.join(', ')} from a part-finished upgrade on `
+      + `${new Date(r.at).toLocaleDateString()}. An older copy of the store was `
+      + 'still on the device and had not been read since.</div>';
   }
 
   function pruneReportHtml() {
@@ -13777,6 +13901,37 @@
     // usage() is async and this report is built synchronously.
     probePdaStorageUsage();
     pdaStorageScanLines().forEach((l) => L.push(l));
+    // Storage events that CHANGE HOW MUCH DATA YOU HAVE. Neither was in the
+    // scan, which is how "did my players transfer?" became unanswerable from a
+    // report — the prune records what it dropped and the reclaim what it put
+    // back, and both were only ever visible in a settings panel nobody opens
+    // until something has already gone wrong.
+    (() => {
+      const st = storageStats();
+      L.push('storage: ' + fmtBytes(st.chars) + ' of ' + (st.estimated ? '~' : '')
+        + fmtBytes(st.quota) + ' (' + st.pct.toFixed(0) + '%)'
+        + '  backend: ' + (st.native ? 'PDA_storage' : 'localStorage')
+        + (st.failed ? '   <-- LAST SAVE REFUSED' : ''));
+      const b = storageBreakdown();
+      L.push('  players ' + fmtBytes(b.players) + ' · history ' + fmtBytes(b.hands)
+        + ' · ledger ' + fmtBytes(b.ledger) + ' · core ' + fmtBytes(b.core));
+      L.push('  counts: ' + Object.keys((STORE && STORE.players) || {}).length + ' players, '
+        + ((STORE && STORE.hands) || []).length + ' hands, '
+        + ((STORE && STORE.plLedger) || []).length + ' ledger rows');
+      const legacy = shardRead(STORAGE_KEY);
+      L.push('  legacy blob: ' + (legacy ? fmtBytes(legacy.length) + ' STILL PRESENT' : 'none')
+        + (legacyBlobPending ? '  (pending removal after the next successful save)' : ''));
+      const pr = STORE && STORE.lastPrune;
+      L.push('  lastPrune: ' + (pr && pr.dropped
+        ? `${new Date(pr.at).toLocaleDateString()} dropped ${pr.dropped} `
+          + `(thin ${pr.thin || 0}, stale ${pr.stale || 0}, lru ${pr.lru || 0}), kept ${pr.kept}`
+        : 'none recorded'));
+      const rc = STORE && STORE.lastReclaim;
+      L.push('  lastReclaim: ' + (rc
+        ? `${new Date(rc.at).toLocaleDateString()} recovered ${rc.players} players, `
+          + `${rc.hands} hands, ${rc.ledger} ledger rows`
+        : 'none'));
+    })();
     // The share bridge is the one unverified handler left here. Its contract is
     // unknown (see downloadTextFile), so the scan reports what it actually
     // returned rather than whether we think it worked — that is the only thing
@@ -14588,6 +14743,7 @@
       emptyPlayer,
       // --- Sharded persistence -------------------------------------------
       loadStoreAsync,
+      reclaimLegacyBlob,
       storageBreakdown,
       bootStore,
       assembleShards,

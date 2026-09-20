@@ -550,6 +550,50 @@ after a refusal, never pre-emptively**, and `test/store-shards.test.js` pins
 both directions with a real byte budget rather than a blanket failure, because
 "fails until the blob goes, then succeeds" IS the bug.
 
+### A part-migrated store strands the blob, and the blob is the backup (v1.72.0)
+
+The deadlock fix above stops a migration STALLING. It does not help a store
+already left half-done — and that state is silent and terminal.
+
+`loadStore`'s sharded path used to ignore `STORAGE_KEY` entirely. So a store
+with both shards AND the blob (exactly what v1.70.0's deadlock produced: some
+shards written, the rest refused, the blob kept because the write failed) kept
+~2.9 MB of a ~5 MB budget occupied by a file nothing would ever read or remove.
+`shardBytes` never counted it either, so the meter under-reported the cause and
+the prune threshold was computed against a total missing the biggest item in
+storage. Every write refused, forever. Reported as **"history hasn't
+continued"** — the HUD ran, recorded into memory, persisted nothing.
+
+**The blob is a COMPLETE copy as of the failed migration, so `reclaimLegacyBlob`
+is a recovery, not a cleanup.** Against the reported store it restored 926
+players (back to the full 1,190) and the ledger's 20,000 rows.
+
+- **More hands wins** where both sides have a record — the same rule
+  `mergeStores` uses. A shard written part-way through a failed migration is
+  not automatically newer than the blob, and hand count is the one ordering
+  this file already trusts. Manual notes/tags come across.
+- **A recovery must never LOSE data.** `mergeHands` re-applies the history
+  trim, so a store legitimately over `historyLimit` (pinned hands ride past it)
+  came back SHORTER — deleting history while restoring it. The merged list is
+  taken only when it ADDS. The first test of this was vacuous: 260 *pinned*
+  hands can never shrink, so it needed unpinned ones over the limit.
+- **The blob is not deleted at load.** It is handed to `legacyBlobPending` —
+  the same machinery the first-time migration uses, removed after a save lands
+  and dropped early only on a refusal. Don't "simplify" this to a delete here;
+  that is the only copy of whatever the shards are missing.
+
+**Both the prune and the reclaim are now in the deep scan**, with storage size,
+backend, the players/history/ledger breakdown, live counts, and whether a blob
+is still present. Neither was, which is how "did my players transfer?" became
+unanswerable from a report. **Anything that silently changes how much data the
+user has belongs in the scan**, not only in a settings panel nobody opens until
+something has already gone wrong.
+
+**A panel that renders no test's DOM is untested.** `reclaimReportHtml` shipped
+calling `plural` — a `const` scoped inside `storageSettingsHtml`, not a shared
+helper — which is a `ReferenceError` the instant Settings opens, on the exact
+panel someone in trouble goes to. `test/store-shards.test.js` now renders it.
+
 **A corrupt shard now costs one shard.** The old blob's only failure mode was
 `Corrupt storage, resetting` — one bad byte wiped every player, hand and ledger
 row. A bad player shard is dropped with a warning and the rest load.

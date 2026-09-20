@@ -9,6 +9,78 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.72.0
+
+**Recover a store left half-migrated — the missing players are still on the
+phone.** Reported live as *"history hasn't continued"*, after the tracked-player
+count went from **1,190 to 54**. The HUD ran normally, recorded into memory, and
+persisted nothing at all.
+
+**Cause.** A *partially* migrated store holds both the shards and the old single
+blob — and the sharded load path never looked at the blob. So `tornPokerHUD_v1`
+sat there holding ~2.9 MB of a ~5 MB budget that nothing would ever reclaim,
+`shardBytes` never counted it (so the meter under-reported the reason *and* the
+prune threshold was computed against a total missing the largest single item in
+storage), and every write was refused forever.
+
+v1.70.0's migration deadlock is what created that state: it wrote as many shards
+as fit, was refused for the rest, and kept the blob *because* the write failed.
+The shards then existed, so every subsequent load took the sharded path and
+ignored it.
+
+**The blob is a complete copy of the store as of the failed migration, so this
+is a recovery rather than a cleanup.** Players, hands, ledger rows and hero's
+totals lost to the refused writes are read back out of it. Simulated end to end
+against the reported store — build the 2.9 MB store, run it through the v1.70.0
+deadlock, then load the wreckage:
+
+```
+--- the broken state on the phone ---
+legacy blob present : true
+player shards       : 264
+
+--- after loading it on the fixed build ---
+[TornPokerHUD] Recovered from a partially migrated store: 926 players
+players : 1190     hands : 500     ledger : 20000
+--- after the next save ---
+legacy blob : reclaimed and removed
+saveFailure : none
+stored      : 2.90 MB
+```
+
+Where both sides have a record, **more hands wins** — the same rule
+`mergeStores` uses, since a shard written part-way through a failed migration is
+not automatically newer than the blob. Manual notes and tags come across.
+
+**A recovery must never lose data.** `mergeHands` re-applies the history trim,
+and a store legitimately over `historyLimit` (pinned hands ride past it, up to
+`HISTORY_PINNED_CEILING`) came back **shorter** — this function deleting history
+in the middle of restoring it. The merged list is now taken only when it
+actually adds. The first version of that test was vacuous, because 260 *pinned*
+hands can never shrink; it needed unpinned ones over the limit.
+
+**The blob is not deleted at load.** It is handed to the same machinery the
+first-time migration uses: removed once a save has actually landed, dropped
+early only if a write is refused. Reusing that path rather than deleting here is
+what keeps the only copy alive until its replacement is known to be accepted.
+
+**Neither the prune nor this recovery was in the deep scan**, which is how "did
+my players transfer?" became unanswerable from a report. Both silently change
+how much data you have, and both were only visible in a settings panel nobody
+opens until something has already gone wrong. The scan now carries storage size
+and backend, the players/history/ledger breakdown, live counts, whether a legacy
+blob is still present, and what the last prune and last reclaim each did.
+
+`reclaimReportHtml` shipped calling `plural`, which is a `const` scoped inside
+`storageSettingsHtml` rather than a shared helper — **a `ReferenceError` the
+moment Settings was opened**, on the one panel someone in trouble goes to. No
+test rendered that panel, so nothing caught it. One does now, and reverting the
+fix crashes it.
+
+Mutation-verified against four regressions: ignoring the blob on the sharded
+path, deleting it at load instead of after a successful write, letting the merge
+shrink history, and never letting the fuller blob record win.
+
 ## 1.71.0
 
 All three of these came out of one live report — a red banner reading **"HUD

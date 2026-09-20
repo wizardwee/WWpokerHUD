@@ -424,6 +424,133 @@ function seeded(n) {
   t.eq('the running total equals what is actually stored', T.storageStats().chars, actual);
 }
 
+// --- A PARTIALLY migrated store: the blob is reclaimed, not stranded --------
+//
+// Reported from a live table as "history hasn't continued" — the HUD ran
+// normally, recorded into memory, and persisted nothing at all.
+//
+// How a store gets here: v1.70.0's migration deadlock wrote as many shards as
+// fit, was refused for the rest, and KEPT the blob because the write failed.
+// The shards then existed, so the next load took the sharded path — which did
+// not look at the blob. It sat there holding ~2.9 MB of a ~5 MB budget that
+// nothing would reclaim, shardBytes never counted it, and the store could
+// never write again.
+//
+// The blob is a COMPLETE copy as of the failed migration, so this is a
+// recovery and not just a cleanup.
+
+{
+  const T = seeded(2);
+  // Shards hold two thin records; the blob holds those plus four more, with
+  // more hands on one of the overlapping pair.
+  const blob = JSON.stringify({
+    version: 3,
+    settings: { heroName: 'Wonkawee' },
+    hero: { hands: 900, netChips: -5000, netBB: -50, bbHands: 900 },
+    players: {
+      x0: { xid: 'x0', name: 'P0', hands: 999, notes: 'floats every flop' },
+      x1: { xid: 'x1', name: 'P1', hands: 1 },
+      lost1: { xid: 'lost1', name: 'Lost1', hands: 400 },
+      lost2: { xid: 'lost2', name: 'Lost2', hands: 300 },
+      lost3: { xid: 'lost3', name: 'Lost3', hands: 12 },
+    },
+    hands: [{ g: 'old1', t: 1, actions: [] }, { g: 'old2', t: 2, actions: [] }],
+    plLedger: [{ t: 1, d: -5, b: 1, g: 'old1' }, { t: 2, d: 7, b: 1, g: 'old2' }],
+  });
+  T._sandbox.localStorage.setItem(KEY, blob);
+
+  T.STORE = T.emptyStore();
+  const back = T.loadStore();
+
+  t.eq('records the shards never had are restored',
+    Object.keys(back.players).sort().join(','), 'lost1,lost2,lost3,x0,x1');
+  t.eq('and the blob wins where it has more hands', back.players.x0.hands, 999);
+  t.eq('carrying what a human typed', back.players.x0.notes, 'floats every flop');
+  t.eq('hands are restored', back.hands.length, 2);
+  t.eq('so is the ledger the refused write left empty', back.plLedger.length, 2);
+  t.eq("hero's totals come back too", back.hero.hands, 900);
+  t.ok('and it is reported rather than done silently', !!back.lastReclaim);
+  t.eq('with a count', (back.lastReclaim || {}).players, 3);
+
+  t.ok('the blob is NOT removed before the replacement is written',
+    !!raw(T, KEY));
+  flush(T);
+  t.eq('only after a save does it go', raw(T, KEY), null);
+
+  T.STORE = T.emptyStore();
+  t.eq('and the recovery survives a reload',
+    Object.keys(T.loadStore().players).length, 5);
+}
+
+{
+  // A recovery must never LOSE data. mergeHands re-applies the history trim,
+  // and a store legitimately over the limit (pinned hands ride past it) would
+  // come back SHORTER — this function deleting history while restoring it.
+  const T = seeded(1);
+  // UNPINNED and over historyLimit: mergeHands re-applies trimHandHistory,
+  // which keeps only `limit` unpinned hands — so a naive merge hands back 200
+  // where 300 went in. Pinned hands ride past the limit and can never shrink,
+  // which is why the first version of this test proved nothing.
+  for (let i = 0; i < 300; i += 1) T.STORE.hands.push({ g: 'h' + i, t: i, actions: [] });
+  T.markAllDirty();
+  flush(T);
+  const before = T.STORE.hands.length;
+  t.eq('the store really is over the trim limit to begin with', before, 300);
+
+  T._sandbox.localStorage.setItem(KEY, JSON.stringify({
+    version: 3, settings: {}, players: {}, hands: [{ g: 'z', t: 1, actions: [] }], plLedger: [],
+  }));
+  T.STORE = T.emptyStore();
+  const back = T.loadStore();
+  t.ok('history is never shorter after a reclaim than before it',
+    back.hands.length >= before);
+}
+
+{
+  // An unreadable blob teaches nothing and is holding the quota shut.
+  const T = seeded(2);
+  T._sandbox.localStorage.setItem(KEY, '{ not json');
+  T.STORE = T.emptyStore();
+  const back = T.loadStore();
+  t.eq('the shards still load', Object.keys(back.players).length, 2);
+  t.eq('and the unreadable blob is dropped rather than left holding space',
+    raw(T, KEY), null);
+}
+
+{
+  // No blob: the ordinary case must not be disturbed.
+  const T = seeded(3);
+  T.STORE = T.emptyStore();
+  const back = T.loadStore();
+  t.eq('a clean sharded store loads unchanged', Object.keys(back.players).length, 3);
+  t.ok('and claims no recovery', !back.lastReclaim);
+}
+
+// --- The panel must actually RENDER -----------------------------------------
+//
+// reclaimReportHtml shipped referencing `plural`, which is a const inside
+// storageSettingsHtml rather than a shared helper — a ReferenceError the
+// moment Settings was opened, on the one panel a user in trouble goes to. No
+// test rendered this panel, so nothing caught it. Now one does.
+
+{
+  const T = seeded(1);
+  T.STORE.lastReclaim = { at: Date.now(), players: 926, hands: 3, ledger: 20000 };
+  T.STORE.lastPrune = { at: Date.now(), thin: 40, stale: 1100, lru: 0, dropped: 1140, kept: 54 };
+  let html = '';
+  let threw = null;
+  try { html = T.storageSettingsHtml(); } catch (e) { threw = e; }
+  t.eq('the storage panel renders without throwing', threw ? threw.message : 'none', 'none');
+  t.ok('the recovery is reported to the user', /Recovered 926 player records/.test(html));
+  t.ok('including the ledger rows', /20000 P\/L rows/.test(html));
+  t.ok('and the cleanup is still reported beside it', /dropped 1140 player records/.test(html));
+  t.ok('singular reads correctly too',
+    /1 player record\b/.test((() => {
+      T.STORE.lastReclaim = { at: Date.now(), players: 1, hands: 0, ledger: 0 };
+      return T.storageSettingsHtml();
+    })()));
+}
+
 // --- The breakdown must sum to the total ------------------------------------
 //
 // Added after a live report: the panel read "2.9 MB of roughly 5.0 MB" with
