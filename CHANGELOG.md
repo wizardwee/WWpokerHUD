@@ -9,6 +9,47 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.73.0
+
+**Fix v1.72.0 taking the whole HUD off the screen.** Reported as "the whole app
+is gone now, no poker HUD" — no gear, no badges, nothing.
+
+v1.72.0's `reclaimLegacyBlob` reaches `mergeHands` → `trimHandHistory` →
+`HISTORY_PINNED_CEILING`, and that `const` was declared roughly **3,600 lines
+below `bootStore()`**. `loadStore` runs at *module evaluation time*, so the
+const was still in its temporal dead zone:
+
+```
+ReferenceError: Cannot access 'HISTORY_PINNED_CEILING' before initialization
+```
+
+A throw at module scope, in a userscript, means **nothing runs at all** — and
+nothing surfaces an error either. This is precisely the hazard CLAUDE.md
+documents ("the documented way to break this script at load"), walked straight
+into. The const is now declared above `bootStore()`, with a comment at the
+declaration saying why it lives far from the function that uses it.
+
+It only fires on a store holding **both** shards and the legacy blob — the
+part-migrated state v1.72.0 exists to repair. A clean store loaded fine, which
+is how it got out.
+
+**The suite could not have caught it, and that is the more important half.**
+`load()` seeds *empty* storage, so the sharded path never ran during evaluation;
+every test that calls `loadStore()` runs afterwards, when every binding is
+already initialised. The seam masked the failure perfectly — a variant of this
+repo's oldest lesson, that a test which doesn't drive the real path proves
+nothing.
+
+`test/boot-paths.test.js` loads the script against each storage state arranged
+**before** evaluation — fresh install, legacy blob only, shards only, shards
+*and* blob, three corrupt variants, and both native-backend paths — and asserts
+only that it loads. Restoring the const to its old position makes it the **only
+file in the suite that fails**.
+
+The harness gained `opts.seedKeys` for this. `storageSeed` alone can only
+produce a fresh-install or legacy-blob boot, so it cannot reach the sharded load
+path at evaluation time, which is where this class of bug lives.
+
 ## 1.72.0
 
 **Recover a store left half-migrated — the missing players are still on the

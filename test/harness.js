@@ -161,6 +161,14 @@ function load(opts = {}) {
   const src = fs.readFileSync(SCRIPT_PATH, 'utf8');
   const localStorage = stubStorage();
   if (opts.storageSeed) localStorage.setItem('tornPokerHUD_v1', opts.storageSeed);
+  // opts.seedKeys: raw key -> value, written BEFORE the script is evaluated.
+  // storageSeed alone can only produce a fresh-install or legacy-blob boot, so
+  // it cannot exercise the SHARDED load path at module-evaluation time — which
+  // is where this file's documented temporal-dead-zone hazard lives. A
+  // ReferenceError there throws at module scope and nothing runs at all, and a
+  // test that calls loadStore() afterwards never sees it, because by then every
+  // binding is initialised.
+  Object.keys(opts.seedKeys || {}).forEach((k) => localStorage.setItem(k, opts.seedKeys[k]));
 
   // opts.dom: 'class' swaps in the class-matching document above, for tests
   // that need mount/teardown to actually happen. Default is the inert stub —

@@ -550,6 +550,31 @@ after a refusal, never pre-emptively**, and `test/store-shards.test.js` pins
 both directions with a real byte budget rather than a blanket failure, because
 "fails until the blob goes, then succeeds" IS the bug.
 
+### Anything the LOAD PATH reaches must be declared above bootStore() (v1.73.0)
+
+v1.72.0 took the entire HUD off the screen. `reclaimLegacyBlob` reaches
+`mergeHands` → `trimHandHistory` → `HISTORY_PINNED_CEILING`, and that `const`
+sat ~3,600 lines below `bootStore()`. `loadStore` runs at **module evaluation
+time**, so it was still in its temporal dead zone: `ReferenceError` at module
+scope, which in a userscript means nothing runs and nothing reports it.
+
+This is the hazard this file already documents for `migrateStore`. It is not
+specific to `migrateStore` — it applies to **everything `bootStore()` can
+reach**, which now includes the shard assembler, the reclaim, and both loaders.
+When a load-path function needs a constant, hoist the constant and leave a note
+at the declaration saying why it is far from its consumer.
+
+**`test/` could not have caught it, and that is the part worth internalising.**
+`load()` seeds EMPTY storage, so the sharded path never runs during evaluation,
+and every test calling `loadStore()` runs afterwards with all bindings
+initialised. The seam masks load-order faults completely.
+
+`test/boot-paths.test.js` is the answer: it arranges storage BEFORE evaluation
+(via the harness's `opts.seedKeys`) and asserts only that the script loads, for
+fresh / legacy-blob / sharded / shards+blob / corrupt / native-backend states.
+Reverting the hoist makes it the ONLY failing file in the suite. **Add a case
+there whenever the load path gains a branch.**
+
 ### A part-migrated store strands the blob, and the blob is the backup (v1.72.0)
 
 The deadlock fix above stops a migration STALLING. It does not help a store

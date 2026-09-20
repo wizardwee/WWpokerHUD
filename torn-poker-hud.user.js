@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.72.0
+// @version      1.73.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,33 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.73.0 - Fix v1.72.0 taking the whole HUD off the screen.
+ *            - v1.72.0's reclaimLegacyBlob reaches mergeHands ->
+ *              trimHandHistory -> HISTORY_PINNED_CEILING, and that const was
+ *              declared ~3,600 lines BELOW bootStore(). loadStore runs at
+ *              MODULE EVALUATION time, so the const was still in its temporal
+ *              dead zone: ReferenceError at module scope, which in a userscript
+ *              means nothing runs at all. No gear, no badges, no HUD, no error
+ *              anyone can see. Exactly the hazard CLAUDE.md documents, walked
+ *              straight into.
+ *            - The const is hoisted above bootStore() with a comment saying
+ *              why it lives far from the function that uses it.
+ *            - It only fires on a store that has BOTH shards and the legacy
+ *              blob — the part-migrated state v1.72.0 exists to repair. A
+ *              clean store loaded fine, which is why this got out.
+ *            - THE SUITE COULD NOT HAVE CAUGHT IT. load() seeds EMPTY storage,
+ *              so the sharded path never ran during evaluation, and every test
+ *              that calls loadStore() runs afterwards, when the bindings are
+ *              initialised. The seam masked it perfectly.
+ *            - test/boot-paths.test.js loads the script against each storage
+ *              state arranged BEFORE evaluation — fresh, legacy blob, shards,
+ *              shards+blob, corrupt variants, and both native-backend paths —
+ *              and asserts only that it loads. Under the reverted fix it is
+ *              the ONLY file in the suite that fails.
+ *            - The harness gained opts.seedKeys for this: storageSeed alone
+ *              can only produce a fresh-install or legacy-blob boot, so it
+ *              cannot reach the sharded load path at evaluation time.
  *
  * 1.72.0 - Recover a store left half-migrated: your players are still on the
  *          phone.
@@ -89,43 +116,6 @@
  *              married.spouse_id, five players resolved). Unverified since
  *              v1.8.0.
  *
- * 1.70.0 - Keep the data in Torn PDA itself, not in the browser.
- *            - PDA_storage is app-held (SQLite): 10 MB by default and
- *              raisable, in this script's own namespace, and NOT wiped when
- *              the app's browser data is cleared — which until now took
- *              everything this HUD had ever recorded with it. localStorage is
- *              ~5 MB SHARED with torn.com and evictable under pressure, and a
- *              near-full store here measures 2.9 MB.
- *            - ONE backend is chosen at load and they are never mixed. Native
- *              only when loadAll AND setMany are both present; a partial
- *              injection falls back rather than half-adopting a store it can
- *              neither read in one round trip nor write in one batch.
- *            - A FAILED LOAD IS NEVER FOLLOWED BY A WRITE. Carrying on with an
- *              empty store and saving it would write nothing over data that is
- *              perfectly intact behind a bridge that was merely slow. Blocked
- *              at the place that writes, not only at saveStore. A failed load
- *              costs the session's recording, never the history.
- *            - Values stored as OBJECTS, not JSON strings: the bridge encodes
- *              once, and handing it a pre-stringified value encodes it AGAIN,
- *              escaping every quote and roughly doubling what a record costs.
- *            - One setMany per pass, which the docs call for and which rejects
- *              as a whole on quota — so a pass lands entirely or changes
- *              nothing, and the dirty marks follow it either way.
- *            - Flushes are serialised. A second pass starting while one is in
- *              flight would build its plan from marks the first is about to
- *              clear; anything requested meanwhile is coalesced into one
- *              follow-up.
- *            - The localStorage copy is cleared only after the first native
- *              save lands. Consequence stated rather than hidden: after that,
- *              downgrading to an app without PDA_storage finds it empty.
- *            - storageStats now reports REAL bytes from usage(), so the
- *              5 MB estimate stops being load-bearing and the UI drops the
- *              word "roughly".
- *            - Unverified on the device, same as any selector here. The tests
- *              drive a stand-in built from Torn PDA's published contract, so
- *              they prove the code is right GIVEN the docs — the deep scan's
- *              PDA_storage block is what settles the rest.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -187,7 +177,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.72.0';
+  const HUD_VERSION = '1.73.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -542,6 +532,23 @@
   // ===========================================================================
   // 2. STORAGE LAYER
   // ===========================================================================
+
+  // Hard ceiling on STORE.hands once pinned (notable) entries are riding past
+  // historyLimit. Measured cost is ~1.3KB/hand at historyLimit's 200 (CLAUDE.md
+  // "Storage, and what it costs"), so 500 tops out around 650KB — small next to
+  // the 5MB estimated quota, and prunePlayers/the storage-warning banner are
+  // the independent backstop if it ever isn't.
+  //
+  // DECLARED HERE, far from trimHandHistory which uses it, for one reason:
+  // loadStore -> reclaimLegacyBlob -> mergeHands -> trimHandHistory runs at
+  // MODULE EVALUATION time, from bootStore(). Left beside its consumer lower
+  // down, it is in the temporal dead zone at that point and throws
+  // `ReferenceError: Cannot access 'HISTORY_PINNED_CEILING' before
+  // initialization` — at module scope, in a userscript, which means the entire
+  // HUD silently fails to load. That shipped in v1.72.0 and took the whole HUD
+  // off the screen. Anything the load path can reach must be declared above
+  // bootStore().
+  const HISTORY_PINNED_CEILING = 500;
 
   const STORAGE_KEY = 'tornPokerHUD_v1';
 
@@ -5082,11 +5089,9 @@
   }
 
   // Hard ceiling on total stored hands, pinned or not — see trimHandHistory.
-  // Measured cost is ~1.3KB/hand at historyLimit's 200 (CLAUDE.md "Storage,
-  // and what it costs"), so 500 tops out around 650KB — small next to the 5MB
-  // estimated quota, and prunePlayers/the storage-warning banner are the
-  // independent backstop if it ever isn't.
-  const HISTORY_PINNED_CEILING = 500;
+  // HISTORY_PINNED_CEILING is declared near the top of the file — see the note
+  // there. It is read by trimHandHistory, which loadStore reaches at module
+  // evaluation time.
 
   // Evict oldest UNPINNED entries first once over `limit`; pinned entries
   // survive past that, up to the hard `pinnedCeiling` — beyond which even a
