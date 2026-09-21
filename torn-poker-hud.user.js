@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.74.0
+// @version      1.75.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,30 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.75.0 - Look for PDA_storage where Torn PDA actually puts it.
+ *            - You asked for the store to live on PDA rather than in the
+ *              browser. The code for that shipped in v1.70.0 and then reported
+ *              PDA_storage: ABSENT on a device where PDA_httpGet works fine.
+ *            - The probe was window.PDA_storage alone, written on the
+ *              reasoning that it is "injected as a bare global like
+ *              PDA_httpGet". But Torn PDA's OWN test script probes
+ *              `typeof PDA_storage === "undefined"`, not window.PDA_storage —
+ *              a strong hint it is a scoped binding in the wrapper the app
+ *              builds around a userscript, which this IIFE reaches by closure
+ *              while a window lookup finds nothing. Exactly the symptom.
+ *            - pdaStorageRaw() now tries the bare identifier first and falls
+ *              back to window. `typeof x` on an undeclared name is the one
+ *              reference form that does not throw, which is what makes this
+ *              safe at module scope — where a ReferenceError takes the whole
+ *              HUD off the screen, as v1.72.0 demonstrated.
+ *            - The scan reports BOTH probes separately now. "ABSENT" alone
+ *              cannot tell "this build has no native storage" from "we looked
+ *              in the wrong place", and the second is what was wrong.
+ *            - The other possibility is just an old app: Torn PDA v3.15.0
+ *              (8 Aug) is the release noting native storage for script
+ *              developers. A bare identifier reading `object` in the next scan
+ *              means it was there all along.
  *
  * 1.74.0 - Two bugs a live scan turned up, and the recovery is confirmed.
  *            - THE v1.72.0 RECOVERY WORKED: 1,138 players and 475 hands read
@@ -71,43 +95,6 @@
  *            - The harness gained opts.seedKeys for this: storageSeed alone
  *              can only produce a fresh-install or legacy-blob boot, so it
  *              cannot reach the sharded load path at evaluation time.
- *
- * 1.72.0 - Recover a store left half-migrated: your players are still on the
- *          phone.
- *            - Reported live: "history hasn't continued", after a store went
- *              from 1,190 tracked players to 54. The HUD ran normally,
- *              recorded into memory, and persisted NOTHING.
- *            - Cause: a PARTIALLY migrated store has both the shards and the
- *              old single blob, and the sharded load path never looked at the
- *              blob. So it sat there holding ~2.9 MB of a ~5 MB budget that
- *              nothing would ever reclaim, shardBytes never counted it, and
- *              every write was refused forever. v1.70.0's migration deadlock
- *              is what created that state: it wrote as many shards as fit, was
- *              refused for the rest, and kept the blob because the write
- *              failed. The shards then existed, so the next load ignored it.
- *            - The blob is a COMPLETE copy as of the failed migration, so this
- *              is a RECOVERY, not a cleanup. Players, hands, ledger rows and
- *              hero's totals that the refused writes lost are read back out of
- *              it. Simulated against the reported store: 926 players restored,
- *              back to the full 1,190, with the ledger's 20,000 rows.
- *            - More hands wins where both sides have a record, the same rule
- *              mergeStores uses, and manual notes/tags come across.
- *            - A recovery must never LOSE data: mergeHands re-applies the
- *              history trim, so a store legitimately over the limit (pinned
- *              hands ride past it) came back SHORTER. The merged list is now
- *              taken only when it actually adds.
- *            - The blob is NOT deleted at load. It is handed to the same
- *              machinery the first-time migration uses: removed once a save
- *              lands, dropped early only if a write is refused.
- *            - Neither the prune nor this recovery was in the deep scan, which
- *              is how "did my players transfer?" became unanswerable from a
- *              report. The scan now carries storage size, the breakdown, live
- *              counts, whether a legacy blob is still present, and what the
- *              last prune and last reclaim did.
- *            - reclaimReportHtml shipped calling `plural`, a const scoped
- *              inside storageSettingsHtml - a ReferenceError the moment
- *              Settings was opened, on the one panel someone in trouble goes
- *              to. No test rendered that panel. One does now.
  *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
@@ -170,7 +157,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.74.0';
+  const HUD_VERSION = '1.75.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -225,11 +212,28 @@
   // on this has seen. That is what the deep-scan probe below is for — one
   // report settles whether it is injected at all on the user's app version.
   //
-  // Injected as a bare global (like PDA_httpGet), so read it off window rather
-  // than referencing it unqualified — an undeclared identifier throws, and a
-  // throw at module scope in a userscript means nothing runs at all.
+  // READ IT TWO WAYS, and the bare identifier FIRST. This was `window.
+  // PDA_storage` alone, on the reasoning that it is "injected as a bare global
+  // like PDA_httpGet" — and a live scan then reported ABSENT on a device where
+  // the HTTP helpers work fine.
+  //
+  // Torn PDA's own test script probes `typeof PDA_storage === "undefined"`,
+  // NOT window.PDA_storage. That is a strong hint it may be a scoped binding
+  // in whatever wrapper the app builds around a userscript rather than a
+  // property of window — in which case our IIFE reaches it by closure and a
+  // window lookup finds nothing, which is exactly the reported symptom.
+  //
+  // `typeof x` on an undeclared identifier is the one reference form that does
+  // NOT throw, so this is safe at module scope where a ReferenceError would
+  // mean the whole HUD fails to load. We do not declare the name ourselves, so
+  // there is no temporal dead zone to fall into either.
+  function pdaStorageRaw() {
+    if (typeof PDA_storage !== 'undefined') return PDA_storage;
+    return window.PDA_storage;
+  }
+
   function pdaStorage() {
-    const s = window.PDA_storage;
+    const s = pdaStorageRaw();
     return (s && typeof s.get === 'function' && typeof s.set === 'function') ? s : null;
   }
 
@@ -273,10 +277,15 @@
   // pushes and this stays testable without a DOM.
   function pdaStorageScanLines() {
     const s = pdaStorage();
-    const raw = window.PDA_storage;
+    const raw = pdaStorageRaw();
     const L = [];
+    // BOTH probes, reported separately. A scan that says only "ABSENT" cannot
+    // tell "this app build has no native storage" from "we looked in the wrong
+    // place" — and the second is what the first version of this got wrong.
+    const bare = (typeof PDA_storage !== 'undefined') ? typeof PDA_storage : 'undefined';
     L.push('PDA_storage: ' + (s ? 'PRESENT' : (raw ? 'PRESENT BUT UNUSABLE (no get/set)' : 'ABSENT'))
-      + '  (typeof ' + (typeof raw) + ')');
+      + '  (bare identifier: ' + bare
+      + ', window.PDA_storage: ' + (typeof window.PDA_storage) + ')');
     if (raw) {
       const have = PDA_STORAGE_METHODS.filter((m) => typeof raw[m] === 'function');
       const missing = PDA_STORAGE_METHODS.filter((m) => typeof raw[m] !== 'function');
@@ -14526,6 +14535,7 @@
       pdaCall,
       PDA_CALL_TIMEOUT_MS,
       pdaStorage,
+      pdaStorageRaw,
       PDA_STORAGE_METHODS,
       probePdaStorageUsage,
       pdaStorageScanLines,

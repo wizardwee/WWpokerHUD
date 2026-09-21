@@ -9,6 +9,41 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.75.0
+
+**Look for `PDA_storage` where Torn PDA actually puts it.** Asked for directly:
+the store should live on PDA rather than in the browser. The code for that
+shipped in v1.70.0 — and then the scan reported `PDA_storage: ABSENT` on a
+device where `PDA_httpGet` works perfectly.
+
+The probe was `window.PDA_storage` alone, written on the reasoning that it is
+"injected as a bare global like `PDA_httpGet`". But **Torn PDA's own test
+script probes `typeof PDA_storage === "undefined"`, not `window.PDA_storage`** —
+a strong hint it is a scoped binding in whatever wrapper the app builds around
+a userscript. This script's IIFE would reach that by closure while a window
+lookup found nothing, which is exactly the reported symptom.
+
+`pdaStorageRaw()` now tries the bare identifier first and falls back to window.
+`typeof x` on an undeclared identifier is the one reference form that does *not*
+throw, which is what makes this safe at module scope — where a `ReferenceError`
+takes the entire HUD off the screen, as v1.73.0 had to fix.
+
+Verified end to end: a store reachable **only** as a bare identifier is now
+adopted as the backend and written to natively. Reverting the fix fails three
+assertions.
+
+**The scan reports both probes separately** — `bare identifier: …,
+window.PDA_storage: …`. A report that says only "ABSENT" cannot tell "this build
+has no native storage" from "we looked in the wrong place", and the second is
+what was wrong. `test/pda-storage-probe.test.js` models both routes through the
+harness's new `opts.pdaStorageBare`.
+
+**The other possibility is simply an old app.** Torn PDA **v3.15.0** (8 Aug) is
+the release noting *"new native storage for script developers"*, so a build
+older than that genuinely has nothing to find. The next scan distinguishes the
+two: a bare identifier reading `object` means it was there the whole time and
+the probe was the problem.
+
 ## 1.74.0
 
 **The v1.72.0 recovery is confirmed.** From the scan:

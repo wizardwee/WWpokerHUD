@@ -253,6 +253,13 @@ function load(opts = {}) {
         due.forEach((fn) => { try { fn(); } catch (e) { /* surfaced by assertions */ } });
       }
     },
+    // opts.pdaStorageBare: the SAME stand-in, but reachable only as a bare
+    // global rather than as a window property. Torn PDA's own test script
+    // probes `typeof PDA_storage`, not window.PDA_storage, so it may be a
+    // scoped binding in the wrapper the app builds around a userscript — in
+    // which case a window lookup finds nothing and the script reaches it by
+    // closure. That distinction is invisible unless a test can model both.
+    PDA_storage: opts.pdaStorageBare,
     fetch: () => Promise.reject(new Error('network disabled in harness')),
     // Real browsers/webviews always have these; Node's own vm sandbox does
     // not inherit them from the outer process, unlike the rest of Node's

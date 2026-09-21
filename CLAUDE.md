@@ -715,13 +715,34 @@ is right GIVEN the docs. Whether the API behaves as documented on the device is
 what the deep scan's `PDA_storage:` block is for — same rule as any selector
 here.
 
-**ANSWERED, and the answer is no (scan, v1.73.0):** `PDA_storage: ABSENT
-(typeof undefined)` on this user's Torn PDA build, with `isPDA: true` and the
-flutter bridge present. So the native backend never engages for them and the
-sharded `localStorage` path is what actually runs. The code stays — the API is
-documented and later app builds may inject it, and the probe reports it the
-moment they do — but **nothing here should be reasoned about as if the native
-store were in play.** The one live figure that matters is `storage: 2.9 MB of
+**Read it TWO ways, and the bare identifier first (v1.75.0).** A scan reported
+`PDA_storage: ABSENT` on a device where `PDA_httpGet` works perfectly, and the
+probe was `window.PDA_storage` alone — written on the reasoning that it is
+"injected as a bare global like PDA_httpGet".
+
+**Torn PDA's own test script probes `typeof PDA_storage === "undefined"`, not
+`window.PDA_storage`.** That is a strong hint it may be a scoped binding in
+whatever wrapper the app builds around a userscript, which our IIFE would reach
+by closure while a window lookup found nothing — exactly the reported symptom.
+`pdaStorageRaw()` now tries the bare identifier and falls back to window.
+
+`typeof x` on an undeclared identifier is the one reference form that does NOT
+throw, which is what makes this safe at module scope where a `ReferenceError`
+means the whole HUD fails to load (see v1.73.0 for how that actually plays out).
+
+**The scan reports BOTH probes separately** — `bare identifier: …,
+window.PDA_storage: …` — because a report that says only "ABSENT" cannot tell
+"this build has no native storage" from "we looked in the wrong place", and the
+second is what was wrong. `test/pda-storage-probe.test.js` models both via the
+harness's `opts.pdaStorageBare`.
+
+**The other possibility is simply an old app.** Torn PDA **v3.15.0** (8 Aug)
+is the release noting "new native storage for script developers", so a build
+older than that genuinely has nothing to find. The next scan distinguishes
+them: a bare identifier reading `object` means it was there all along.
+
+Until one of those is confirmed, **nothing here should be reasoned about as if
+the native store were in play** — the live figure is `storage: 2.9 MB of
 ~5.0 MB (58%) backend: localStorage`.
 
 ### `test/run.js` fails a file that exits without reporting

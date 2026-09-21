@@ -31,7 +31,8 @@ const FULL = {
   t.eq('no PDA_storage global -> pdaStorage() is null', T.pdaStorage(), null);
   const lines = T.pdaStorageScanLines().join('\n');
   t.ok('scan says ABSENT', /PDA_storage: ABSENT/.test(lines));
-  t.ok('scan reports the typeof so a report can be read literally', /typeof undefined/.test(lines));
+  t.ok('scan reports BOTH probes so a report can be read literally',
+    /bare identifier: undefined, window\.PDA_storage: undefined/.test(lines));
   t.ok('no method line when there is no object at all', !/methods:/.test(lines));
   t.ok('no usage line when there is nothing to ask', !/usage\(\)/.test(lines));
 }
@@ -122,5 +123,42 @@ const FULL = {
     t.eq('absent PDA_storage resolves null', await T.probePdaStorageUsage(), null);
   }
 
-  process.exit(t.report());
+  // --- It must be found as a BARE IDENTIFIER, not only on window -------------
+//
+// The original probe read window.PDA_storage alone, on the reasoning that it
+// is "injected as a bare global like PDA_httpGet". A live scan then reported
+// ABSENT on a device where the HTTP helpers work perfectly.
+//
+// Torn PDA's own test script probes `typeof PDA_storage === "undefined"`, NOT
+// window.PDA_storage — a strong hint it may be a scoped binding in whatever
+// wrapper the app builds around a userscript. Our IIFE would reach that by
+// closure while a window lookup found nothing, which is exactly the symptom.
+
+{
+  const T = load({ pdaStorageBare: FULL });
+  t.ok('a store reachable only as a bare identifier is found', T.pdaStorage() !== null);
+  t.ok('and pdaStorageRaw hands it back', T.pdaStorageRaw() === FULL);
+  const lines = T.pdaStorageScanLines().join('\n');
+  t.ok('the scan says PRESENT', /PDA_storage: PRESENT\b/.test(lines));
+  t.ok('and names WHICH probe found it, so the next report settles it',
+    /bare identifier: object, window\.PDA_storage: undefined/.test(lines));
+}
+
+{
+  // Still found the old way, for an app build that does put it on window.
+  const T = load({ pdaStorage: FULL });
+  t.ok('a window property is still found', T.pdaStorage() !== null);
+  t.ok('and the scan says so',
+    /bare identifier: undefined, window\.PDA_storage: object/.test(T.pdaStorageScanLines().join('\n')));
+}
+
+{
+  // Neither: the honest ABSENT, with both probes shown.
+  const T = load();
+  t.eq('neither route finds anything', T.pdaStorage(), null);
+  t.ok('and both are reported',
+    /ABSENT.*bare identifier: undefined, window\.PDA_storage: undefined/.test(T.pdaStorageScanLines().join('\n')));
+}
+
+process.exit(t.report());
 })();
