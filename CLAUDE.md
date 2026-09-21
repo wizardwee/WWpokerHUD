@@ -713,7 +713,16 @@ script at load, and nothing ran at all. The comment on the call says so.
 drives a stand-in implementing the documented contract, so it proves the code
 is right GIVEN the docs. Whether the API behaves as documented on the device is
 what the deep scan's `PDA_storage:` block is for — same rule as any selector
-here. **It still needs one report back.**
+here.
+
+**ANSWERED, and the answer is no (scan, v1.73.0):** `PDA_storage: ABSENT
+(typeof undefined)` on this user's Torn PDA build, with `isPDA: true` and the
+flutter bridge present. So the native backend never engages for them and the
+sharded `localStorage` path is what actually runs. The code stays — the API is
+documented and later app builds may inject it, and the probe reports it the
+moment they do — but **nothing here should be reasoned about as if the native
+store were in play.** The one live figure that matters is `storage: 2.9 MB of
+~5.0 MB (58%) backend: localStorage`.
 
 ### `test/run.js` fails a file that exits without reporting
 
@@ -2180,6 +2189,55 @@ remains unconfirmed is only the BADGE**: no scan has yet been taken at a table
 where two seated players actually share a faction or a marriage, so
 `affiliationFlags` matching has not been seen to fire. The field names — the
 part that was actually in doubt — are no longer a guess.
+
+## Hero's seat is not in a `playerPositioner` (v1.74.0)
+
+`seatRingXids()` prefers Torn's own positioner index. A live scan showed **8
+positioners against 9 seated players**, and the ring listed the 8 opponents
+with hero absent — Torn lays your own seat out separately, below the felt
+beside your cards.
+
+`isHeroNextToAct()` walks that ring looking for hero. With hero structurally
+absent the loop completes, finds nothing, and returns a confident **`false`** —
+so "you are next to act" could never be true and the cue that fires just before
+your turn was dead. **Silent, because `false` is also the correct answer almost
+all of the time.**
+
+The indexed ring is now returned only when it can contain a seated hero;
+otherwise it falls through to the geometric ring (built from `seatEls()`, which
+does include hero), and returns `null` if that is unreadable so the caller stays
+quiet rather than acting on a wrong answer.
+
+`seatRotationFromDom` — the position-label path — was never affected: it walks
+`seatEls()` directly. Only the indexed shortcut had the gap.
+
+**The deep scan now prints whether hero is in the ring**, rather than leaving it
+to be inferred by counting XIDs. That is the only way this gets confirmed on a
+device nobody here can see, and it is how the bug was found in the first place.
+`test/turn-cue.test.js` scans the source for the guard, because
+`SELECTORS.seatPositioner` is an attribute selector the harness's
+class-matching document deliberately refuses.
+
+## Torn's API returns text HTML-ESCAPED (v1.74.0)
+
+From the same scan: `factionName="Dexter&#039;s Laboratory"` sitting in the
+affiliation cache — which is what the badge tooltip and the tendency report
+would have printed verbatim.
+
+`decodeApiText` handles it at the **parse boundary**, so nothing downstream has
+to remember. Decoded by hand rather than through an element's `innerHTML`: this
+runs from a fetch handler that may fire before any DOM the HUD owns exists, and
+round-tripping API text through `innerHTML` to "decode" it is the shape of an
+injection bug even where the output is escaped later.
+
+**`&amp;` resolves LAST.** Resolving it first turns `&amp;#039;` into an
+apostrophe — decoding text that was never an entity. One pass, no re-entry, and
+the test pins it by mutation. Numeric forms are bounded so a stray `&#1114113;`
+cannot throw out of a fetch handler.
+
+**Apply it to any other API string this file starts reading.** Faction name is
+the only one read today; `spouse_name`, `faction_tag` and the rest carry the
+same escaping.
 
 ## Next task
 

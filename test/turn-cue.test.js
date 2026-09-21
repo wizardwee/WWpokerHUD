@@ -46,4 +46,50 @@ t.eq('playTurnEscalationChime returns false rather than throwing with no AudioCo
 
 t.eq('escalation fires at 10 seconds', T.TURN_ESCALATE_MS, 10000);
 
+// --- The ring isHeroNextToAct walks must be able to CONTAIN hero ------------
+//
+// A live scan showed 8 `playerPositioner` elements against 9 seated players,
+// and the ring listed the 8 opponents with hero absent — Torn lays your own
+// seat out separately, below the felt beside your cards.
+//
+// isHeroNextToAct walks that ring looking for hero. With hero structurally
+// absent the loop completes, finds nothing, and returns a confident `false`,
+// so "you are next to act" could NEVER be true. Silent, because `false` is
+// also the correct answer almost all of the time.
+//
+// Driving this through the DOM is not possible here: SELECTORS.seatPositioner
+// is an attribute selector and the harness's class-matching document refuses
+// anything it cannot match exactly, deliberately — a stub that matches the
+// wrong element is how earlier harnesses in this repo produced false passes.
+// So this is a source scan for the guard, and the LIVE verification is the
+// deep scan, which now prints whether hero is in the ring rather than leaving
+// it to be inferred from counting XIDs.
+
+{
+  const fs = require('fs');
+  const { SCRIPT_PATH } = require('./harness');
+  const src = fs.readFileSync(SCRIPT_PATH, 'utf8');
+
+  const fn = src.slice(src.indexOf('function seatRingXids()'));
+  const body = fn.slice(0, fn.indexOf('\n  }') + 4);
+
+  t.ok('seatRingXids returns the indexed ring only when it can contain hero',
+    /heroUnresolved\(\)\s*\|\|\s*ring\.indexOf\(heroXid\)\s*!==\s*-1/.test(body));
+  t.ok('and falls through to the geometric ring otherwise',
+    /seatRotationFromDom/.test(body));
+  t.ok('the guard sits on the early return, not after it',
+    body.indexOf('ring.indexOf(heroXid)') < body.indexOf('seatRotationFromDom'));
+
+  // Guard against the scan matching nothing — the failure mode a literal
+  // source test is most prone to.
+  t.ok('the scan actually found the function', body.indexOf('playerPositioner') !== -1);
+  t.ok('and isHeroNextToAct is still the consumer',
+    /function isHeroNextToAct\(\)[\s\S]{0,600}seatRingXids\(\)/.test(src));
+
+  // The deep scan must say whether hero is in the ring, since that is the only
+  // way this gets confirmed on a device nobody here can see.
+  t.ok('the deep scan reports hero ring membership',
+    /hero\s*\n?\s*\+\s*\(heroUnresolved|ABSENT — isHeroNextToAct cannot fire/.test(src));
+}
+
 process.exit(t.report());

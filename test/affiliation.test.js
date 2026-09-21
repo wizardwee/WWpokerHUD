@@ -179,4 +179,39 @@ const t = runner('affiliation');
     !!T.STORE.players.A && !!T.STORE.players.B && !!T.STORE.players.C);
 }
 
+// --- Torn returns faction names HTML-ESCAPED ---------------------------------
+//
+// From a live scan's affiliation cache:
+//   1691090 -> factionName="Dexter&#039;s Laboratory"
+// which is exactly what the badge tooltip and the tendency report would have
+// printed. Decoded at the PARSE boundary so nothing downstream has to remember.
+
+{
+  const T = load();
+  const eq = (name, a, b) => t.eq(name, a, b);
+
+  eq('a numeric entity decodes', T.decodeApiText('Dexter&#039;s Laboratory'), "Dexter's Laboratory");
+  eq('plain text is untouched', T.decodeApiText('Just Fer Khaos'), 'Just Fer Khaos');
+  eq('named entities decode', T.decodeApiText('Tom &amp; Jerry'), 'Tom & Jerry');
+  eq('angle brackets decode', T.decodeApiText('&lt;b&gt;'), '<b>');
+  eq('empty is empty', T.decodeApiText(''), '');
+  eq('null does not throw', T.decodeApiText(null), '');
+
+  // &amp; resolves LAST, so a double-escaped string decodes exactly one level.
+  // Resolving it first would turn "&amp;#039;" into an apostrophe — decoding
+  // text that was never an entity.
+  eq('one pass only, no re-entry', T.decodeApiText('&amp;#039;'), '&#039;');
+
+  // A stray codepoint must not throw out of a fetch handler.
+  eq('an out-of-range codepoint is left alone', T.decodeApiText('&#1114113;'), '&#1114113;');
+
+  // Through the real parser, which is where it actually matters.
+  const parsed = T.parseAffiliationProfile({
+    faction: { faction_id: 28349, faction_name: 'Dexter&#039;s Laboratory' },
+    married: { spouse_id: 1726408 },
+  });
+  eq('the parser decodes the name it stores', parsed.factionName, "Dexter's Laboratory");
+  eq('and leaves the ids alone', parsed.factionId, 28349);
+}
+
 process.exit(t.report());

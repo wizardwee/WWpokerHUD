@@ -9,6 +9,77 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.74.0
+
+**The v1.72.0 recovery is confirmed.** From the scan:
+
+```
+lastReclaim: recovered 1138 players, 475 hands, 0 ledger rows
+counts: 1192 players, 500 hands, 6759 ledger rows
+legacy blob: none
+storage: 2.9 MB of ~5.0 MB (58%)  backend: localStorage
+lastPrune: dropped 138 (thin 138, stale 0, lru 0), kept 1052
+```
+
+Everything back, the stranded blob reclaimed and removed, writes working. The
+138 the prune dropped were all *thin* (under 10 hands and unseen 30 days) —
+the rule doing its job, not the failure. `0 ledger rows` recovered means the
+shards already held at least as many as the blob, consistent with nothing lost
+there.
+
+Two real bugs that the scan then turned up, neither of which would ever have
+been reported as a symptom.
+
+**"You are next to act" could never fire.** `seatRingXids()` prefers Torn's own
+positioner index, and the scan showed **8 `playerPositioner` elements against 9
+seated players** — the ring listing the 8 opponents with hero absent. Torn lays
+your own seat out separately, below the felt beside your cards.
+
+`isHeroNextToAct()` walks that ring looking for hero. With hero structurally
+absent the loop completes, finds nothing, and returns a confident **`false`** —
+so the cue that fires just before your turn was dead. It stayed invisible
+because `false` is also the correct answer almost all of the time.
+
+The indexed ring is now returned only when it can contain a seated hero;
+otherwise it falls through to the geometric ring (built from `seatEls()`, which
+does include hero), and to `null` if that is unreadable so the caller stays
+quiet rather than acting on a wrong answer. `seatRotationFromDom` — the
+position-label path — was never affected, since it walks `seatEls()` directly.
+Only the indexed shortcut had the gap.
+
+**Torn's API returns text HTML-escaped.** From the same scan:
+`factionName="Dexter&#039;s Laboratory"` sitting in the affiliation cache,
+which is exactly what the badge tooltip and the tendency report would have
+printed. `decodeApiText` handles it at the **parse boundary**, so nothing
+downstream has to remember.
+
+Decoded by hand rather than through an element's `innerHTML`: this runs from a
+fetch handler that may fire before any DOM the HUD owns exists, and
+round-tripping API text through `innerHTML` to "decode" it is the shape of an
+injection bug even where the output is escaped later. **`&amp;` resolves last**
+— resolving it first turns `&amp;#039;` into an apostrophe, decoding text that
+was never an entity — and numeric forms are bounded so a stray `&#1114113;`
+cannot throw out of a fetch handler. Both pinned by mutation.
+
+**`PDA_storage: ABSENT (typeof undefined)`** on this app build, with
+`isPDA: true` and the flutter bridge present. So the native backend from
+v1.70.0 never engages here and sharded `localStorage` is what actually runs.
+The code stays — the API is documented and a later app build may inject it, and
+the probe reports it the moment that happens — but nothing should be reasoned
+about as if the native store were in play.
+
+**The deep scan now prints whether hero is in the seat ring**, rather than
+leaving it to be inferred by counting XIDs. That is how this was found, and the
+only way it gets confirmed on a device nobody working on this can see.
+`test/turn-cue.test.js` scans the source for the guard, because
+`SELECTORS.seatPositioner` is an attribute selector the harness's
+class-matching document deliberately refuses to match.
+
+**Still outstanding, and not repairable in code:** `STORE.hero` reads 17,962
+hands against `bbHands` 18,608. v1.71.0 stopped that gap growing, but the 646
+already banked are historical and stay — so the bb/100 figure reads roughly
+3.5% pessimistic until enough new hands dilute it.
+
 ## 1.73.0
 
 **Fix v1.72.0 taking the whole HUD off the screen.** Reported as "the whole app

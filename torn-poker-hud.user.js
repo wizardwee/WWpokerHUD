@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.73.0
+// @version      1.74.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,33 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.74.0 - Two bugs a live scan turned up, and the recovery is confirmed.
+ *            - THE v1.72.0 RECOVERY WORKED: 1,138 players and 475 hands read
+ *              back out of the stranded blob, store at 1,192 players / 500
+ *              hands / 2.9 MB, legacy blob gone, saves working again.
+ *            - "You are next to act" could NEVER fire. seatRingXids prefers
+ *              Torn's positioner index, and the scan showed 8 positioners
+ *              against 9 seated players with hero absent — Torn lays your own
+ *              seat out separately, below the felt. isHeroNextToAct walks that
+ *              ring looking for hero, never finds them, and returns a
+ *              confident false. Silent, because false is also the right answer
+ *              almost all of the time. The indexed ring is now used only when
+ *              it can contain a seated hero, else the geometric ring (which
+ *              includes hero), else null so the caller stays quiet.
+ *            - Torn's API returns text HTML-ESCAPED. The scan caught
+ *              factionName="Dexter&#039;s Laboratory" in the cache, which is
+ *              what the badge tooltip and the report would have printed.
+ *              decodeApiText handles it at the parse boundary. &amp; resolves
+ *              LAST, or "&amp;#039;" decodes to an apostrophe — text that was
+ *              never an entity.
+ *            - PDA_storage: ABSENT on this app build, so the native backend
+ *              never engages and sharded localStorage is what runs. The code
+ *              stays and the probe will report it if a later build injects it.
+ *            - The deep scan now says whether hero is IN the seat ring rather
+ *              than leaving it to be inferred by counting XIDs. That is how
+ *              this was found, and the only way it gets confirmed on a device
+ *              nobody working on this can see.
  *
  * 1.73.0 - Fix v1.72.0 taking the whole HUD off the screen.
  *            - v1.72.0's reclaimLegacyBlob reaches mergeHands ->
@@ -82,40 +109,6 @@
  *              Settings was opened, on the one panel someone in trouble goes
  *              to. No test rendered that panel. One does now.
  *
- * 1.71.0 - Unblock a store that is too full to migrate, and stop counting
- *          hands you only watched.
- *            - Reported live: "HUD storage is full - nothing is being saved"
- *              at 2.9 MB, 58% of the estimate. Cause: during the upgrade the
- *              old single blob and the shards replacing it hold the SAME data
- *              and are both in storage for the length of that write, so a
- *              2.9 MB store needs 5.8 MB to migrate against ~5 MB shared with
- *              torn.com. The store most in need of the split was exactly the
- *              one that could not complete it.
- *            - On a refusal while the migration is pending, the blob is now
- *              dropped and the write retried once. Safe only here: loadStore
- *              already parsed it into memory, and it is the largest thing that
- *              can be freed to let its own replacement land. After a refusal,
- *              never pre-emptively.
- *            - bbHands could exceed hero.hands, which is impossible by
- *              construction (18,584 against 17,940 in the scan). The whole
- *              block was gated on heroXid being SET rather than hero being in
- *              the hand, so 644 hands hero merely watched inflated the bb/100
- *              denominator and filed 644 zero rows into the ledger, evicting
- *              real ones. The money was always right; the counts were not.
- *            - The gate is "dealt in OR money moved". Dealt-in alone misses a
- *              hand joined mid-way; money alone misses a hand dealt in and
- *              folded for nothing, which is a real played hand.
- *            - The Storage panel said "History is capped at 200 hands"
- *              directly under "500 hands in history". Both numbers were right
- *              and the sentence was wrong - notable hands are kept past the
- *              limit up to HISTORY_PINNED_CEILING. It now says so, and breaks
- *              the total down into players / history / P/L ledger so a full
- *              store shows you where the space went.
- *            - Torn's profile API field names for the affiliation badges are
- *              CONFIRMED by the same scan (faction_id, faction_name,
- *              married.spouse_id, five players resolved). Unverified since
- *              v1.8.0.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -177,7 +170,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.73.0';
+  const HUD_VERSION = '1.74.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -2238,6 +2231,36 @@
   // report back what actually came back. parseAffiliationProfile fails
   // defensively (returns nulls) on anything it doesn't recognise rather than
   // throwing, so a wrong guess here costs a missing badge, not a crash.
+  // Torn's API returns faction names HTML-ESCAPED. A live scan showed
+  // factionName="Dexter&#039;s Laboratory" sitting in the cache, which is what
+  // the badge tooltip and the tendency report would print verbatim.
+  //
+  // Decoded by hand rather than through an element's innerHTML, for two
+  // reasons: this runs from a fetch handler that may fire before any DOM the
+  // HUD owns exists, and round-tripping API text through innerHTML to "decode"
+  // it is the shape of an injection bug even where the output is later
+  // escaped. Only the five entities Torn's escaping actually produces, plus
+  // numeric forms, and it is applied at the PARSE boundary so nothing
+  // downstream has to remember.
+  //
+  // &amp; is resolved LAST, so "&amp;#039;" decodes to "&#039;" and not to an
+  // apostrophe — one pass, no re-entry.
+  function decodeApiText(text) {
+    const str = String(text == null ? '' : text);
+    if (str.indexOf('&') === -1) return str; // the overwhelmingly common case
+    return str
+      .replace(/&#(\d+);/g, (m, code) => {
+        const n = parseInt(code, 10);
+        // Bounded: a stray &#1114112; must not throw out of a fetch handler.
+        return (n > 0 && n <= 0x10FFFF) ? String.fromCodePoint(n) : m;
+      })
+      .replace(/&quot;/g, '"')
+      .replace(/&apos;/g, "'")
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&amp;/g, '&');
+  }
+
   function parseAffiliationProfile(json) {
     if (!json || json.error) return null;
     // THE SAME DANGEROUS DEFAULT parseTargetStatus carried, one function over,
@@ -2265,7 +2288,7 @@
     const married = json.married || {};
     return {
       factionId: faction.faction_id || 0,
-      factionName: faction.faction_name || '',
+      factionName: decodeApiText(faction.faction_name || ''),
       spouseXid: married.spouse_id || 0,
     };
   }
@@ -6207,7 +6230,24 @@
     });
     if (indexed.length >= 2) {
       indexed.sort((a, b) => a.slot - b.slot);
-      return indexed.map((e) => e.xid);
+      const ring = indexed.map((e) => e.xid);
+      // HERO'S SEAT IS NOT INSIDE A playerPositioner ON THIS LAYOUT.
+      //
+      // A live scan showed 8 positioners against 9 seated players, and the
+      // ring listed the 8 opponents with hero absent — Torn lays your own seat
+      // out separately, below the felt, beside your cards.
+      //
+      // That matters because isHeroNextToAct walks this ring looking for hero.
+      // With hero structurally absent the loop completes, finds nothing, and
+      // returns a confident `false` — so "you are next to act" could NEVER be
+      // true and the cue that fires just before your turn was dead. Silent,
+      // because `false` is also the correct answer almost all of the time.
+      //
+      // So a ring that cannot contain a seated hero is not usable HERE. Fall
+      // through to the geometric ring, which is built from seatEls() and does
+      // include hero; if that is unreadable, return null so the caller stays
+      // quiet rather than acting on a wrong answer.
+      if (heroUnresolved() || ring.indexOf(heroXid) !== -1 || !heroSeatEl()) return ring;
     }
     const geo = currentHand ? seatRotationFromDom(currentHand) : null;
     return geo && geo.length >= 2 ? geo : null;
@@ -13896,7 +13936,19 @@
       + (btns.length ? ' -> ' + btns.map((b) => JSON.stringify(squish(b.textContent, 20))).join(' ') : '')
       + (btns.length ? '' : '  <-- run this scan again ON YOUR TURN'));
     L.push('activeSeat: ' + (activeSeatXid() || 'NO MATCH for ' + SELECTORS.seatActive));
-    L.push('seatRing: ' + ((seatRingXids() || []).join(',') || 'UNREADABLE'));
+    // Whether hero is IN the ring is the load-bearing part, not the ring
+    // itself: isHeroNextToAct walks it looking for hero, so a ring that omits
+    // them returns a confident `false` forever and the "you are next" cue is
+    // dead. A live scan showed 8 positioners against 9 seats with hero absent,
+    // which is how that was found — so the scan now says so outright.
+    (() => {
+      const ring = seatRingXids() || [];
+      const inRing = !heroUnresolved() && ring.indexOf(heroXid) !== -1;
+      L.push('seatRing: ' + (ring.join(',') || 'UNREADABLE')
+        + '  (' + ring.length + ' seats, hero '
+        + (heroUnresolved() ? 'UNRESOLVED' : (inRing ? 'in ring' : 'ABSENT — isHeroNextToAct cannot fire'))
+        + ')');
+    })();
     L.push('isHeroTurn: ' + isHeroTurn() + '  isHeroNextToAct: ' + isHeroNextToAct());
     const stacks = readAllStacks();
     L.push('stacks read: ' + Object.keys(stacks).length + ' -> '
@@ -14399,6 +14451,7 @@
       opponentRangeProxy,
       equityBasisLabel,
       parseAffiliationProfile,
+      decodeApiText,
       repairAffiliationCache,
       handNotability,
       handHadNoAggression,
