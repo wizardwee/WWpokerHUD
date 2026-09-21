@@ -289,6 +289,14 @@ function hand(o) {
   t.eq('a hand hero paid into counts toward the denominator', T.STORE.hero.bbHands, 1);
   t.eq('and is filed', T.STORE.plLedger.length, 1);
   t.eq('with the real loss', (T.STORE.plLedger[0] || {}).d, -5000000);
+
+  // This block used to stop at the line above, and that omission WAS the bug
+  // that survived v1.71.0: hero.hands stayed on the narrow dealtInXids test
+  // while bbHands moved to the wide one, so this exact hand produced bbHands 1
+  // against hands 0 — the invariant asserted twelve lines further down,
+  // violated by its own neighbour, because nothing here looked at hands.
+  t.eq('and the SAME hand counts toward hero.hands', T.STORE.hero.hands, 1);
+  t.ok('so bbHands does not exceed hands', T.STORE.hero.bbHands <= T.STORE.hero.hands);
 }
 
 {
@@ -307,6 +315,36 @@ function hand(o) {
   t.eq('hands counts only what hero was in', T.STORE.hero.hands, 8);
   t.ok('bbHands can never exceed hands', T.STORE.hero.bbHands <= T.STORE.hero.hands);
   t.eq('and here they agree exactly, every hand being priced', T.STORE.hero.bbHands, 8);
+}
+
+{
+  // The same invariant over a MIXED field, which is what the live store
+  // actually is: hero fully in, hero joined mid-way (money but no dealt-in
+  // record), and hero not in the hand at all. The loop above cannot catch a
+  // one-sided predicate because every hand in it is all-or-nothing on both
+  // tests at once — the two only disagree on the middle case.
+  const T = fresh('HERO');
+  T.lastSeenBB = 1000000;
+  let expected = 0;
+  for (let i = 0; i < 15; i += 1) {
+    const mode = i % 3; // 0 = fully in, 1 = joined mid-way, 2 = not in it
+    if (mode !== 2) expected += 1;
+    T.applyHandResults(hand({
+      gameId: 'm' + i,
+      bbAmount: 1000000,
+      contributions: mode === 2 ? { A: 1000000, B: 1000000 } : { HERO: 1000000, A: 1000000 },
+      dealtInXids: new Set(mode === 0 ? ['HERO', 'A'] : ['A', 'B']),
+      winners: [{ xid: 'A', amount: 2000000 }],
+    }));
+  }
+  t.eq('hands counts every hand hero took part in, however it was seen',
+    T.STORE.hero.hands, expected);
+  t.eq('and the priced denominator matches it exactly',
+    T.STORE.hero.bbHands, expected);
+  t.ok('bbHands never exceeds hands across a mixed field',
+    T.STORE.hero.bbHands <= T.STORE.hero.hands);
+  t.eq('the ledger files one row per hand hero took part in',
+    T.STORE.plLedger.length, expected);
 }
 
 process.exit(t.report());

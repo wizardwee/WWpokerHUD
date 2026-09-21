@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.77.0
+// @version      1.78.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,36 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.78.0 - bbHands could still exceed your hand count, and the scan said so.
+ *            - Your own scan flagged it: 18,065 hands against 18,710 bbHands.
+ *              bbHands is the SUBSET of your hands whose blind level could be
+ *              read, so it can never be the larger number.
+ *            - v1.71.0 fixed this on one side only. It moved bbHands onto a
+ *              wider "did hero take part" test (dealt in, OR won, OR paid in)
+ *              and left hero.hands on the narrow dealt-in test. Two tests for
+ *              one question, so they kept disagreeing — on every hand you
+ *              joined mid-way, which counts toward the denominator and not the
+ *              hand count.
+ *            - Now ONE predicate, computed once, used by hero.hands, bbHands
+ *              and the ledger alike. bbHands <= hands is an invariant again.
+ *            - Session hands deliberately stay on the narrow test: session
+ *              VPIP/PFR read a play code that only exists for a hand you were
+ *              dealt into, so counting a money-only hand there would dilute a
+ *              rate whose numerator cannot move.
+ *            - The existing "bbHands can never exceed hands" test was VACUOUS
+ *              — every hand in it was all-or-nothing on both tests at once, so
+ *              the two could not disagree. The block twelve lines above it
+ *              violated the invariant and never looked at hands. Now pinned
+ *              over a mixed field, and mutation shows the old code producing
+ *              hands 5 against bbHands 10.
+ *            - The existing excess is NOT repairable: the per-hand blind is
+ *              gone after settlement. It is frozen from here, and the scan
+ *              now says so rather than leaving it to be re-diagnosed.
+ *            - The scan's heroRecord marker is proportional now. A 5-hand gap
+ *              on 18,070 is hero's identity binding a beat after the seats
+ *              render, not the v1.6.0 split identity it was written for — and
+ *              a marker that shouts forever trains you to ignore markers.
  *
  * 1.77.0 - Settings, rearranged — and calibration out from under Coach.
  *            - Reported: "the calibration should not be hidden under coach
@@ -79,30 +109,6 @@
  *              `n <= PDA_WRITE_CHUNK` is VACUOUS and passes with the constant
  *              raised to 100000. Pin it against a literal ceiling.
  *
- * 1.75.0 - Look for PDA_storage where Torn PDA actually puts it.
- *            - You asked for the store to live on PDA rather than in the
- *              browser. The code for that shipped in v1.70.0 and then reported
- *              PDA_storage: ABSENT on a device where PDA_httpGet works fine.
- *            - The probe was window.PDA_storage alone, written on the
- *              reasoning that it is "injected as a bare global like
- *              PDA_httpGet". But Torn PDA's OWN test script probes
- *              `typeof PDA_storage === "undefined"`, not window.PDA_storage —
- *              a strong hint it is a scoped binding in the wrapper the app
- *              builds around a userscript, which this IIFE reaches by closure
- *              while a window lookup finds nothing. Exactly the symptom.
- *            - pdaStorageRaw() now tries the bare identifier first and falls
- *              back to window. `typeof x` on an undeclared name is the one
- *              reference form that does not throw, which is what makes this
- *              safe at module scope — where a ReferenceError takes the whole
- *              HUD off the screen, as v1.72.0 demonstrated.
- *            - The scan reports BOTH probes separately now. "ABSENT" alone
- *              cannot tell "this build has no native storage" from "we looked
- *              in the wrong place", and the second is what was wrong.
- *            - The other possibility is just an old app: Torn PDA v3.15.0
- *              (8 Aug) is the release noting native storage for script
- *              developers. A bare identifier reading `object` in the next scan
- *              means it was there all along.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -164,7 +170,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.77.0';
+  const HUD_VERSION = '1.78.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -5049,7 +5055,35 @@
       }
     });
     const heroDealtIn = !!(heroXid && hand.dealtInXids.has(heroXid));
-    if (heroDealtIn) STORE.hero.hands += 1;
+
+    // Did hero take part in this hand at all? ONE predicate, used by
+    // hero.hands here and by bbHands and the ledger further down.
+    //
+    // v1.71.0 fixed bbHands counting hands hero merely watched, but it fixed
+    // only that side: bbHands moved to this wider test while hero.hands stayed
+    // on the narrow heroDealtIn. So the two could still disagree, in the one
+    // direction that is nonsense — a denominator of PRICED hands larger than
+    // the hand count it is drawn from. Reported again by the deep scan's own
+    // marker at 18,065 hands against 18,710 bbHands.
+    //
+    // Both halves are needed, and the reasoning is v1.71.0's unchanged:
+    // dealtInXids alone misses a hand joined mid-way, and the money test alone
+    // misses a hand dealt in and folded for nothing — which is a real played
+    // hand and belongs in both counts.
+    //
+    // The !heroUnresolved() guard matches the ledger's, for the same reason:
+    // nothing in contributions/wonByXid is ever keyed by a `name:` pseudo-id,
+    // so this is defensive rather than load-bearing — but an unresolved hero
+    // must never accrue counts, and saying so beats relying on that.
+    const heroInHand = heroDealtIn || (!heroUnresolved()
+      && ((wonByXid[heroXid] || 0) > 0 || (hand.contributions[heroXid] || 0) > 0));
+
+    if (heroInHand) STORE.hero.hands += 1;
+    // Session hands deliberately stay on the NARROW test, and so does the
+    // block below. Session VPIP/PFR are s.vpip / s.hands, and their numerator
+    // reads heroPlayCode — which is only set inside the dealtInXids loop. A
+    // money-only hand would raise the denominator with a numerator that
+    // cannot move, diluting a rate rather than correcting a count.
     touchSession(0, heroDealtIn);
     // Session-level VPIP/PFR/AFq, for the Trends tab — touchSession above has
     // already rolled the session over if a gap fired, so STORE.session is
@@ -5080,20 +5114,14 @@
         const heroWon = wonByXid[heroXid] || 0;
         const heroContributed = hand.contributions[heroXid] || 0;
         const heroDelta = heroWon - heroContributed;
-        // Did hero actually take part? Everything below nets to 0 when they
-        // did not, so the MONEY is right either way — but bbHands and the
-        // ledger are COUNTS, and counting a hand hero merely watched inflates
-        // a denominator and files a meaningless row.
+        // heroInHand is computed ONCE, above, and hero.hands increments on the
+        // same value. Everything here nets to 0 when hero did not take part, so
+        // the MONEY is right either way — but bbHands and the ledger are
+        // COUNTS, and counting a hand hero merely watched inflates a
+        // denominator and files a meaningless row.
         //
-        // Reported from a live table as bbHands (18,584) exceeding hero.hands
-        // (17,940), which is impossible by construction: hero.hands increments
-        // on heroDealtIn, bbHands did not check it at all. 644 hands of pure
-        // denominator, dragging bb/100 ~3.5% toward zero.
-        //
-        // Both halves are needed. dealtInXids alone misses a hand joined
-        // mid-way; the money test alone misses a hand dealt in and folded for
-        // nothing, which is a real played hand and belongs in the rate.
-        const heroInHand = heroDealtIn || heroWon > 0 || heroContributed > 0;
+        // Do NOT re-derive it here. That is exactly how bbHands came to exceed
+        // hero.hands: two tests for one question, fixed on one side only.
         STORE.hero.netChips += heroDelta;
         touchSession(heroDelta, false);
 
@@ -13955,8 +13983,33 @@
       L.push('heroGhost(name:' + (uname || 'UNSET') + '): ' + (ghost
         ? `EXISTS — ${ghost.hands} hands, vpip ${ghost.vpip}, pfr ${ghost.pfr}   <-- SPLIT IDENTITY`
         : 'none'));
+      // The gap this marker exists to catch is the v1.6.0 split identity, where
+      // the ghost held 2,174 hands against the real record's 2,571 — most of
+      // hero's history on the wrong record. A handful of hands is a different
+      // thing entirely: hero's identity binds a beat after the seats render, so
+      // a hand settled in that window lands on the record (dealtInXids is
+      // seat-keyed) and not on STORE.hero. It is bounded by how often you sit
+      // down, not by how much you play.
+      //
+      // So the bar is PROPORTIONAL, with an absolute floor for a small store.
+      // A marker that shouts forever at 5 hands in 18,070 trains you to ignore
+      // markers, which costs the one it was written for.
+      const heroGap = real ? Math.abs(STORE.hero.hands - real.hands) : 0;
+      const heroGapBad = real && heroGap > 2 && heroGap > real.hands * 0.01;
       L.push('STORE.hero: ' + STORE.hero.hands + ' hands, bbHands ' + STORE.hero.bbHands
-        + (real && Math.abs(STORE.hero.hands - real.hands) > 2 ? '   <-- DISAGREES WITH heroRecord' : ''));
+        + (heroGapBad ? '   <-- DISAGREES WITH heroRecord' : '')
+        + (real && heroGap && !heroGapBad
+          ? `   (record +${real.hands - STORE.hero.hands}: settled before identity bound)` : ''));
+      // bbHands must never exceed hands: it is the subset of hero's hands whose
+      // blind level could be read. Any excess is residue from before v1.78.0,
+      // when hero.hands and bbHands tested two different things for the one
+      // question "did hero take part" — and it cannot be repaired, because the
+      // per-hand blind is not recoverable after settlement. It can no longer
+      // GROW: both now increment on the same predicate.
+      if (STORE.hero.bbHands > STORE.hero.hands) {
+        L.push('  bbHands exceeds hands by ' + (STORE.hero.bbHands - STORE.hero.hands)
+          + ' — pre-v1.78.0 residue, frozen, not repairable (drags bb/100 toward zero)');
+      }
     })();
     L.push('');
 

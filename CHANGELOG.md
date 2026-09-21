@@ -9,6 +9,81 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.78.0
+
+**bbHands could still exceed your hand count, and the scan said so.**
+
+From the live scan: `STORE.hero: 18065 hands, bbHands 18710 <-- DISAGREES WITH
+heroRecord`. `bbHands` is the **subset** of hero's hands whose blind level could
+be read — the denominator for bb/100 — so it can never be the larger of the two.
+
+**v1.71.0 fixed this on one side only.** That version moved `bbHands` onto a
+wider test — `heroDealtIn || heroWon > 0 || heroContributed > 0` — and left
+`STORE.hero.hands` on the narrow `heroDealtIn`. Two tests for one question, so
+they kept disagreeing on exactly the case the wide test was added for: a hand
+joined mid-way, where hero has money in the pot but never appears in
+`dealtInXids`. That hand raised the denominator and not the hand count.
+
+`heroInHand` is now computed **once**, above both, and `hero.hands`, `bbHands`
+and the P/L ledger all read it. `bbHands <= hands` is an invariant again.
+
+**Session hands deliberately keep the narrow test.** Session VPIP/PFR are
+`s.vpip / s.hands`, and their numerator reads `heroPlayCode`, which is only set
+inside the `dealtInXids` loop. Counting a money-only hand there would raise a
+denominator whose numerator cannot move — diluting a rate rather than
+correcting a count. The comment at the call site says so, because the two
+predicates sitting three lines apart otherwise reads like an oversight.
+
+**The existing excess is not repairable.** The per-hand blind level is not
+recoverable after settlement — that is the whole reason the conversion happens
+at settlement in the first place. It is frozen from here, and the deep scan now
+prints what it is and why rather than leaving it to be re-diagnosed from
+scratch on every future paste. This repo has paid for that before.
+
+### The test for this invariant was vacuous
+
+`test/pl-ledger.test.js` already asserted "bbHands can never exceed hands". It
+passed throughout, because every hand in its loop was all-or-nothing on both
+predicates at once — hero either fully in (dealt in *and* contributing) or
+fully out. **The two can only disagree on the middle case**, and the loop had
+none.
+
+Worse, the block twelve lines *above* that assertion constructs exactly the
+middle case — money in, no dealt-in record — asserts `bbHands === 1`, and never
+looks at `hands`. Under the old code that same hand produced `hands 0` against
+`bbHands 1`: the invariant violated by its own neighbour, in the same file,
+unnoticed.
+
+Both are fixed: that block now checks `hands` too, and a new mixed-field loop
+cycles fully-in / joined-mid-way / not-in-it. Mutation confirms it — reverting
+the predicate gives `hands 5` against `bbHands 10`.
+
+### The heroRecord marker is proportional now
+
+The scan also flagged `heroRecord: 18070 hands` against `STORE.hero: 18065` — a
+five-hand gap, on a `> 2` threshold.
+
+That marker exists to catch the **v1.6.0 split identity**, where a ghost record
+held 2,174 hands against the real record's 2,571 — most of hero's history filed
+under the wrong key. Five hands is a different thing: hero's identity binds a
+beat after the seats render, so a hand settled inside that window lands on the
+player record (which is seat-keyed) and not on `STORE.hero`. It is bounded by
+how often you sit down, not by how much you play.
+
+The bar is now proportional (1% of hands) with the absolute floor kept for a
+small store, and a small gap prints its cause inline instead. **A marker that
+shouts forever at 5 in 18,070 trains you to ignore markers** — which costs the
+one it was actually written for.
+
+### Not a bug: the escaped faction name
+
+The scan shows `factionName="Dexter&#039;s Laboratory"` in the affiliation
+cache. `decodeApiText` handles this at the parse boundary and has since
+v1.74.0; that entry was cached before the fix and is not re-fetched until its
+`AFFIL_REFRESH_MS` window (24h) expires. It self-heals. No second decode point
+was added — decoding at the parse boundary only, so nothing downstream has to
+remember, is the rule that section states.
+
 ## 1.77.0
 
 **Settings, rearranged — and calibration out from under Coach.**

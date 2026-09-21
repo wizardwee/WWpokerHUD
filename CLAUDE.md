@@ -1973,6 +1973,59 @@ a chip figure cannot be converted afterwards.
 - `fmtBB100` withholds a win rate under 50 hands. Below that it changes sign
   repeatedly and quoting it invites reading noise as a result.
 
+### One predicate for "did hero take part" (v1.78.0)
+
+`hero.hands`, `hero.bbHands` and the P/L ledger all read a single `heroInHand`,
+computed once in `applyHandResults`. **Don't re-derive it at any of the three
+sites.**
+
+v1.71.0 fixed `bbHands` counting hands hero merely watched — but only on that
+side. It moved `bbHands` to the wide test (`heroDealtIn || heroWon > 0 ||
+heroContributed > 0`) and left `hero.hands` on the narrow `heroDealtIn`. Two
+tests for one question, so they disagreed on exactly the case the wide test
+exists for: a hand joined mid-way, money in the pot and no `dealtInXids` entry.
+That hand raised the denominator and not the hand count. Reported by the deep
+scan's own marker at 18,065 hands against 18,710 bbHands.
+
+**`bbHands <= hands` is the invariant.** bbHands is the subset of hero's hands
+whose blind could be read; the only legitimate movement between them is a hand
+with no readable blind, which raises `hands` alone.
+
+**Session hands stay on the NARROW test, and that asymmetry is deliberate.**
+Session VPIP/PFR are `s.vpip / s.hands`, and the numerator reads
+`heroPlayCode`, which is only set inside the `dealtInXids` loop. A money-only
+hand would raise the denominator with a numerator that cannot move — diluting a
+rate instead of correcting a count. The comment at the call site says so, or
+the two predicates three lines apart read as an oversight.
+
+**Existing excess is not repairable, and the scan says so.** The per-hand blind
+is gone after settlement — which is why the conversion happens there at all.
+The scan prints the excess, names it as pre-v1.78.0 residue, and states it can
+no longer grow, so it is not re-diagnosed from scratch on the next paste.
+
+**The test for it was vacuous, and this is the pattern to watch for.** It
+asserted `bbHands <= hands` over a loop where every hand was all-or-nothing on
+*both* predicates at once — so the two could never disagree in it. The block
+twelve lines above constructed the real middle case, asserted `bbHands === 1`,
+and never looked at `hands`: the invariant violated by its own neighbour in the
+same file. **When two code paths answer one question, the test has to include
+the case where they can differ**, or it pins nothing. The mixed field
+(fully-in / joined-mid-way / not-in-it) is what does it; mutation gives
+`hands 5` against `bbHands 10`.
+
+### The heroRecord gap marker is proportional (v1.78.0)
+
+It exists for the v1.6.0 split identity — a ghost holding 2,174 hands against
+the real record's 2,571. A handful of hands is something else entirely: hero's
+identity binds a beat after the seats render, so a hand settled in that window
+lands on the seat-keyed player record and not on `STORE.hero`. It is bounded by
+how often you sit down, not by how much you play, and it is not repairable
+either.
+
+So the bar is 1% of hands with the `> 2` floor kept for a small store, and a
+small gap prints its cause inline. **A marker that shouts forever trains you to
+ignore markers**, which costs the one it was written for.
+
 **Effective stack in bb is a correctness matter, not decoration.** The preflop
 charts are 100bb charts. While depth was unreadable, saying so in a footnote was
 honest; now that `effectiveStack()` works, the coach warns under 40bb and says
