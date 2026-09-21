@@ -9,6 +9,100 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.77.0
+
+**Settings, rearranged — and calibration out from under Coach.**
+
+Reported: *"the calibration should not be hidden under coach tab. Can we
+rearrange all of the settings on this page to be logical?"*
+
+Calibration mode was the last line of the **Coach** section. It is the one
+control in this panel whose entire purpose is to be found by somebody who has
+just been asked for a deep scan — and nobody working on this HUD can see the
+live table, so a pasted-back scan is the only way a selector, a log wording or
+a storage problem ever gets confirmed. Burying it under an unrelated heading
+was the worst possible place for it.
+
+**Thirteen sections, four labelled groups.** In order:
+
+| group | sections |
+|---|---|
+| At the table | Seat labels · Your turn · Fold guard · Coach |
+| Reading the table | Departure watch · Torn API features · Estimated battle stats |
+| Your data | Hand log · P/L ledger · GitHub Gist sync · Storage · Backup & reset |
+| Troubleshooting | Calibration mode |
+
+Calibration gets a sentence saying what a deep scan actually is and what to do
+with it, which it never had.
+
+**Storage sits immediately above Backup again.** `storageSettingsHtml`'s own
+comment says it should — the remedy for every state it can report is "copy a
+backup", and that should be the next thing under your thumb rather than
+something to go looking for. It had drifted to sitting above Hand log, so the
+comment was describing a layout that no longer existed.
+
+**The group labels are deliberately NOT `<h4>`.** Every `<h4>` in this panel
+becomes a collapsible section, so a label written as one would be a section
+containing nothing. `collapseSettingsSections` now stops its walk at a
+`.tph-set-group` as well as at the next heading — without that, the label
+introducing the sections below it is collected into the body of the section
+ABOVE it and disappears whenever that section is closed, which is exactly when
+you need it to find your way around. Pinned by mutation in
+`test/settings-sections.test.js`.
+
+### The storage breakdown was all zeros on the native backend
+
+The deep scan printed `players 0 B · history 0 B · ledger 0 B · core 0 B` for a
+store the same report measured at 3.0 MB.
+
+`storageBreakdown()` was built from the `shardBytes` size map, and that map is
+only ever written by the **localStorage** seam (`shardWrite`/`shardRemove`). On
+`PDA_storage` nothing populates it, so every figure came back 0. The settings
+panel has a zero-total guard and silently rendered nothing; the deep scan does
+not, and printed the zeros to the one place the figure had to be right.
+
+It is now measured from `STORE` on demand — the same values `buildFlushPlan`
+would write, so on localStorage the parts still sum to exactly what is stored.
+One path that works on both backends beats two that can disagree about which is
+live. The cost is a full `JSON.stringify` of the store (~23ms at 900 players),
+which is why it is computed at the point of asking rather than maintained on
+the write path: that path runs up to four times a second, this runs when
+Settings is opened or a scan is taken.
+
+`total` is the sum of the parts and is deliberately **not** the headline figure
+from `storageStats()`. On the native backend that one is real device bytes
+reported by the app, including its own encoding, and during a migration it also
+counts the legacy blob. The line is labelled "Data:" rather than presented as a
+decomposition of the meter.
+
+### The panel was arguing with itself about the limit
+
+It said "the limit above is the real one, raisable in PDA's script settings"
+and, four lines down, "The limit is an estimate; the browser does not report
+the real one here." Both sentences shipped; only one was ever true at a time.
+The second is now printed only when `storageStats().estimated` says so.
+
+### The panel is testable for the first time
+
+The markup moved into `settingsPanelHtml()`. Nothing rendered this panel in a
+test before, which is how v1.72.0's `reclaimReportHtml` shipped calling
+`plural` — a `const` scoped inside another function — and threw a
+`ReferenceError` the instant Settings was opened, on the exact panel somebody
+in trouble goes to.
+
+`test/settings-sections.test.js` asserts the section order as a list, that
+every group label is followed immediately by its heading (a control orphaned
+between the two renders permanently expanded above a run of collapsed ones),
+that every control `wireSettingsPanel` reaches for unconditionally is present,
+and that the calibration toggle is nowhere near Coach. Both new behaviours were
+checked by mutation: reverting the walker's stop condition and reverting
+`storageBreakdown` to the size map each fail it.
+
+One test lesson on the way in: the walker's stand-in DOM needs `nodeType: 1` on
+its nodes, because the walk tests `nodeType` before `tagName`. Without it
+nothing stopped the walk and every assertion in that block passed vacuously —
+caught because the first run failed loudly rather than quietly.
+
 ## 1.76.0
 
 **Stop the native store freezing the page every minute.** Reported immediately

@@ -886,6 +886,76 @@ has a genuinely different lifecycle.
 Leave alone: the numbered section scheme itself (renumbering churns the whole
 file for no behavioural gain), and the single-file structure.
 
+### The Settings panel's ORDER is a feature, and its group labels are not `<h4>` (v1.77.0)
+
+Thirteen collapsible sections on a phone screen. They run in four labelled
+groups — **At the table** (seat labels, your turn, fold guard, coach) ·
+**Reading the table** (departure watch, Torn API, battle stats) · **Your data**
+(hand log, P/L ledger, gist sync, storage, backup & reset) ·
+**Troubleshooting** (calibration mode). `test/settings-sections.test.js` pins
+that list, so a section appended at the bottom out of habit fails the suite
+rather than drifting the panel back to add-order.
+
+**Calibration mode used to be the last line of Coach**, which is the worst
+place in the panel for it: it is the one control whose entire purpose is to be
+found by somebody who has just been asked for a deep scan, and a scan is the
+only way anything on the live table ever gets confirmed here.
+
+**Storage sits immediately above Backup.** `storageSettingsHtml`'s own comment
+says why — the remedy for every state it can report is "copy a backup" — and it
+had drifted to sitting above Hand log, so the comment described a layout that
+no longer existed. If it moves again, move the comment or move it back.
+
+**A group label must not be an `<h4>`.** `collapseSettingsSections` turns every
+`<h4>` into a collapsible section by walking forward to the next heading, so a
+label written as one is a section containing nothing. It is a
+`.tph-set-group` div, and the walk **stops at one** as well as at the next
+heading: otherwise the label introducing the sections below it is collected
+into the body of the section ABOVE it and disappears whenever that section is
+closed — which is exactly when you need it. Same rule for anything else added
+between sections.
+
+**A control between a label and its heading is orphaned** — no section claims
+it, so it renders permanently expanded above a run of collapsed ones. The test
+asserts there is nothing but whitespace there.
+
+**The markup is `settingsPanelHtml()` so a test can read it.** Nothing rendered
+this panel before, which is how `reclaimReportHtml` shipped calling a `const`
+scoped inside another function and threw a `ReferenceError` the instant
+Settings opened (v1.72.0). Building the string is the cheapest form of that
+check and runs every helper spliced through it. The walker itself is driven
+against a linked-list stand-in, because the harness's class-matching document
+has no `nextSibling`/`insertBefore` — and that stand-in needs **`nodeType: 1`**
+on its nodes or the walk never stops and the whole block passes vacuously.
+
+### `storageBreakdown()` measures STORE, not the size map (v1.77.0)
+
+It was built from `shardBytes`, which is only ever written by the
+**localStorage** seam. On the native backend nothing populates it, so every
+figure came back 0 — the settings panel's zero-total guard hid that, and the
+deep scan printed `players 0 B · history 0 B · ledger 0 B · core 0 B` to a user
+whose store the same report measured at 3.0 MB. **One path that works on both
+backends beats two that can disagree about which is live.**
+
+- Measured **on demand**, not maintained on the write path. It costs a full
+  `JSON.stringify` of the store (~23ms at 900 players); the write path runs up
+  to four times a second, this runs when Settings is opened or a scan is taken.
+- It stringifies the same values `buildFlushPlan` would write, so **on
+  localStorage the parts still sum to exactly what is stored** — that assertion
+  in `test/store-shards.test.js` survived unchanged.
+- **`total` is the sum of the parts and is NOT the headline figure.** On the
+  native backend the headline is real device bytes from the app, including its
+  own encoding; during a migration it also counts the legacy blob, which would
+  scale every part by ~2 if this were presented as a decomposition. The line is
+  labelled "Data:" for that reason. Don't rescale it to make it match.
+
+The contradiction beside it, fixed in the same pass: the panel said "the limit
+above is the real one, raisable in PDA's script settings" and four lines down
+"The limit is an estimate; the browser does not report the real one here." The
+second is now gated on `storageStats().estimated`. **A panel that argues with
+itself gets read as a bug in the thing it is describing** — the same lesson the
+history-limit line already carries.
+
 ## The departure watch is mostly guards (v1.50.0)
 
 `noteSeatDepartures` diffs successive seat sweeps, so **every false positive

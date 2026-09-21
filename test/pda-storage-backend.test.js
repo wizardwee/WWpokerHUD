@@ -432,5 +432,44 @@ const flushAsync = (T) => T.flushShardsAsync();
     t.ok('and says so', s.estimated);
   }
 
+  // --- The breakdown works on THIS backend too -----------------------------
+  //
+  // It used to be built from the noteShardBytes size map, which only the
+  // localStorage seam ever writes — so on the native backend every figure came
+  // back 0. The panel's zero-total guard hid it; the deep scan printed
+  // "players 0 B · history 0 B · ledger 0 B · core 0 B" to a user whose store
+  // was 3.0 MB, which is the one place it had to be right.
+  //
+  // Asserted against the SHAPE of the store rather than against exact byte
+  // counts: 30 player records must outweigh the settings blob, and a hand
+  // carries more than a ledger row by construction. A test that merely checked
+  // "> 0" would pass on a breakdown that attributed everything to core.
+
+  {
+    const pda = fakeStorage();
+    const T = load({ pdaStorage: pda });
+    await T.storeReady;
+    for (let i = 0; i < 30; i += 1) T.getPlayer('b' + i).hands = 40;
+    for (let i = 0; i < 25; i += 1) T.STORE.hands.push({ g: 'h' + i, board: ['As', 'Kd', '2c'], actions: [{ x: 'b1', a: 'call', s: 'preflop' }] });
+    for (let i = 0; i < 25; i += 1) T.STORE.plLedger.push({ t: i, d: -1, b: 1, g: 'h' + i });
+    T.markAllDirty();
+    await flushAsync(T);
+
+    const b = T.storageBreakdown();
+    t.ok('players are attributed on the native backend', b.players > 0);
+    t.ok('history is attributed', b.hands > 0);
+    t.ok('the ledger is attributed', b.ledger > 0);
+    t.ok('core is attributed', b.core > 0);
+    t.eq('and total is the sum of the parts', b.total, b.players + b.hands + b.ledger + b.core);
+    t.ok('30 player records outweigh the settings blob', b.players > b.core);
+    t.ok('25 full hands outweigh 25 ledger rows', b.hands > b.ledger);
+
+    // The bug's exact signature: nothing in the native write path feeds the
+    // localStorage size map, so a breakdown read from it is all zeros while
+    // the store itself is megabytes.
+    t.eq('the localStorage size total really is 0 here', T.shardBytesTotal, 0);
+    t.ok('yet the breakdown is not', b.total > 0);
+  }
+
   process.exit(t.report());
 })();

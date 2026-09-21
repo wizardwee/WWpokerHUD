@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.76.0
+// @version      1.77.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,40 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.77.0 - Settings, rearranged — and calibration out from under Coach.
+ *            - Reported: "the calibration should not be hidden under coach
+ *              tab. Can we rearrange all of the settings on this page to be
+ *              logical?" Calibration mode was the last line of the Coach
+ *              section — the one control whose entire purpose is to be found
+ *              by someone who has just been asked for a deep scan.
+ *            - Thirteen sections now run in four labelled groups: AT THE TABLE
+ *              (seat labels, your turn, fold guard, coach), READING THE TABLE
+ *              (departure watch, Torn API, battle stats), YOUR DATA (hand log,
+ *              P/L ledger, gist sync, storage, backup & reset) and
+ *              TROUBLESHOOTING (calibration mode, with a line saying what a
+ *              deep scan is actually for).
+ *            - Storage sits immediately above Backup again. Its own comment
+ *              says it should — the remedy for every state it reports is "copy
+ *              a backup" — and it had drifted to sitting above Hand log.
+ *            - The group labels are NOT <h4>. Every <h4> here becomes a
+ *              collapsible section, so collapseSettingsSections now stops its
+ *              walk at a label too; otherwise the label for the sections below
+ *              is filed inside the section above and vanishes when that one is
+ *              closed.
+ *            - The storage breakdown read "players 0 B · history 0 B · ledger
+ *              0 B · core 0 B" on a 3.0 MB store. It was built from the size
+ *              map only the localStorage seam writes, so on the native backend
+ *              every figure was 0 — the panel's zero-total guard hid it and
+ *              the deep scan printed it. Now measured from STORE on demand
+ *              (~23ms, and only when Settings opens or a scan is taken), one
+ *              path that works on both backends.
+ *            - The panel said "the limit above is the real one" and, four
+ *              lines down, "the limit is an estimate". The second line is now
+ *              printed only when it IS an estimate.
+ *            - The markup is settingsPanelHtml() so a test can assert on it.
+ *              Nothing rendered this panel before, which is how v1.72.0's
+ *              ReferenceError-on-open shipped.
  *
  * 1.76.0 - Stop the native store freezing the page every minute.
  *            - Reported right after v1.75.0 made PDA_storage findable: the
@@ -68,33 +102,6 @@
  *              (8 Aug) is the release noting native storage for script
  *              developers. A bare identifier reading `object` in the next scan
  *              means it was there all along.
- *
- * 1.74.0 - Two bugs a live scan turned up, and the recovery is confirmed.
- *            - THE v1.72.0 RECOVERY WORKED: 1,138 players and 475 hands read
- *              back out of the stranded blob, store at 1,192 players / 500
- *              hands / 2.9 MB, legacy blob gone, saves working again.
- *            - "You are next to act" could NEVER fire. seatRingXids prefers
- *              Torn's positioner index, and the scan showed 8 positioners
- *              against 9 seated players with hero absent — Torn lays your own
- *              seat out separately, below the felt. isHeroNextToAct walks that
- *              ring looking for hero, never finds them, and returns a
- *              confident false. Silent, because false is also the right answer
- *              almost all of the time. The indexed ring is now used only when
- *              it can contain a seated hero, else the geometric ring (which
- *              includes hero), else null so the caller stays quiet.
- *            - Torn's API returns text HTML-ESCAPED. The scan caught
- *              factionName="Dexter&#039;s Laboratory" in the cache, which is
- *              what the badge tooltip and the report would have printed.
- *              decodeApiText handles it at the parse boundary. &amp; resolves
- *              LAST, or "&amp;#039;" decodes to an apostrophe — text that was
- *              never an entity.
- *            - PDA_storage: ABSENT on this app build, so the native backend
- *              never engages and sharded localStorage is what runs. The code
- *              stays and the probe will report it if a later build injects it.
- *            - The deep scan now says whether hero is IN the seat ring rather
- *              than leaving it to be inferred by counting XIDs. That is how
- *              this was found, and the only way it gets confirmed on a device
- *              nobody working on this can see.
  *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
@@ -157,7 +164,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.76.0';
+  const HUD_VERSION = '1.77.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -1587,22 +1594,41 @@
   const STORAGE_QUOTA_EST = 5 * 1024 * 1024;
   const STORAGE_WARN_PCT = 75;
 
-  // Where the space actually went, by shard group. Built from the per-key
-  // sizes noteShardBytes already maintains, so it costs a walk of the size map
-  // and no storage reads at all.
+  // What the store WEIGHS, by shard group. Added because a user at the quota
+  // wall was looking at "2.9 MB of roughly 5.0 MB" with saves being refused
+  // and the panel offered nothing to act on. The three components are very
+  // differently priced and only one of them (history) has a setting you can
+  // turn down.
   //
-  // Added because a user at the quota wall was looking at "2.9 MB of roughly
-  // 5.0 MB" with saves being refused, and the panel offered nothing to act on.
-  // The three components are very differently priced, and only one of them
-  // (history) has a setting you can turn down.
+  // Measured from STORE on demand, NOT from the noteShardBytes size map it
+  // used to read. That map is only ever written by the localStorage seam, so
+  // on the native backend every figure came back 0 — the panel's zero-total
+  // guard hid that, and the deep scan printed "players 0 B · history 0 B ·
+  // ledger 0 B · core 0 B" to a user whose store was 3.0 MB. One path that
+  // works on both backends beats two that can disagree about which is live.
+  //
+  // It costs a full JSON.stringify of the store (~23ms at 900 players), which
+  // is why it is computed HERE and not maintained on the write path: that path
+  // runs up to four times a second, this runs when Settings is opened or a
+  // scan is taken. Same values buildFlushPlan would write, so on localStorage
+  // the parts sum to exactly what is stored.
+  //
+  // `total` is the sum of the parts, and is deliberately NOT the headline
+  // figure from storageStats(): on the native backend that one is real device
+  // bytes reported by the app, which includes its own encoding, and during a
+  // migration it also counts the legacy blob. The UI labels this as the size
+  // of the data rather than as a decomposition of the meter.
   function storageBreakdown() {
-    const out = { players: 0, hands: 0, ledger: 0, core: 0 };
-    shardBytes.forEach((n, key) => {
-      if (key.indexOf(SHARD_PLAYER) === 0) out.players += n;
-      else if (key === SHARD_HANDS) out.hands += n;
-      else if (key === SHARD_PL) out.ledger += n;
-      else out.core += n;
-    });
+    const size = (v) => {
+      try { return JSON.stringify(v).length; } catch (e) { return 0; }
+    };
+    const out = { players: 0, hands: 0, ledger: 0, core: 0, total: 0 };
+    const players = (STORE && STORE.players) || {};
+    Object.keys(players).forEach((xid) => { out.players += size(players[xid]); });
+    out.hands = size((STORE && STORE.hands) || []);
+    out.ledger = size((STORE && STORE.plLedger) || []);
+    out.core = size(STORE ? coreSnapshot() : {});
+    out.total = out.players + out.hands + out.ledger + out.core;
     return out;
   }
 
@@ -11078,6 +11104,12 @@
       transition: transform .12s; }
     .tph-set-h[data-open="1"]::after { transform: rotate(180deg); }
     .tph-set-body { padding-bottom: 4px; }
+    /* Group label above a run of sections. NOT an <h4>, because every <h4> in
+       this panel becomes a collapsible section — collapseSettingsSections
+       walks for those, and stops collecting at one of these so the label stays
+       outside any section body rather than being swallowed by the one above. */
+    .tph-set-group { color: #9aa4ae !important; font-size: 10.5px; letter-spacing: .09em;
+      text-transform: uppercase; margin: 14px 0 0; padding: 0 2px; }
     .tph-warn { background: #4a2c12 !important; color: #ffd9a0 !important; border: 1px solid #8a5a24;
       border-radius: 5px; padding: 7px 9px; margin: 6px 0 10px; font-size: 12px; line-height: 1.45; }
     .tph-ok { color: #7ed957 !important; font-size: 12px; margin: 2px 0 10px; }
@@ -13229,9 +13261,14 @@
       const key = (h.textContent || '').trim();
       const body = document.createElement('div');
       body.className = 'tph-set-body';
-      // Everything between this heading and the next one belongs to it.
+      // Everything between this heading and the next one belongs to it — but a
+      // group label (.tph-set-group) introduces the sections BELOW it, so it
+      // stops the walk too. Without that it would be collected into the body of
+      // the section above and disappear whenever that one was closed, which is
+      // exactly when you need it to find your way around.
       let n = h.nextSibling;
-      while (n && !(n.nodeType === 1 && n.tagName === 'H4')) {
+      while (n && !(n.nodeType === 1
+        && (n.tagName === 'H4' || (n.className || '').indexOf('tph-set-group') !== -1))) {
         const next = n.nextSibling;
         body.appendChild(n);
         n = next;
@@ -13248,13 +13285,19 @@
     });
   }
 
-  function renderSettingsPanel() {
-    renderPanel({
-      marker: 'tph-settings',
-      open: settingsOpen,
-      onClose: () => { settingsOpen = false; settingsSectionsOpen.clear(); renderSettingsPanel(); },
-      wire: wireSettingsPanel,
-      html: !settingsOpen ? '' : `
+  // Split out of renderSettingsPanel so the markup can be asserted on without
+  // a DOM. This panel is fifteen sections of hand-written template with live
+  // values spliced through it, and nothing rendered it in a test until now —
+  // which is how reclaimReportHtml shipped calling a `const` scoped inside
+  // another function and threw a ReferenceError the instant Settings opened.
+  //
+  // The ORDER of the sections below is the feature, not an accident of how
+  // they were added. They run: what you see at the table, what the HUD reads
+  // about the players around you, your data, then troubleshooting — each run
+  // introduced by a .tph-set-group label. Calibration mode used to sit inside
+  // Coach, where nobody looking for a deep scan would ever find it.
+  function settingsPanelHtml() {
+    return `
       <span class="tph-close">✕</span>
       <h3>Settings</h3>
       <button class="tph-open-self" style="width:100%;padding:9px;margin-bottom:6px"${heroUnresolved() ? ' disabled' : ''}>📊 Your own stats${heroUnresolved() ? ' (sit at a table first)' : ''}</button>
@@ -13275,6 +13318,7 @@
         + 'Torn is probably set to show amounts in big blinds rather than cash — switch it back to cash, or P/L stays unrecorded '
         + 'rather than being written wrong.</div>' : ''}
       ${plausibleBB(lastSeenBB) ? `<div style="opacity:.7;margin:2px 0 8px">Table: ${escapeHtml(tableLabel(lastSeenBB))}</div>` : ''}
+      <div class="tph-set-group">At the table</div>
       <h4>Seat labels</h4>
       <label><input type="checkbox" class="tph-badge-toggle" ${STORE.settings.showBadges ? 'checked' : ''}> Show tendency labels on seats</label><br>
       <label><input type="checkbox" class="tph-selfbadge-toggle" ${STORE.settings.showSelfBadge ? 'checked' : ''}> Include your own seat (green)</label><br>
@@ -13330,7 +13374,7 @@
       <button class="tph-coach-reset">Reset panel positions &amp; size</button>
       <div style="opacity:.7;margin:2px 0 10px">Drag the ◢ corner to resize the coach panel — it stays where you put
         it, at the size you set, and now stays on screen between hands instead of disappearing.</div>
-      <label><input type="checkbox" class="tph-calib-toggle" ${STORE.settings.calibrationMode ? 'checked' : ''}> Calibration mode</label><br><br>
+      <div class="tph-set-group">Reading the table</div>
       <h4>Departure watch</h4>
       <label><input type="checkbox" class="tph-depart-toggle" ${STORE.settings.departureWatch ? 'checked' : ''}> Alert when an attackable player leaves</label><br>
       <label><input type="checkbox" class="tph-departcue-toggle" ${STORE.settings.departureCue ? 'checked' : ''}> Flash the screen edge</label><br>
@@ -13372,12 +13416,7 @@
         <b>This integration is unverified</b> — nobody working on this holds a TornStats key to confirm it against a
         live response, so treat a number here as a rough guide, not a fact. Needs its own key from tornstats.com,
         never the same as your Torn API key, and never leaves this device (stripped from Backup/Gist exports too).</div>
-      <h4>GitHub Gist sync</h4>
-      <label>OAuth App Client ID: <input type="text" class="tph-client-id" value="${escapeHtml(STORE.settings.githubClientId)}" style="width:70%"></label><br>
-      <button class="tph-connect">${GistSync.status === 'connected' ? 'Re-sync now' : 'Connect'}</button>
-      <div class="tph-sync-status">${escapeHtml(syncStatusText())}</div>
-      ${gistUrl() ? '<button class="tph-copy-gist-link">Copy gist link</button>' : ''}
-      ${storageSettingsHtml()}
+      <div class="tph-set-group">Your data</div>
       <h4>Hand log</h4>
       <div class="tph-exp-lead">Every hand in the store as plain text, for offline analysis —
         ${(STORE.hands || []).length} hand(s). Not the JSON backup below; this is the readable log.</div>
@@ -13388,7 +13427,13 @@
         of up to ${PL_LEDGER_CAP} row(s) kept. Your lifetime total (${fmtSignedMoney(STORE.hero.netChips)}) stays
         exact regardless of what has aged out of this file.</div>
       ${exportActionsHtml('ledger', `(${(STORE.plLedger || []).length})`)}
-      <h4>Backup</h4>
+      <h4>GitHub Gist sync</h4>
+      <label>OAuth App Client ID: <input type="text" class="tph-client-id" value="${escapeHtml(STORE.settings.githubClientId)}" style="width:70%"></label><br>
+      <button class="tph-connect">${GistSync.status === 'connected' ? 'Re-sync now' : 'Connect'}</button>
+      <div class="tph-sync-status">${escapeHtml(syncStatusText())}</div>
+      ${gistUrl() ? '<button class="tph-copy-gist-link">Copy gist link</button>' : ''}
+      ${storageSettingsHtml()}
+      <h4>Backup &amp; reset</h4>
       <textarea class="tph-export" readonly></textarea>
       <button class="tph-copy-export">Copy</button>
       <button class="tph-save-export">${isPDA() ? 'Save / share file' : 'Download file'}</button>
@@ -13405,7 +13450,24 @@
         My stats: zeroes your own counters and P/L, keeps every opponent and all hand history.</div>
       <br>
       <button class="tph-reset">Reset all data</button>
-    `,
+      <div class="tph-set-group">Troubleshooting</div>
+      <h4>Calibration mode</h4>
+      <label><input type="checkbox" class="tph-calib-toggle" ${STORE.settings.calibrationMode ? 'checked' : ''}> Show the deep scan panel</label>
+      <div style="opacity:.7;margin:2px 0 10px">Opens a panel that dumps what the HUD can actually see of Torn's
+        page — the selectors it matched, the log lines it parsed, your identity, the storage backend and its
+        contents. Nobody working on this HUD can log into Torn or look at the live table, so a pasted-back scan is
+        the ONLY way a selector, a log wording or a storage problem ever gets confirmed. Turn it on, tap the panel's
+        Copy button, paste the result back. It changes nothing about how the HUD plays.</div>
+    `;
+  }
+
+  function renderSettingsPanel() {
+    renderPanel({
+      marker: 'tph-settings',
+      open: settingsOpen,
+      onClose: () => { settingsOpen = false; settingsSectionsOpen.clear(); renderSettingsPanel(); },
+      wire: wireSettingsPanel,
+      html: !settingsOpen ? '' : settingsPanelHtml(),
     });
   }
 
@@ -13435,10 +13497,14 @@
         : '')
       + (() => {
         const b = storageBreakdown();
-        if (!(b.players + b.hands + b.ledger + b.core)) return '';
-        return '<div class="tph-store-line">'
+        if (!b.total) return '';
+        // "The data weighs", not "the meter breaks down into" — on the native
+        // backend the headline above is real device bytes reported by the app
+        // and these are the size of the records themselves, so they are close
+        // but they are not the same measurement.
+        return '<div class="tph-store-line">Data: '
           + `${fmtBytes(b.players)} players · ${fmtBytes(b.hands)} history · `
-          + `${fmtBytes(b.ledger)} P/L ledger</div>`;
+          + `${fmtBytes(b.ledger)} P/L ledger · ${fmtBytes(b.core)} settings</div>`;
       })()
       // The old line read "History is capped at 200 hands" directly under
       // "500 hands in history". Both numbers were right and the SENTENCE was
@@ -13450,8 +13516,12 @@
       + `Past ${STORAGE_WARN_PCT}% a cleanup drops players seen `
       + `under ${PRUNE_THIN_HANDS} hands and not in ${PRUNE_THIN_DAYS} days, then anything not seen in `
       + `${PRUNE_MAX_DAYS} days, then the least recently seen down to ${PRUNE_PLAYER_CAP}. Thin records cost `
-      + 'about half what a long-tracked one does and tell you nothing, so they go first. You are never dropped. '
-      + 'The limit is an estimate; the browser does not report the real one here.</div>'
+      + 'about half what a long-tracked one does and tell you nothing, so they go first. You are never dropped.'
+      // Only when it IS an estimate. On the native backend PDA_storage.usage()
+      // reports the real limit, and the panel already says so a few lines up —
+      // printing both left it flatly contradicting itself.
+      + (s.estimated ? ' The limit is an estimate; the browser does not report the real one here.' : '')
+      + '</div>'
       + reclaimReportHtml()
       + pruneReportHtml();
   }
@@ -14024,7 +14094,12 @@
         + '  backend: ' + (st.native ? 'PDA_storage' : 'localStorage')
         + (st.failed ? '   <-- LAST SAVE REFUSED' : ''));
       const b = storageBreakdown();
-      L.push('  players ' + fmtBytes(b.players) + ' · history ' + fmtBytes(b.hands)
+      // Measured from STORE, so this is the size of the DATA and not a
+      // decomposition of the figure above — on the native backend that one is
+      // real device bytes from the app. It read all zeros here until v1.77.0,
+      // because it was built from a size map only the localStorage seam writes.
+      L.push('  data ' + fmtBytes(b.total) + ': players ' + fmtBytes(b.players)
+        + ' · history ' + fmtBytes(b.hands)
         + ' · ledger ' + fmtBytes(b.ledger) + ' · core ' + fmtBytes(b.core));
       L.push('  counts: ' + Object.keys((STORE && STORE.players) || {}).length + ' players, '
         + ((STORE && STORE.hands) || []).length + ' hands, '
@@ -14770,6 +14845,8 @@
       set lastPruneCheck(v) { lastPruneCheck = v; },
       storageStats,
       storageSettingsHtml,
+      settingsPanelHtml,
+      collapseSettingsSections,
       renderStorageWarning,
       fmtBytes,
       STORAGE_QUOTA_EST,
