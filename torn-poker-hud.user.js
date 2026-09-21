@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.75.0
+// @version      1.76.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,33 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.76.0 - Stop the native store freezing the page every minute.
+ *            - Reported right after v1.75.0 made PDA_storage findable: the
+ *              page no longer scrolls.
+ *            - applyPlanAsync put EVERY dirty write into one setMany, and that
+ *              batch crosses the flutter bridge in a single call. On a
+ *              1,200-player store that is a multi-megabyte payload — and the
+ *              60s reconcile marks everything dirty, so it repeated every
+ *              minute, forever. The marshal blocks, the compositor stalls, and
+ *              scrolling dies until it comes back round.
+ *            - On localStorage that same reconcile costs 23ms, which is why
+ *              this sat undetected from v1.70.0: the path was never reachable
+ *              on this device until the probe was fixed.
+ *            - Now PDA_WRITE_CHUNK (48) keys per call, awaited SEQUENTIALLY.
+ *              The await matters as much as the chunking — setMany returns
+ *              across the bridge, so the event loop is free between calls and
+ *              the page can paint and scroll.
+ *            - core, hands and the ledger each take a call of their own: they
+ *              are large single values (~680 KB, ~500 KB) that cannot be
+ *              split, so riding along with 47 players triples that chunk.
+ *            - Marks clear per chunk. That gives up setMany's all-or-nothing
+ *              property, in the same direction the localStorage path already
+ *              worked (per key) — a refusal part way leaves exactly the
+ *              unwritten shards dirty, and still reports the failure.
+ *            - Test lesson, caught by mutation: pinning a chunk size with
+ *              `n <= PDA_WRITE_CHUNK` is VACUOUS and passes with the constant
+ *              raised to 100000. Pin it against a literal ceiling.
  *
  * 1.75.0 - Look for PDA_storage where Torn PDA actually puts it.
  *            - You asked for the store to live on PDA rather than in the
@@ -68,33 +95,6 @@
  *              than leaving it to be inferred by counting XIDs. That is how
  *              this was found, and the only way it gets confirmed on a device
  *              nobody working on this can see.
- *
- * 1.73.0 - Fix v1.72.0 taking the whole HUD off the screen.
- *            - v1.72.0's reclaimLegacyBlob reaches mergeHands ->
- *              trimHandHistory -> HISTORY_PINNED_CEILING, and that const was
- *              declared ~3,600 lines BELOW bootStore(). loadStore runs at
- *              MODULE EVALUATION time, so the const was still in its temporal
- *              dead zone: ReferenceError at module scope, which in a userscript
- *              means nothing runs at all. No gear, no badges, no HUD, no error
- *              anyone can see. Exactly the hazard CLAUDE.md documents, walked
- *              straight into.
- *            - The const is hoisted above bootStore() with a comment saying
- *              why it lives far from the function that uses it.
- *            - It only fires on a store that has BOTH shards and the legacy
- *              blob — the part-migrated state v1.72.0 exists to repair. A
- *              clean store loaded fine, which is why this got out.
- *            - THE SUITE COULD NOT HAVE CAUGHT IT. load() seeds EMPTY storage,
- *              so the sharded path never ran during evaluation, and every test
- *              that calls loadStore() runs afterwards, when the bindings are
- *              initialised. The seam masked it perfectly.
- *            - test/boot-paths.test.js loads the script against each storage
- *              state arranged BEFORE evaluation — fresh, legacy blob, shards,
- *              shards+blob, corrupt variants, and both native-backend paths —
- *              and asserts only that it loads. Under the reverted fix it is
- *              the ONLY file in the suite that fails.
- *            - The harness gained opts.seedKeys for this: storageSeed alone
- *              can only produce a fresh-install or legacy-blob boot, so it
- *              cannot reach the sharded load path at evaluation time.
  *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
@@ -157,7 +157,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.75.0';
+  const HUD_VERSION = '1.76.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -1397,14 +1397,59 @@
       .then(() => s.delete(r.key))
       .then(() => { clearMark(r.mark); }, () => { /* retried next pass */ }));
 
-    return Promise.all(deletions).then(() => {
-      if (!plan.writes.length) return null;
-      const batch = {};
-      plan.writes.forEach((w) => { batch[w.key] = w.value; });
-      return Promise.resolve(s.setMany(batch)).then(() => {
-        plan.writes.forEach((w) => clearMark(w.mark));
-        return null;
-      });
+    return Promise.all(deletions).then(() => writeChunks(s, chunkWrites(plan.writes), 0));
+  }
+
+  // Keys per setMany. The batch is marshalled across the flutter bridge in one
+  // call, so ONE call carrying the whole store is a multi-megabyte payload —
+  // and the 60s reconcile marks everything dirty, so on a 1,200-player store
+  // that repeated every minute, forever. Reported from a live table as the page
+  // no longer scrolling: the bridge marshal blocks, the compositor stalls, and
+  // it comes back round a minute later.
+  //
+  // On localStorage that same reconcile costs 23ms, which is why this never
+  // showed up until the native backend was actually reachable (v1.75.0).
+  const PDA_WRITE_CHUNK = 48;
+
+  // The three SECTION shards are single values of their own — ~680 KB of hand
+  // history, ~500 KB of ledger — and cannot be split, so each gets a call to
+  // itself rather than riding along with 47 players and tripling that chunk.
+  function chunkWrites(writes) {
+    const chunks = [];
+    let current = [];
+    writes.forEach((w) => {
+      const bulky = w.key === SHARD_CORE || w.key === SHARD_HANDS || w.key === SHARD_PL;
+      if (bulky) {
+        if (current.length) { chunks.push(current); current = []; }
+        chunks.push([w]);
+        return;
+      }
+      current.push(w);
+      if (current.length >= PDA_WRITE_CHUNK) { chunks.push(current); current = []; }
+    });
+    if (current.length) chunks.push(current);
+    return chunks;
+  }
+
+  // SEQUENTIAL, one chunk per bridge call, awaiting each before the next.
+  //
+  // The await is the point as much as the chunking: setMany returns across the
+  // bridge, so the event loop is free between calls and the page can paint and
+  // scroll instead of being held for the length of the whole store.
+  //
+  // Marks clear PER CHUNK. That gives up the all-or-nothing property a single
+  // setMany had — but it gives it up in the same direction the localStorage
+  // path already works (per key), so a refusal part way leaves exactly the
+  // unwritten shards dirty for the next pass. The rejection still propagates,
+  // so the caller reports the failure.
+  function writeChunks(s, chunks, i) {
+    if (i >= chunks.length) return Promise.resolve(null);
+    const chunk = chunks[i];
+    const batch = {};
+    chunk.forEach((w) => { batch[w.key] = w.value; });
+    return Promise.resolve(s.setMany(batch)).then(() => {
+      chunk.forEach((w) => clearMark(w.mark));
+      return writeChunks(s, chunks, i + 1);
     });
   }
 
@@ -14820,6 +14865,8 @@
       buildFlushPlan,
       applyPlanSync,
       applyPlanAsync,
+      chunkWrites,
+      PDA_WRITE_CHUNK,
       flushShardsAsync,
       clearLocalStorageCopy,
       get pdaBackend() { return pdaBackend; },

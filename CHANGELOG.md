@@ -9,6 +9,44 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.76.0
+
+**Stop the native store freezing the page every minute.** Reported immediately
+after v1.75.0 made `PDA_storage` findable: *"I can't seem to scroll anymore."*
+
+`applyPlanAsync` put **every** dirty write into a single `setMany`, and that
+batch is marshalled across the flutter bridge in one call. On a 1,200-player
+store that is a multi-megabyte payload — and the 60-second reconcile marks
+everything dirty, so **it repeated every minute, forever**. The marshal blocks,
+the compositor stalls, and scrolling dies until it comes back round.
+
+On `localStorage` that same reconcile costs 23ms. That is exactly why this sat
+undetected from v1.70.0: the native path was never reachable on this device
+until the probe was fixed, so the flaw shipped three versions before anything
+could run it.
+
+- **`PDA_WRITE_CHUNK` (48) keys per call, awaited sequentially.** The await
+  matters as much as the chunking: `setMany` returns across the bridge, so the
+  event loop is free between calls and the page can paint and scroll.
+- **The three section shards each get a call of their own.** `hands` is ~680 KB
+  and `plLedger` ~500 KB as single values that cannot be split, so letting one
+  ride along with 47 players triples that chunk for no reason.
+- **Marks clear per chunk.** That gives up `setMany`'s all-or-nothing property
+  — in the same direction the `localStorage` path already worked (per key). A
+  refusal part way leaves exactly the unwritten shards dirty for the next pass,
+  and the rejection still propagates so the failure is reported.
+
+**A test lesson, caught by mutation rather than review.** The first version of
+the bound asserted `sizes.every(n => n <= PDA_WRITE_CHUNK)` — which is
+**vacuous**, and passes cleanly with the constant raised to 100000, i.e. with
+the bug fully restored. It now pins a literal ceiling and asserts the number of
+calls scales with the store. Same shape as this repo's oldest lesson: a test of
+a copy cannot fail when the original is wrong, and a test of a constant cannot
+fail when the constant is what moved.
+
+Mutation-verified against two regressions: an unbounded chunk size, and letting
+the large section shards share a chunk with players.
+
 ## 1.75.0
 
 **Look for `PDA_storage` where Torn PDA actually puts it.** Asked for directly:

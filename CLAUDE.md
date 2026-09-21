@@ -676,10 +676,32 @@ JSON-serialisable and the bridge encodes it once; a pre-stringified value is
 encoded *again*, escaping every quote and roughly doubling what each record
 costs — giving back much of the headroom this backend exists to gain.
 
-**One `setMany` per pass.** The docs say hot paths should batch, and `setMany`
-is documented to reject as a whole on quota — so a pass lands entirely or
-changes nothing, and the marks follow: all cleared or all kept. Same invariant
-as the sync path, reached differently.
+**BOUNDED chunks per pass, not one call for everything (corrected v1.76.0).**
+This said "one `setMany` per pass" and treated the all-or-nothing rejection as
+the invariant. That was wrong in a way that only showed once the backend was
+actually reachable: the batch is marshalled across the flutter bridge in ONE
+call, so a 1,200-player store is a multi-megabyte payload — and the 60s
+reconcile marks everything dirty, so **it repeated every minute, forever**.
+Reported from a live table as *the page no longer scrolling*: the bridge
+marshal blocks, the compositor stalls, and it comes back round a minute later.
+
+On `localStorage` that same reconcile costs 23ms, which is exactly why this sat
+undetected from v1.70.0 until v1.75.0 made the store findable.
+
+- `PDA_WRITE_CHUNK` (48) keys per call, **awaited sequentially**. The await
+  matters as much as the chunking: `setMany` returns across the bridge, so the
+  event loop is free between calls and the page can paint and scroll.
+- **The three section shards each get a call of their own.** `hands` is ~680 KB
+  and `plLedger` ~500 KB as single values that cannot be split, so letting one
+  ride along with 47 players triples that chunk for nothing.
+- **Marks clear PER CHUNK**, which gives up the all-or-nothing property — in
+  the same direction the `localStorage` path already worked (per key). A
+  refusal part way leaves exactly the unwritten shards dirty for the next pass,
+  and the rejection still propagates so the failure is reported.
+- **Pin the chunk size against a LITERAL ceiling in tests, never against
+  `PDA_WRITE_CHUNK` itself.** `n <= PDA_WRITE_CHUNK` is vacuous and passes
+  cleanly with the constant raised to 100000 — which is the bug. Caught by
+  mutation, not review.
 
 **Flushes are serialised, never overlapped.** An async write is in flight for an
 unknown time; a second pass starting inside that window builds its plan from

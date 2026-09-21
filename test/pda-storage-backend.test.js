@@ -121,7 +121,11 @@ const flushAsync = (T) => T.flushShardsAsync();
     t.eq('and is stored as an OBJECT, not a JSON string — a pre-stringified '
       + 'value would be encoded twice by the bridge and roughly double what '
       + 'each record costs', typeof pda._map.get(KEY + ':p:555'), 'object');
-    t.eq('one setMany for the whole pass, not one call per key', pda._calls.setMany, 1);
+    // Bounded chunks, not one call per key and NOT one call for everything.
+    // core, hands and the ledger each take a call of their own (they are large
+    // single values), and every player in this pass shares one chunk — so a
+    // one-player pass is four calls, not one and not five.
+    t.eq('sections write separately, players share a chunk', pda._calls.setMany, 4);
 
     // Read it back through the real loader.
     const T2 = load({ pdaStorage: pda });
@@ -129,6 +133,82 @@ const flushAsync = (T) => T.flushShardsAsync();
     t.eq('settings survive the round trip', T2.STORE.settings.heroName, 'Wonkawee');
     t.eq('players do', T2.STORE.players['555'].vpip, 31);
     t.eq('hands do', T2.STORE.hands.length, 1);
+  }
+
+  // --- A BIG store must not cross the bridge in one call -------------------
+  //
+  // Reported from a live table right after the native backend first became
+  // reachable: the page stopped scrolling. applyPlanAsync put every dirty
+  // write into ONE setMany, so a 1,200-player store was a multi-megabyte
+  // payload marshalled across the flutter bridge in a single call — and the
+  // 60s reconcile marks everything dirty, so it repeated every minute forever.
+  //
+  // On localStorage that same reconcile costs 23ms, which is why this never
+  // surfaced until the probe actually found PDA_storage.
+
+  {
+    const pda = fakeStorage();
+    const T = load({ pdaStorage: pda });
+    await T.storeReady;
+    for (let i = 0; i < 600; i += 1) T.getPlayer('p' + i).hands = 10;
+    for (let i = 0; i < 50; i += 1) T.STORE.hands.push({ g: 'h' + i, actions: [] });
+    T.markAllDirty();
+
+    const sizes = [];
+    const realSetMany = pda.setMany;
+    pda.setMany = (o) => { sizes.push(Object.keys(o).length); return realSetMany(o); };
+
+    await T.flushShardsAsync();
+
+    // Asserted against a LITERAL ceiling, not against PDA_WRITE_CHUNK itself —
+    // `n <= PDA_WRITE_CHUNK` is vacuous, and passes cleanly with the constant
+    // raised to 100000, which is the bug. Caught by mutation.
+    const HARD_CAP = 128;
+    t.ok('the whole store does not go in one call', sizes.length > 1);
+    t.ok('no single call carries an unbounded slice of the store',
+      Math.max.apply(null, sizes) <= HARD_CAP);
+    t.ok('and the number of calls scales with the store, rather than collapsing '
+      + 'back to one giant payload', sizes.length >= 600 / HARD_CAP);
+    t.ok('the constant agrees with the ceiling this pins',
+      T.PDA_WRITE_CHUNK <= HARD_CAP);
+    t.eq('with nothing dropped — every key still written',
+      sizes.reduce((a, b) => a + b, 0), 603); // 600 players + core + hands + pl
+    t.ok('all 600 players landed', !!pda._map.get(KEY + ':p:p599'));
+    t.ok('and so did the section shards',
+      !!pda._map.get(KEY + ':hands') && !!pda._map.get(KEY + ':core'));
+    t.ok('no marks left over', T.dirtyPlayers.size === 0);
+  }
+
+  {
+    // The section shards are single values of their own (hundreds of KB each)
+    // and cannot be split, so each takes a call rather than tripling a chunk
+    // it rides along in.
+    const T = load({ pdaStorage: fakeStorage() });
+    await T.storeReady;
+    const writes = [
+      { key: KEY + ':core', value: {}, mark: { kind: 'core' } },
+      { key: KEY + ':hands', value: [], mark: { kind: 'hands' } },
+      { key: KEY + ':pl', value: [], mark: { kind: 'pl' } },
+    ].concat(Array.from({ length: 5 }, (_, i) => (
+      { key: KEY + ':p:x' + i, value: {}, mark: { kind: 'dirty', xid: 'x' + i } }
+    )));
+    const chunks = T.chunkWrites(writes);
+    t.eq('core, hands and ledger each get their own call, players share one',
+      chunks.map((c) => c.length).join(','), '1,1,1,5');
+  }
+
+  {
+    // Order is preserved, so removals-then-writes and the section-before-player
+    // ordering the plan builds still hold across chunking.
+    const T = load({ pdaStorage: fakeStorage() });
+    await T.storeReady;
+    const writes = Array.from({ length: 100 }, (_, i) => (
+      { key: KEY + ':p:n' + i, value: {}, mark: { kind: 'dirty', xid: 'n' + i } }
+    ));
+    const flat = [].concat(...T.chunkWrites(writes));
+    t.eq('chunking preserves order', flat.map((w) => w.key).join(','),
+      writes.map((w) => w.key).join(','));
+    t.eq('and loses nothing', flat.length, 100);
   }
 
   // --- A failed load must never be followed by a write ---------------------
