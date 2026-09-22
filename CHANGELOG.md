@@ -9,6 +9,31 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.79.0
+Star a hand to keep it; the replayer is gone; your cards on every hand
+
+Asked for a way to save or favourite a specific hand. Each History card now has
+a star at the end of its tag row. A starred hand is never evicted — not by the
+history limit and not by the pinned ceiling — and a new "Saved" chip lists them
+(it ignores the Played/Notable bars; tags still narrow it). Capped at 100 stars,
+and the tap says so when you hit it. A gist merge keeps a star from either
+device, the same rule manual tags and notes follow.
+
+Asked to strip out the hand replayer: the button, panel, step/equity code and
+its styles are removed. The star takes the button's place without costing a
+full line per hand. `estimateEquityCached`, whose only caller was the replayer,
+went with it; the equity cache-key test now drives `equityCacheKey`, which the
+live coach path uses.
+
+Reported with a screenshot: you bet three streets to a showdown, the opponent's
+reveal printed and your cards did not. The showdown lines only list `h.shown`,
+which the seat poll never fills for you (your cards are face up all hand); the
+log's reveal line sometimes names you, which is why it was "sometimes". Your
+cards were stored all along — only the replayer ever printed them. Every card
+now shows them: among the showdown lines when you were still in at a showdown,
+otherwise as a "your cards" line under the board, and never twice. The
+clipboard and file exports say the same.
+
 ## 1.78.0
 
 **bbHands could still exceed your hand count, and the scan said so.**

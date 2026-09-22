@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.78.0
+// @version      1.79.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,26 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.79.0 - Star a hand to keep it; the replayer is gone; your cards on every hand.
+ *            - Asked for: a way to save / favourite a specific hand. Each
+ *              History card now has a star at the end of its tag row. A
+ *              starred hand is never evicted — not by historyLimit, not by the
+ *              pinned ceiling — and a new "Saved" chip lists them. Capped at
+ *              100 stars (the tap says so when full). A gist merge keeps a star
+ *              from either device, same rule as manual tags and notes.
+ *            - Asked for: strip out the hand replayer. Removed — the button,
+ *              the panel, its step/equity code and its styles. The star takes
+ *              the button's place without the extra line per hand.
+ *            - Reported with a screenshot: you bet three streets to a
+ *              showdown, the opponent's cards printed and yours did not. The
+ *              showdown lines only ever list h.shown, which the seat poll
+ *              never fills for you (your cards are face up all hand); the log
+ *              reveal sometimes names you, which is why it was "sometimes".
+ *              Your cards were stored all along but only the replayer printed
+ *              them. Now every card shows them: among the showdown lines when
+ *              you were still in at one, otherwise a "your cards" line under
+ *              the board — never twice. Clipboard and file export match.
  *
  * 1.78.0 - bbHands could still exceed your hand count, and the scan said so.
  *            - Your own scan flagged it: 18,065 hands against 18,710 bbHands.
@@ -82,33 +102,6 @@
  *              Nothing rendered this panel before, which is how v1.72.0's
  *              ReferenceError-on-open shipped.
  *
- * 1.76.0 - Stop the native store freezing the page every minute.
- *            - Reported right after v1.75.0 made PDA_storage findable: the
- *              page no longer scrolls.
- *            - applyPlanAsync put EVERY dirty write into one setMany, and that
- *              batch crosses the flutter bridge in a single call. On a
- *              1,200-player store that is a multi-megabyte payload — and the
- *              60s reconcile marks everything dirty, so it repeated every
- *              minute, forever. The marshal blocks, the compositor stalls, and
- *              scrolling dies until it comes back round.
- *            - On localStorage that same reconcile costs 23ms, which is why
- *              this sat undetected from v1.70.0: the path was never reachable
- *              on this device until the probe was fixed.
- *            - Now PDA_WRITE_CHUNK (48) keys per call, awaited SEQUENTIALLY.
- *              The await matters as much as the chunking — setMany returns
- *              across the bridge, so the event loop is free between calls and
- *              the page can paint and scroll.
- *            - core, hands and the ledger each take a call of their own: they
- *              are large single values (~680 KB, ~500 KB) that cannot be
- *              split, so riding along with 47 players triples that chunk.
- *            - Marks clear per chunk. That gives up setMany's all-or-nothing
- *              property, in the same direction the localStorage path already
- *              worked (per key) — a refusal part way leaves exactly the
- *              unwritten shards dirty, and still reports the failure.
- *            - Test lesson, caught by mutation: pinning a chunk size with
- *              `n <= PDA_WRITE_CHUNK` is VACUOUS and passes with the constant
- *              raised to 100000. Pin it against a literal ceiling.
- *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
  * file from the top. Three entries is enough for a fresh reader to see what
@@ -170,7 +163,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.78.0';
+  const HUD_VERSION = '1.79.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -564,6 +557,14 @@
   // off the screen. Anything the load path can reach must be declared above
   // bootStore().
   const HISTORY_PINNED_CEILING = 500;
+
+  // Hands YOU starred (v1.79.0). Exempt from both historyLimit and the pinned
+  // ceiling in trimHandHistory — a hand you chose to keep must never be
+  // evicted by the cap — so this bounds them instead, at toggle time. 100 at
+  // ~1.3KB is ~130KB. A gist merge can carry past it (a star from either
+  // device survives), so the real worst case is a small multiple, not
+  // unbounded. Declared up here for the same load-path reason as the ceiling.
+  const FAVORITE_HANDS_MAX = 100;
 
   const STORAGE_KEY = 'tornPokerHUD_v1';
 
@@ -2117,17 +2118,24 @@
   // from another the same way it survives the normal recording path. A plain
   // slice(0, limit) here would silently unpin nothing — the field would still
   // say `pinned: true`, but a hand past `limit` gets cut regardless of it.
+  //
+  // A star (h.fav) set on EITHER side survives: the kept copy is starred when
+  // the dropped duplicate was. Same rule as MANUAL_FIELDS — something you
+  // asserted by hand is not rebuilt by playing more hands, so a merge must not
+  // quietly discard it. Copied, never mutated: `b` may be a caller's parsed
+  // gist. Known consequence: unstarring here, then merging from a device that
+  // still has the star, brings it back.
   function mergeHands(a, b, limit) {
-    const seen = new Set();
-    const merged = a.concat(b)
-      .filter((h) => {
-        if (!h) return false;
-        const k = h.g ? 'g:' + h.g : 't:' + h.t + ':' + (h.pot || 0);
-        if (seen.has(k)) return false;
-        seen.add(k);
-        return true;
-      })
-      .sort((x, y) => y.t - x.t);
+    const seen = new Map();
+    const out = [];
+    a.concat(b).forEach((h) => {
+      if (!h) return;
+      const k = h.g ? 'g:' + h.g : 't:' + h.t + ':' + (h.pot || 0);
+      if (!seen.has(k)) { seen.set(k, out.length); out.push(h); return; }
+      const i = seen.get(k);
+      if (h.fav && !out[i].fav) out[i] = Object.assign({}, out[i], { fav: true });
+    });
+    const merged = out.sort((x, y) => y.t - x.t);
     return trimHandHistory(merged, limit || 200, HISTORY_PINNED_CEILING);
   }
 
@@ -4660,7 +4668,7 @@
   }
 
   // How many community cards are showing on each street. Shared, because both
-  // the replayer and the board-texture collector below need to reconstruct the
+  // boardIsPartial and the board-texture collector below need to reconstruct the
   // board AS IT STOOD on a given street — hand.board is the FINAL board, so a
   // flop action has to be read against its first three cards, not all five.
   const BOARD_COUNT_FOR = { preflop: 0, flop: 3, turn: 4, river: 5 };
@@ -5227,6 +5235,9 @@
   // Evict oldest UNPINNED entries first once over `limit`; pinned entries
   // survive past that, up to the hard `pinnedCeiling` — beyond which even a
   // pinned hand is evicted, oldest first, same as prunePlayers' cap.
+  // Starred hands (h.fav) are kept unconditionally and count against neither
+  // bound: the cap is for what the HUD chose to keep, and a starred hand is
+  // what YOU chose. FAVORITE_HANDS_MAX bounds them instead.
   // `hands` is newest-first throughout (recordHandHistory unshifts, mergeHands
   // sorts by t descending), so a single left-to-right walk keeps everything in
   // its original relative order without needing to re-sort.
@@ -5234,11 +5245,14 @@
     if (hands.length <= limit) return hands;
     const kept = [];
     let unpinnedKept = 0;
+    let boundedKept = 0; // everything except starred hands, against pinnedCeiling
     for (const h of hands) {
-      if (h.pinned) { kept.push(h); continue; }
-      if (unpinnedKept < limit) { kept.push(h); unpinnedKept++; }
+      if (h.fav) { kept.push(h); continue; }
+      if (boundedKept >= pinnedCeiling) continue;
+      if (h.pinned) { kept.push(h); boundedKept++; continue; }
+      if (unpinnedKept < limit) { kept.push(h); unpinnedKept++; boundedKept++; }
     }
-    return kept.length > pinnedCeiling ? kept.slice(0, pinnedCeiling) : kept;
+    return kept;
   }
 
   // Keep one global newest-first list rather than a per-player copy: a hand
@@ -5259,9 +5273,9 @@
       heroCards: hand.heroCards || null,
       // Community cards as they stood at the end of the hand — was tracked
       // live on hand.board (see the flop/turn/river log handler) but never
-      // persisted until v1.17.0's replayer needed it. A hand recorded before
-      // this has board: undefined; replayStepsFor treats that as "unknown"
-      // rather than an empty (and misleadingly complete-looking) board.
+      // persisted until v1.17.0 (for the replayer, removed in v1.79.0). A hand
+      // recorded before that has board: undefined; formatHand treats that as
+      // "unknown" rather than an empty (and misleadingly complete-looking) board.
       board: hand.board || [],
       // Blind level at the time, so a stored pot can be priced in big blinds
       // afterwards. isNotableHand already needed hand.bbAmount at record time
@@ -5333,14 +5347,62 @@
     return String(xid).startsWith('name:') ? String(xid).slice(5) : placeholder;
   }
 
+  // Hero's own hole cards on a stored hand, placed where they belong (v1.79.0).
+  //
+  // Reported with a screenshot: hero bet three streets, the opponent's cards
+  // printed at showdown, hero's did not. h.heroCards has been stored since the
+  // replayer (v1.17.0), but only the replayer ever printed it, and the showdown lines
+  // come from h.shown, which the seat poll deliberately never fills for hero
+  // (your cards are face up all hand). The log's reveal line sometimes does
+  // name hero — which is why it showed "sometimes".
+  //
+  // Returns null when there is nothing to add, otherwise where to put it:
+  //   showdown: hero reached a showdown someone else revealed at, still in —
+  //             print it among the reveals, which is where you look for it.
+  //   line:     everything else (folded, won uncontested, identity unknown) —
+  //             a plain "your cards" line under the board.
+  // A hand already carrying hero in h.shown (the log reveal) returns null, so
+  // it never prints twice.
+  function heroCardsPlacement(h) {
+    if (!h || !Array.isArray(h.heroCards) || h.heroCards.length !== 2) return null;
+    const cards = cardsGlyphText(h.heroCards);
+    if (heroUnresolved()) return { where: 'line', cards };
+    const hx = String(heroXid);
+    const shown = h.shown || {};
+    if (Object.keys(shown).some((x) => String(x) === hx)) return null;
+    const folded = (h.actions || []).some((a) => String(a.x) === hx && a.a === 'fold');
+    const showdown = Object.keys(shown).length > 0;
+    return { where: (showdown && !folded) ? 'showdown' : 'line', cards };
+  }
+
+  // Star / unstar a stored hand (v1.79.0). Returns false only when starring
+  // would exceed FAVORITE_HANDS_MAX — the caller says so rather than the tap
+  // appearing to do nothing. Mutates the record in place: it IS the object in
+  // STORE.hands, so the hands shard is marked and saved.
+  function favoriteHandCount() {
+    return (STORE.hands || []).filter((h) => h && h.fav).length;
+  }
+  function toggleHandFavorite(h) {
+    if (!h) return false;
+    if (h.fav) delete h.fav;
+    else {
+      if (favoriteHandCount() >= FAVORITE_HANDS_MAX) return false;
+      h.fav = true;
+    }
+    dirtyHands = true;
+    saveStore();
+    return true;
+  }
+
   // Render one stored hand as a compact, readable summary.
   function formatHand(h, focusXid) {
     const when = new Date(h.t).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-    const pin = h.pinned ? ' 📌' : '';
+    const pin = (h.fav ? ' ★' : '') + (h.pinned ? ' 📌' : '');
     const lines = [`[${when}] pot ${fmtMoney(h.pot)} — reached ${h.street}${pin}`];
+    const heroCards = heroCardsPlacement(h);
     // A hand recorded before v1.17.0 has board: undefined, not an empty board
-    // — the replayer treats those differently ("unknown" vs "no cards fell"),
-    // and so does this: silently omit the line rather than claim a known-empty
+    // — "unknown" and "no cards fell" are different claims, so this
+    // silently omit the line rather than claim a known-empty
     // board for a hand this HUD never actually captured one on.
     // A board shorter than the street implies is flagged, never printed as if
     // it were the whole board — see boardIsPartial. The tab, the clipboard and
@@ -5349,6 +5411,7 @@
       lines.push(`  board: ${cardsGlyphText(h.board)}`
         + (boardIsPartial(h) ? `  (partial — ${h.board.length} of ${BOARD_COUNT_FOR[h.street]} seen)` : ''));
     }
+    if (heroCards && heroCards.where === 'line') lines.push(`  your cards: ${heroCards.cards}`);
     const byStreet = {};
     (h.actions || []).forEach((a) => { (byStreet[a.s] = byStreet[a.s] || []).push(a); });
     ['preflop', 'flop', 'turn', 'river'].forEach((street) => {
@@ -5365,6 +5428,9 @@
       }).join(', ');
       if (acts) lines.push(`  ${street}: ${acts}`);
     });
+    if (heroCards && heroCards.where === 'showdown') {
+      lines.push(`  showdown: ${playerDisplayName(heroXid)} shows ${heroCards.cards}`);
+    }
     Object.keys(h.shown || {}).forEach((xid) => {
       lines.push(`  showdown: ${playerDisplayName(xid)} shows ${h.shown[xid]}`);
     });
@@ -5438,7 +5504,9 @@
     // file must never drift into three descriptions of the same hand. Marks a
     // notable hand (see isNotableHand) that survives the history cap longer
     // than an ordinary one, so it not being just another card in the list.
-    const pin = h.pinned ? ' <span title="Notable — kept longer than the usual cap">📌</span>' : '';
+    const pin = (h.fav ? ' <span title="Starred — kept until you unstar it">★</span>' : '')
+      + (h.pinned ? ' <span title="Notable — kept longer than the usual cap">📌</span>' : '');
+    const heroCards = heroCardsPlacement(h);
     const parts = [`<div class="tph-hh-head" style="${HH.head}">${escapeHtml(when)} · pot ${fmtMoney(h.pot)}`
       + ` · reached ${escapeHtml(h.street || 'preflop')}${pin}</div>`];
     // Same omission rule as formatHand: no line at all for a hand recorded
@@ -5448,6 +5516,9 @@
         + (boardIsPartial(h)
           ? ` <span class="tph-hh-partial" title="The log's board line for one street was missed — most often the flop, when the hand was already running as the HUD started reading the log. The cards shown are the ones it did see.">partial: ${h.board.length} of ${BOARD_COUNT_FOR[h.street]}</span>`
           : '') + '</div>');
+    }
+    if (heroCards && heroCards.where === 'line') {
+      parts.push(`<div class="tph-hh-row" style="${HH.row}">your cards: <b>${escapeHtml(heroCards.cards)}</b></div>`);
     }
 
     const byStreet = {};
@@ -5480,6 +5551,10 @@
       }
     });
 
+    if (heroCards && heroCards.where === 'showdown') {
+      parts.push(`<div class="tph-hh-sd" style="${HH.showdown}">showdown: `
+        + `${escapeHtml(playerDisplayName(heroXid))} shows ${escapeHtml(heroCards.cards)}</div>`);
+    }
     Object.keys(h.shown || {}).forEach((xid) => {
       parts.push(`<div class="tph-hh-sd" style="${HH.showdown}">showdown: ${escapeHtml(playerDisplayName(xid))}`
         + ` shows ${escapeHtml(h.shown[xid])}</div>`);
@@ -5648,6 +5723,7 @@
     played: { label: 'Played', title: 'Hands where they called, bet or raised at least once. Blinds and checks alone do not count, and pots nobody ever bet in are dropped.' },
     notable: { label: 'Notable', title: 'Only hands carrying a marker — 3-bet, check-raise, postflop raise, big pot or showdown.' },
     all: { label: 'All', title: 'Every hand they were dealt into — folds, and pots that were checked down with no bet in them.' },
+    saved: { label: '★ Saved', title: 'Hands you starred. Kept until you unstar them, whatever the history limit.' },
   };
 
   // The tag chips, ANDed. Every selected one must be present on the hand.
@@ -5690,86 +5766,22 @@
   function filterHandsFor(hands, xid, mode, ctx, tags) {
     const want = Array.from(tags || []);
     return hands.filter((h) => {
-      // Applied to Played and Notable, not All — see HISTORY_FILTERS.
-      if (mode !== 'all' && handHadNoAggression(h)) return false;
+      // Saved is your own choice, so no other opinion about the hand applies
+      // to it — not the aggression exclusion, not the played/notable bar.
+      // Tags below still narrow it.
+      const saved = mode === 'saved';
+      if (saved && !h.fav) return false;
+      // Applied to Played and Notable, not All or Saved — see HISTORY_FILTERS.
+      if (!saved && mode !== 'all' && handHadNoAggression(h)) return false;
       const n = handNotability(h, xid, ctx);
-      // Anything that is not 'all' or 'notable' is treated as Played, so an
-      // unrecognised mode falls back to the useful default rather than showing
-      // nothing at all.
-      if (mode === 'notable') { if (!n.notable) return false; } else if (mode !== 'all' && !n.voluntary) return false;
+      // Anything that is not 'all', 'notable' or 'saved' is treated as Played,
+      // so an unrecognised mode falls back to the useful default rather than
+      // showing nothing at all.
+      if (mode === 'notable') { if (!n.notable) return false; } else if (!saved && mode !== 'all' && !n.voluntary) return false;
       if (!want.length) return true;
       const have = new Set(n.tags.map((t) => t.key));
       return want.every((k) => (k === HISTORY_TAG_ME ? heroPlayedHand(h, ctx) : have.has(k)));
     });
-  }
-
-  // --- Hand replayer (v1.17.0) -------------------------------------------
-  //
-  // Steps a stored hand forward one STREET at a time (not one action at a
-  // time — a street is the natural unit here, since the board and the equity
-  // quote only change at a street boundary, and grouping actions by street is
-  // what formatHand/formatHandHtml already do). Pure and deterministic other
-  // than reading module-level heroXid, same convention buildTendencyEntries
-  // and friends already follow — testable by setting T.heroXid directly.
-  //
-  // Deliberately does NOT reconstruct a running pot per step. hand.actions
-  // stores a raise's TOTAL-bet-to figure (see the 'raised $X to $Y' log
-  // pattern), not the increment — summing that into a running total would
-  // overcount. The final pot (h.pot, DOM-corrected at recording time — see
-  // "the pot had no cross-check", closed v0.18.0) is shown once as context
-  // instead of a per-step figure this file has no honest way to derive.
-  function replayStepsFor(h) {
-    if (!h) return [];
-    const boardKnown = Array.isArray(h.board);
-    const boardCountFor = BOARD_COUNT_FOR; // shared, so the two can't drift
-    const byStreet = {};
-    (h.actions || []).forEach((a) => { (byStreet[a.s] = byStreet[a.s] || []).push(a); });
-
-    const live = new Set(h.players || []);
-    const steps = [];
-    ['preflop', 'flop', 'turn', 'river'].forEach((street) => {
-      const acts = byStreet[street];
-      if (!acts || !acts.length) return; // the hand never reached this street
-      acts.forEach((a) => { if (a.a === 'fold') live.delete(a.x); });
-      steps.push({
-        street,
-        // Sliced fresh each street rather than accumulated, so a street with
-        // NO board entry at all (hero folded before a flop that later ran out
-        // in the log, or an old hand with no board data) reads as unknown
-        // rather than silently reusing the previous street's cards.
-        board: boardKnown ? h.board.slice(0, boardCountFor[street]) : null,
-        actions: acts,
-        // Who is still contesting the pot AFTER this street's folds — the
-        // opponent count the NEXT street's equity quote should use.
-        live: Array.from(live),
-      });
-    });
-    return steps;
-  }
-
-  // Preflop raise events across the WHOLE hand, replayed from the stored
-  // action log — same "an all-in counts as a raise" rule preflopRaiseEvents
-  // uses live (open finding #3), so a replayed equity quote tiers against the
-  // same opponentRangeProxy the live coach panel would have used.
-  function replayPreflopRaiseLevel(steps) {
-    const pre = steps.find((s) => s.street === 'preflop');
-    if (!pre) return 0;
-    return pre.actions.filter((a) => a.a === 'raise' || a.a === 'all-in').length;
-  }
-
-  // Hero's equity as of one replay step, or null when it can't be shown:
-  // hero's cards were never captured, hero has already folded by this step,
-  // the board isn't known (a hand recorded before v1.17.0), or nobody is left
-  // to have equity against. Uses estimateEquityCached, same range-proxy
-  // tiering (see opponentRangeProxy/equityBasisLabel) the live coach uses —
-  // a replayed read should look like the read you'd actually have gotten.
-  function replayStepEquity(h, step, raiseLevel) {
-    if (!h || !h.heroCards || h.heroCards.length !== 2 || heroUnresolved()) return null;
-    if (!step.board) return null;
-    if (!step.live.some((xid) => String(xid) === String(heroXid))) return null;
-    const nOpp = step.live.filter((xid) => String(xid) !== String(heroXid)).length;
-    if (nOpp <= 0) return null;
-    return estimateEquityCached(h.heroCards, step.board, nOpp, raiseLevel);
   }
 
   // The whole recorded history against one player, as a plain-text file.
@@ -8302,8 +8314,8 @@
 
   const SUIT_CHARS = ['s', 'h', 'd', 'c'];
   // Letter -> glyph, the reverse of SUIT_SYMBOLS below (glyph -> letter, for
-  // PARSING). This is for DISPLAY — the replayer is the first thing in this
-  // file that needs to print a {rank,suit} card back out rather than just read one.
+  // PARSING). This is for DISPLAY — printing a {rank,suit} card back out
+  // (board and hero cards in History) rather than just reading one.
   const SUIT_GLYPH = { s: '♠', h: '♥', d: '♦', c: '♣' };
   function cardGlyph(c) { return c ? c.rank + (SUIT_GLYPH[c.suit] || '') : ''; }
   function cardsGlyphText(cards) { return (cards || []).map(cardGlyph).join(' '); }
@@ -8709,10 +8721,9 @@
     return (100 * (st.win + st.tie * 0.5)) / st.iters;
   }
 
-  // Blocking equity: the whole simulation, straight through. Still the right
-  // shape for the hand replayer, which is user-driven one step at a time and
-  // wants the number in hand before it renders, and it stays the reference
-  // implementation every existing equity test drives.
+  // Blocking equity: the whole simulation, straight through. No production
+  // caller since the replayer went (v1.79.0) — the live coach uses the sliced
+  // path — but it stays the reference implementation every equity test drives.
   function estimateEquity(heroCards, boardCards, nOpp, raiseLevel) {
     const st = equityJobInit(heroCards, boardCards, nOpp, raiseLevel);
     if (!st) return null;
@@ -8748,12 +8759,6 @@
       equityCache.delete(equityCache.keys().next().value);
     }
     return value;
-  }
-
-  function estimateEquityCached(heroCards, boardCards, nOpp, raiseLevel) {
-    const key = equityCacheKey(heroCards, boardCards, nOpp, raiseLevel);
-    if (equityCache.has(key)) return equityCache.get(key);
-    return equityCacheSet(key, estimateEquity(heroCards, boardCards, nOpp, raiseLevel));
   }
 
   // --- Sliced equity, for the live coach panel -----------------------------
@@ -11104,20 +11109,15 @@
     .tph-hh-me { color: #ffc94d !important; font-weight: 700; }
     .tph-hh-sd { font-size: 11.5px; color: #d4b3f0 !important; margin-top: 4px; }
     .tph-hh-win { font-size: 12.5px; color: #8ce89a !important; margin-top: 4px; }
-    /* Sits right under each history card, not inside .tph-hh itself — the card
-       is the RECORD, the button is an action on it, and formatHandHtml (which
-       also serves the plain-text clipboard/file exports) stays untouched by
-       adding it as a sibling rather than teaching that function about buttons. */
+    /* Sits in the tag row above each history card, not inside .tph-hh itself —
+       the card is the RECORD, the star is an action on it, and formatHandHtml
+       (which also serves the plain-text clipboard/file exports) stays
+       untouched by it. Pushed to the row's right edge. */
     .tph-hh-wrap { margin-bottom: 4px; }
-    .tph-hh-replay { width: 100%; margin: -4px 0 9px; font-size: 11px !important;
-      padding: 5px 10px !important; }
-    .tph-replay-nav { display: flex; align-items: center; justify-content: space-between;
-      gap: 8px; margin: 8px 0; }
-    .tph-replay-step { color: #dfe5ea !important; font-size: 12px; text-transform: capitalize; }
-    .tph-replay-board { color: #f2f4f6 !important; font-size: 14px; margin-bottom: 4px; }
-    .tph-replay-hero { color: #dfe5ea !important; font-size: 12.5px; margin-bottom: 8px; }
-    .tph-replay-acts { background: #24242b !important; border-radius: 5px; padding: 6px 9px; }
-    .tph-replay-act { color: #d5dbe1 !important; font-size: 12.5px; line-height: 1.6; }
+    .tph-hh-fav { margin-left: auto; background: none !important; border: none !important;
+      padding: 0 4px !important; font-size: 16px !important; line-height: 1;
+      color: #8d959c !important; cursor: pointer; }
+    .tph-hh-fav.on { color: #ffc94d !important; }
     .tph-close { position: absolute; top: 8px; right: 10px; cursor: pointer; }
     /* Collapsible settings headings. Declares its own colour like every other
        tph- element that holds text, or Torn's bare rules render it dark on
@@ -12622,6 +12622,8 @@
           + (shown.length ? '' : `<i>No hands match this filter. ${
             historyTags.size
               ? 'Every tag has to be present at once — clear one, or drop back to All.'
+              : historyFilter === 'saved'
+                ? 'No starred hands with this player. Tap ☆ on any hand to keep it.'
               : historyFilter === 'notable'
                 ? 'Nothing they did here cleared the notable bar yet — try Played or All.'
                 : 'They folded or checked down every recorded hand — try All.'}</i>`)
@@ -12629,10 +12631,14 @@
             const n = handNotability(h, openPlayerXid, ctx);
             const tagHtml = n.tags.map((t) => `<span class="tph-hh-tag tph-hh-tag-${t.key}" title="${
               escapeHtml(t.title)}">${escapeHtml(t.label)}</span>`).join('');
+            // The star sits at the end of the tag row, so it costs no height of
+            // its own — the full-width Replay button it replaced cost a line
+            // per hand.
+            const fav = `<button class="tph-hh-fav${h.fav ? ' on' : ''}" title="${
+              h.fav ? 'Starred — tap to unstar' : 'Star this hand — kept until you unstar it'}">${h.fav ? '★' : '☆'}</button>`;
             return `<div class="tph-hh-wrap${n.notable ? ' tph-hh-notable' : ''}" data-idx="${i}">`
-              + (tagHtml ? `<div class="tph-hh-tags">${tagHtml}</div>` : '')
-              + formatHandHtml(h, openPlayerXid)
-              + '<button class="tph-hh-replay">▶ Replay this hand</button></div>';
+              + `<div class="tph-hh-tags">${tagHtml}${fav}</div>`
+              + formatHandHtml(h, openPlayerXid) + '</div>';
           }).join('')
           + (shown.length ? `<button class="tph-copy-hist">Copy shown (${shown.length})</button>` : '')
           + `<div class="tph-exp-lead">All ${hands.length} hand(s) with this player:</div>`
@@ -12654,8 +12660,14 @@
             renderPlayerPanel();
           });
         });
-        body.querySelectorAll('.tph-hh-replay').forEach((btn, i) => {
-          btn.addEventListener('click', () => openReplayHand(shown[i]));
+        body.querySelectorAll('.tph-hh-fav').forEach((btn, i) => {
+          btn.addEventListener('click', () => {
+            if (!toggleHandFavorite(shown[i])) {
+              btn.textContent = `limit ${FAVORITE_HANDS_MAX} — unstar one first`;
+              return;
+            }
+            renderPlayerPanel();
+          });
         });
         // Guarded: the filter can empty the list, and the Copy button is not
         // rendered when there is nothing to copy. An unguarded querySelector
@@ -12891,100 +12903,6 @@
     return `<br><b>Pool:</b> yours ${fmtPct(obs.vpip)}/${fmtPct(obs.pfr)} VPIP/PFR `
       + `over ${obs.players} tracked &nbsp;|&nbsp; assumed `
       + `${POOL_AVG.vpip.toFixed(0)}%/${POOL_AVG.pfr.toFixed(0)}%`;
-  }
-
-  // --- Hand replayer panel (v1.17.0) ------------------------------------
-
-  let replayHand = null;
-  let replayStepIndex = 0;
-
-  function openReplayHand(h) {
-    replayHand = h;
-    replayStepIndex = 0;
-    renderReplayPanel();
-  }
-
-  function renderReplayStepHtml(h, steps, idx) {
-    if (!steps.length) {
-      return '<span class="tph-close">✕</span><h3>Replay</h3><i>No actions recorded for this hand.</i>';
-    }
-    const step = steps[idx];
-    const raiseLevel = replayPreflopRaiseLevel(steps);
-    const eq = replayStepEquity(h, step, raiseLevel);
-    const when = new Date(h.t).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-
-    const boardText = step.board == null ? 'unknown — recorded before replay support'
-      : step.board.length ? cardsGlyphText(step.board) : '—';
-
-    const oppCount = step.live.filter((x) => heroUnresolved() || String(x) !== String(heroXid)).length;
-    const heroLine = h.heroCards && h.heroCards.length === 2
-      ? `<div class="tph-replay-hero">Your cards: <b>${escapeHtml(cardsGlyphText(h.heroCards))}</b>`
-        + (eq != null
-          ? ` — equity <b>${eq.toFixed(0)}%</b> (${escapeHtml(equityBasisLabel(raiseLevel))}, ${oppCount} opp)`
-          : '') + '</div>'
-      : '';
-
-    const actsHtml = step.actions.map((a) => {
-      const amt = a.amt ? ` ${fmtMoney(a.amt)}` : '';
-      const isHero = !heroUnresolved() && String(a.x) === String(heroXid);
-      const txt = `${escapeHtml(playerDisplayName(a.x))} ${escapeHtml(a.a)}${amt}`;
-      return `<div class="tph-replay-act">${isHero ? `<span class="tph-hh-me" style="${HH.me}">${txt}</span>` : txt}</div>`;
-    }).join('');
-
-    const isLast = idx === steps.length - 1;
-    const endParts = [];
-    if (isLast) {
-      Object.keys(h.shown || {}).forEach((xid) => {
-        endParts.push(`<div class="tph-hh-sd" style="${HH.showdown}">shows ${escapeHtml(playerDisplayName(xid))}: `
-          + `${escapeHtml(h.shown[xid])}</div>`);
-      });
-      (h.winners || []).forEach((w) => {
-        endParts.push(`<div class="tph-hh-win" style="${HH.win}">→ ${escapeHtml(playerDisplayName(w.xid))} `
-          + `wins ${fmtMoney(w.amount)}</div>`);
-      });
-    }
-
-    // Pot-per-step is deliberately not shown — see replayStepsFor's own
-    // comment: a raise's logged amount is the total bet-to figure, not the
-    // increment, so summing it across steps here would overcount.
-    const potNote = 'Pot-per-step is not shown — see the note in replayStepsFor.';
-    return `<span class="tph-close">✕</span>
-      <h3>Replay — ${escapeHtml(when)}</h3>
-      <div style="opacity:.7;margin-bottom:8px" title="${escapeHtml(potNote)}">Final pot ${fmtMoney(h.pot)} `
-      + `· reached ${escapeHtml(h.street || 'preflop')}</div>
-      <div class="tph-replay-nav">
-        <button class="tph-replay-prev"${idx === 0 ? ' disabled' : ''}>‹ Prev</button>
-        <span class="tph-replay-step">${escapeHtml(step.street)} — step ${idx + 1} of ${steps.length}</span>
-        <button class="tph-replay-next"${idx === steps.length - 1 ? ' disabled' : ''}>Next ›</button>
-      </div>
-      <div class="tph-replay-board">Board: <b>${escapeHtml(boardText)}</b></div>
-      ${heroLine}
-      <div class="tph-replay-acts">${actsHtml}</div>
-      ${endParts.join('')}
-    `;
-  }
-
-  function renderReplayPanel() {
-    const h = replayHand;
-    const steps = h ? replayStepsFor(h) : [];
-    const idx = steps.length ? Math.max(0, Math.min(replayStepIndex, steps.length - 1)) : 0;
-    renderPanel({
-      marker: 'tph-replay',
-      open: !!h,
-      onClose: () => { replayHand = null; renderReplayPanel(); },
-      html: !h ? '' : renderReplayStepHtml(h, steps, idx),
-      wire: (panel) => {
-        const prev = panel.querySelector('.tph-replay-prev');
-        const next = panel.querySelector('.tph-replay-next');
-        if (prev) prev.addEventListener('click', () => { replayStepIndex = Math.max(0, replayStepIndex - 1); renderReplayPanel(); });
-        if (next) {
-          next.addEventListener('click', () => {
-            replayStepIndex = Math.min(steps.length - 1, replayStepIndex + 1);
-            renderReplayPanel();
-          });
-        }
-      },
-    });
   }
 
   // The pill: a count you can see without it covering anything, and a tap
@@ -14614,7 +14532,6 @@
       preflopBaseline,
       evaluate7,
       estimateEquity,
-      estimateEquityCached,
       equityJobInit,
       equityJobStep,
       equityJobValue,
@@ -14959,9 +14876,10 @@
       formatHand,
       formatHandHtml,
       recordHandHistory,
-      replayStepsFor,
-      replayPreflopRaiseLevel,
-      replayStepEquity,
+      heroCardsPlacement,
+      toggleHandFavorite,
+      favoriteHandCount,
+      FAVORITE_HANDS_MAX,
       cardGlyph,
       cardsGlyphText,
       isNotableHand,

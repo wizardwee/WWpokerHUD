@@ -290,7 +290,7 @@ whichever opponents the range genuinely has nothing left to give. A table
 with eight live QQ+/AK hands facing a 4-bet doesn't reflect anything real
 either, so silently thinning the simulated field there is the honest outcome.
 
-`estimateEquityCached`'s cache key includes `raiseLevel` — without it, the
+The equity cache key (`equityCacheKey`) includes `raiseLevel` — without it, the
 same hero cards/board/opponent-count would keep serving a pre-raise figure
 straight through the raise that should have changed it. The UI's basis label
 (`equityBasisLabel`) tracks the same tiers as `opponentRangeProxy`: "vs
@@ -1192,6 +1192,30 @@ read, and the numbers are one tap away in Stats.
 **The gear is 32px, down from 44.** The red fill and the "HUD" label are what
 make it findable, not the size. It floats over the table permanently, so it is
 also the one element that always costs screen.
+
+## Starred hands, and hero's cards on the card (v1.79.0)
+
+**The replayer is gone** (v1.17.0–v1.78.0), removed at the user's request as
+not useful. It was also the ONLY place `h.heroCards` was ever printed, which is
+why a hand hero took to showdown showed the opponent's reveal and not hero's —
+the seat poll never writes hero into `h.shown` (your cards are face up all
+hand), and the log reveal only sometimes names hero. `heroCardsPlacement`
+now puts them on every card: among the showdown lines when hero was still in
+at a showdown, otherwise a `your cards` line under the board, and nothing if
+the log reveal already did. Both renderings, same rule as everything else here.
+
+**★ is a user choice, so it outranks every cap.** `h.fav` hands are kept by
+`trimHandHistory` unconditionally and count against neither `historyLimit` nor
+`HISTORY_PINNED_CEILING`; `FAVORITE_HANDS_MAX` (100) bounds them at toggle time
+instead, and the tap says so when refused. `mergeHands` keeps a star from
+either side (copied, never mutated) — same principle as `MANUAL_FIELDS`, and the
+same known gap: an unstar can be undone by merging from a device that still has
+it. The **Saved** mode ignores the aggression exclusion and the played bar —
+the hand is there because you put it there — but tags still narrow it.
+
+`dirtyHands` is set by the toggle. Nothing else marks that shard between hands
+(recording relies on the 60s reconcile), so a star without the mark would be
+lost if the page closed inside that window.
 
 ## The History tab's filters (v1.52.0)
 

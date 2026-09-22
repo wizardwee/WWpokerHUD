@@ -142,10 +142,6 @@ const card = (rank, suit) => ({ rank, suit });
   t.ok('the result is in the shared cache', T.equityCache.has(key));
   t.eq('a second ask is served from cache, identical', T.estimateEquitySliced(hand, [], 2, 0), first);
 
-  // The blocking path shares the same cache, so the replayer and the coach
-  // can never disagree about the same spot.
-  t.eq('estimateEquityCached hits the same entry', T.estimateEquityCached(hand, [], 2, 0), first);
-
   // An unsimulatable spot is cached as null so it isn't retried every render.
   const bad = T.estimateEquitySliced(hand, [], 23, 0);
   t.eq('an unsimulatable spot returns null', bad, null);

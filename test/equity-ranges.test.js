@@ -173,24 +173,20 @@ t.eq('', T.equityBasisLabel(4), 'vs 4-bet range');
     + `(${weighted}ms vs ${uniform}ms, ${ratio.toFixed(1)}x)`, ratio <= 6);
 }
 
-// --- estimateEquityCached: raiseLevel is part of the cache key --------------
+// --- equityCacheKey: raiseLevel is part of the cache key --------------------
 //
 // Same hero cards, same board, same opponent count — but the pot going from
 // unraised to a 4-bet has to actually change the quoted number. A cache keyed
 // on only the first three would keep serving the pre-raise figure straight
 // through the raise, which is a wrong number with nothing to indicate it.
+// Driven through the real key the live (sliced) path caches under.
 
 {
   const trash = [card('7', 's'), card('2', 'h')];
-  const cachedRandom = T.estimateEquityCached(trash, [], 1, 0);
-  const cachedFourBet = T.estimateEquityCached(trash, [], 1, 3);
-  t.ok(`the cached path shows the same directional drop as the uncached one (random=${cachedRandom.toFixed(1)}, vs4bet=${cachedFourBet.toFixed(1)})`,
-    cachedRandom - cachedFourBet > 8);
-  // Re-requesting the same (hand, board, nOpp, raiseLevel) must hit the cache
-  // and return the identical value, not a fresh (and therefore slightly
-  // different, since this is Monte Carlo) recomputation.
-  t.eq('a repeated request with the same key returns the exact cached value',
-    T.estimateEquityCached(trash, [], 1, 3), cachedFourBet);
+  t.ok('the cache key differs between an unraised pot and a 4-bet',
+    T.equityCacheKey(trash, [], 1, 0) !== T.equityCacheKey(trash, [], 1, 3));
+  t.eq('and is stable for the same spot',
+    T.equityCacheKey(trash, [], 1, 3), T.equityCacheKey(trash, [], 1, 3));
 }
 
 process.exit(t.report());
