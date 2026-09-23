@@ -92,4 +92,45 @@ t.eq('escalation fires at 10 seconds', T.TURN_ESCALATE_MS, 10000);
     /hero\s*\n?\s*\+\s*\(heroUnresolved|ABSENT — isHeroNextToAct cannot fire/.test(src));
 }
 
+// --- Vibration strength and repeat (v1.80.0) --------------------------------
+//
+// Reported: the buzz was sometimes missed. Light must keep the original
+// numbers EXACTLY (it is the escape hatch back to the old behaviour); strong
+// must actually be stronger, measured as total vibrating time, not just a
+// different array.
+
+{
+  const sum = (p) => p.filter((_, i) => i % 2 === 0).reduce((a, b) => a + b, 0);
+  t.eq('light first cue is the original single 120ms pulse',
+    JSON.stringify(T.turnVibratePattern('light', 'first')), '[120]');
+  t.eq('light escalation is the original double pulse',
+    JSON.stringify(T.turnVibratePattern('light', 'again')), '[120,80,120]');
+  t.ok('strong first cue vibrates for longer than light',
+    sum(T.turnVibratePattern('strong', 'first')) > sum(T.turnVibratePattern('light', 'first')));
+  t.ok('strong escalation vibrates for longer than light',
+    sum(T.turnVibratePattern('strong', 'again')) > sum(T.turnVibratePattern('light', 'again')));
+  t.ok('escalation is stronger than the first cue, at each level',
+    sum(T.turnVibratePattern('strong', 'again')) > sum(T.turnVibratePattern('strong', 'first')));
+  t.eq('an unknown level falls back to STRONG, never the weaker one',
+    JSON.stringify(T.turnVibratePattern('bogus', 'first')), JSON.stringify(T.turnVibratePattern('strong', 'first')));
+  t.eq('the default setting is strong', T.DEFAULT_SETTINGS.turnVibrateLevel, 'strong');
+  t.eq('repeat is opt-in', T.DEFAULT_SETTINGS.turnVibrateRepeat, false);
+}
+
+{
+  const R = T.TURN_REBUZZ_MS;
+  t.eq('repeats once the escalation has fired and the interval has passed',
+    T.shouldRebuzzTurn(true, true, true, 0, 0, R), true);
+  t.eq('not before the interval', T.shouldRebuzzTurn(true, true, true, 0, 0, R - 1), false);
+  t.eq('not before the escalation has fired', T.shouldRebuzzTurn(true, true, false, 0, 0, R * 5), false);
+  t.eq('not with the setting off', T.shouldRebuzzTurn(true, false, true, 0, 0, R * 5), false);
+  t.eq('not once the turn is over', T.shouldRebuzzTurn(false, true, true, 0, 0, R * 5), false);
+  t.eq('stops at the cap', T.shouldRebuzzTurn(true, true, true, 0, T.TURN_REBUZZ_MAX, R * 50), false);
+  t.ok('one below the cap still repeats', T.shouldRebuzzTurn(true, true, true, 0, T.TURN_REBUZZ_MAX - 1, R));
+  // Pinned against LITERALS, not the constants themselves — a bound checked
+  // against its own constant passes with the constant set to anything.
+  t.ok('the repeat is bounded to a sane total (<= 60s of repeats)', T.TURN_REBUZZ_MAX * T.TURN_REBUZZ_MS <= 60000);
+  t.ok('and never faster than every 3s', T.TURN_REBUZZ_MS >= 3000);
+}
+
 process.exit(t.report());

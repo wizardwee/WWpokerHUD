@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.79.0
+// @version      1.80.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,20 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.80.0 - A stronger turn buzz, an optional repeat, and a Test buzz button.
+ *            - Reported: "sometimes I miss" the vibrate. The first cue was ONE
+ *              120ms pulse — shorter than a phone's own notification buzz.
+ *            - Settings > Your turn now has Strength: Strong (default,
+ *              300-120-300 on your turn, three 500ms pulses at the 10s
+ *              escalation) or Light (the original numbers, unchanged).
+ *            - Optional "Keep buzzing every 5s until you act": after the
+ *              escalation, up to 6 more buzzes, vibration only — never the
+ *              chime. Stops by itself when the turn ends or the cap is hit.
+ *            - Test buzz button, and ticking the toggle or picking a strength
+ *              buzzes once so you feel it. It says "No vibration here" where
+ *              the webview can't vibrate (iPhone), and "Blocked" when the
+ *              browser refused because the page hasn't been tapped yet.
  *
  * 1.79.0 - Star a hand to keep it; the replayer is gone; your cards on every hand.
  *            - Asked for: a way to save / favourite a specific hand. Each
@@ -67,40 +81,6 @@
  *              on 18,070 is hero's identity binding a beat after the seats
  *              render, not the v1.6.0 split identity it was written for — and
  *              a marker that shouts forever trains you to ignore markers.
- *
- * 1.77.0 - Settings, rearranged — and calibration out from under Coach.
- *            - Reported: "the calibration should not be hidden under coach
- *              tab. Can we rearrange all of the settings on this page to be
- *              logical?" Calibration mode was the last line of the Coach
- *              section — the one control whose entire purpose is to be found
- *              by someone who has just been asked for a deep scan.
- *            - Thirteen sections now run in four labelled groups: AT THE TABLE
- *              (seat labels, your turn, fold guard, coach), READING THE TABLE
- *              (departure watch, Torn API, battle stats), YOUR DATA (hand log,
- *              P/L ledger, gist sync, storage, backup & reset) and
- *              TROUBLESHOOTING (calibration mode, with a line saying what a
- *              deep scan is actually for).
- *            - Storage sits immediately above Backup again. Its own comment
- *              says it should — the remedy for every state it reports is "copy
- *              a backup" — and it had drifted to sitting above Hand log.
- *            - The group labels are NOT <h4>. Every <h4> here becomes a
- *              collapsible section, so collapseSettingsSections now stops its
- *              walk at a label too; otherwise the label for the sections below
- *              is filed inside the section above and vanishes when that one is
- *              closed.
- *            - The storage breakdown read "players 0 B · history 0 B · ledger
- *              0 B · core 0 B" on a 3.0 MB store. It was built from the size
- *              map only the localStorage seam writes, so on the native backend
- *              every figure was 0 — the panel's zero-total guard hid it and
- *              the deep scan printed it. Now measured from STORE on demand
- *              (~23ms, and only when Settings opens or a scan is taken), one
- *              path that works on both backends.
- *            - The panel said "the limit above is the real one" and, four
- *              lines down, "the limit is an estimate". The second line is now
- *              printed only when it IS an estimate.
- *            - The markup is settingsPanelHtml() so a test can assert on it.
- *              Nothing rendered this panel before, which is how v1.72.0's
- *              ReferenceError-on-open shipped.
  *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
@@ -163,7 +143,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.79.0';
+  const HUD_VERSION = '1.80.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -616,7 +596,14 @@
     departPillPos: null,
     departureVibrate: false, // opt-in, same as the turn cue's
     departureSound: false,   // opt-in
-    turnVibrate: false, // opt-in: a short buzz on the rising edge only
+    turnVibrate: false, // opt-in: a buzz on the rising edge, and again at escalation
+    // 'strong' (v1.80.0) or 'light' (the original single 120ms tap). Strong is
+    // the default because light was reported as missable — see
+    // TURN_VIBRATE_PATTERNS.
+    turnVibrateLevel: 'strong',
+    // Opt-in: after the escalation, buzz again every TURN_REBUZZ_MS until you
+    // act, at most TURN_REBUZZ_MAX times.
+    turnVibrateRepeat: false,
     turnSound: false,   // opt-in: a synthesised two-note chime
     foldGuard: true,    // tap Fold twice to confirm — see foldGuardHandler
     heroName: '',      // YOUR Torn username. Without it P/L and position can't be attributed.
@@ -11490,6 +11477,10 @@
   // per hand for no reason.
   let turnCueSince = 0;
   let turnCueEscalated = false;
+  // Repeat-buzz bookkeeping for turnVibrateRepeat. Reset on the same rising
+  // edge as the two above.
+  let turnCueLastBuzz = 0;
+  let turnCueRebuzzes = 0;
 
   // How long you can sit on your own turn before the cue intensifies. A
   // second, more insistent signal at this point catches a phone that's been
@@ -11497,6 +11488,43 @@
   // base cue alone was missed at the table. Not a repeating alarm: exactly
   // one escalation per turn, matching what was actually asked for.
   const TURN_ESCALATE_MS = 10000;
+
+  // Vibration patterns (v1.80.0). Reported: "sometimes I miss it". The
+  // original first cue was ONE 120ms pulse — shorter than most phones' own
+  // notification buzz, and easy to lose in a pocket or on a table. Strong is
+  // three times as long and doubled, so it registers as a pattern rather
+  // than a twitch. Light keeps the original numbers exactly, for anyone who
+  // preferred them.
+  const TURN_VIBRATE_PATTERNS = {
+    light: { first: [120], again: [120, 80, 120] },
+    strong: { first: [300, 120, 300], again: [500, 150, 500, 150, 500] },
+  };
+  // The optional repeat: after the escalation, every 5s, at most 6 times —
+  // 30s past the escalation, which outlasts any turn timer, so it stops by
+  // itself even if turn detection ever sticks on.
+  const TURN_REBUZZ_MS = 5000;
+  const TURN_REBUZZ_MAX = 6;
+
+  // An unknown level reads as strong: the setting exists because a buzz got
+  // missed, so a corrupt value should not fall back to the weaker one.
+  function turnVibratePattern(level, stage) {
+    const set = TURN_VIBRATE_PATTERNS[level] || TURN_VIBRATE_PATTERNS.strong;
+    return stage === 'first' ? set.first : set.again;
+  }
+
+  // Pure, like shouldEscalateTurnCue: repeat only once the escalation has
+  // already fired, only while the cue is still on, and never past the cap.
+  function shouldRebuzzTurn(isOn, repeat, escalated, lastBuzz, count, now) {
+    return !!(isOn && repeat && escalated && count < TURN_REBUZZ_MAX && (now - lastBuzz) >= TURN_REBUZZ_MS);
+  }
+
+  // navigator.vibrate is absent in iOS webviews and returns false when the
+  // browser refuses (no user activation yet, page hidden). Reported rather than
+  // swallowed so the Test button can say which.
+  function buzz(pattern) {
+    if (!navigator.vibrate) return false;
+    try { return navigator.vibrate(pattern) !== false; } catch (e) { return false; }
+  }
 
   // A short chime, synthesised rather than loaded. No asset to host, nothing to
   // fetch, and nothing for Torn PDA's webview to block.
@@ -11695,21 +11723,29 @@
 
     // Fire once on the rising edge only. A buzz or chime every poll would be
     // unusable, and the poll runs at 400ms.
+    const level = STORE.settings.turnVibrateLevel;
+    const now = Date.now();
     if (on && !turnCueActive) {
-      turnCueSince = Date.now();
+      turnCueSince = now;
       turnCueEscalated = false;
-      if (STORE.settings.turnVibrate && navigator.vibrate) {
-        try { navigator.vibrate(120); } catch (e) { /* not supported here */ }
-      }
+      turnCueRebuzzes = 0;
+      turnCueLastBuzz = now;
+      if (STORE.settings.turnVibrate) buzz(turnVibratePattern(level, 'first'));
       if (STORE.settings.turnSound) playTurnChime();
     } else if (escalateNow) {
       // Still your turn TURN_ESCALATE_MS later — the same two channels again,
       // stronger, plus tph-glow-escalated above for a phone that's dimmed or
       // been set down since the first cue.
-      if (STORE.settings.turnVibrate && navigator.vibrate) {
-        try { navigator.vibrate([120, 80, 120]); } catch (e) { /* not supported here */ }
-      }
+      turnCueLastBuzz = now;
+      if (STORE.settings.turnVibrate) buzz(turnVibratePattern(level, 'again'));
       if (STORE.settings.turnSound) playTurnEscalationChime();
+    } else if (STORE.settings.turnVibrate && shouldRebuzzTurn(on, STORE.settings.turnVibrateRepeat,
+      turnCueEscalated, turnCueLastBuzz, turnCueRebuzzes, now)) {
+      // Opt-in repeat, vibration only: a chime every 5s would be unbearable
+      // in a room, a buzz is felt by you alone.
+      turnCueLastBuzz = now;
+      turnCueRebuzzes += 1;
+      buzz(turnVibratePattern(level, 'again'));
     }
     turnCueActive = on;
   }
@@ -13292,7 +13328,13 @@
       <h4>Your turn</h4>
       <label><input type="checkbox" class="tph-turncue-toggle" ${STORE.settings.turnCues ? 'checked' : ''}> Highlight the screen when it's your turn</label><br>
       <label><input type="checkbox" class="tph-nextcue-toggle" ${STORE.settings.nextToActCue ? 'checked' : ''}> Amber warning when you're next to act</label><br>
-      <label><input type="checkbox" class="tph-turnvib-toggle" ${STORE.settings.turnVibrate ? 'checked' : ''}> Also buzz once</label><br>
+      <label><input type="checkbox" class="tph-turnvib-toggle" ${STORE.settings.turnVibrate ? 'checked' : ''}> Also vibrate</label>
+      <button class="tph-test-buzz">Test buzz</button><br>
+      <div style="margin:2px 0 2px 18px">Strength:
+        <label><input type="radio" name="tph-vl" class="tph-vl" value="strong" ${STORE.settings.turnVibrateLevel !== 'light' ? 'checked' : ''}> Strong</label>
+        &nbsp;<label><input type="radio" name="tph-vl" class="tph-vl" value="light" ${STORE.settings.turnVibrateLevel === 'light' ? 'checked' : ''}> Light</label><br>
+        <label><input type="checkbox" class="tph-vibrepeat-toggle" ${STORE.settings.turnVibrateRepeat ? 'checked' : ''}> Keep buzzing every ${TURN_REBUZZ_MS / 1000}s until you act</label>
+      </div>
       <label><input type="checkbox" class="tph-turnsound-toggle" ${STORE.settings.turnSound ? 'checked' : ''}> Also play a chime</label>
       <button class="tph-test-chime">Test</button>
       <button class="tph-test-escalation">Test escalation</button>
@@ -13300,7 +13342,9 @@
         controls — the overlay ignores taps entirely. Pre-action buttons ("Check / Fold") don't count as your turn.
         Phones block audio until you've tapped the page, so use Test to check the chime actually plays here.
         Still your turn ${TURN_ESCALATE_MS / 1000}s later, and the cue repeats louder: a brighter, faster-pulsing
-        border and a second, stronger chime/buzz — for a phone that's dimmed or been set down since the first one.</div>
+        border and a second, stronger chime/buzz — for a phone that's dimmed or been set down since the first one.
+        "Keep buzzing" repeats the buzz after that, up to ${TURN_REBUZZ_MAX} times (vibration only, never the chime).
+        iPhone webviews can't vibrate at all — Test buzz says so if that's the case here.</div>
       <h4>Fold guard</h4>
       <label><input type="checkbox" class="tph-foldguard-toggle" ${STORE.settings.foldGuard ? 'checked' : ''}> Tap Fold twice to confirm</label>
       <div style="opacity:.7;margin:2px 0 10px">Guards against misclicking Fold next to Call. It never folds for you —
@@ -13568,6 +13612,22 @@
     panel.querySelector('.tph-turnvib-toggle').addEventListener('change', (e) => {
       STORE.settings.turnVibrate = e.target.checked;
       saveStore();
+      // Same as the chime toggle: confirm it works at the moment you ask for it.
+      if (e.target.checked) buzz(turnVibratePattern(STORE.settings.turnVibrateLevel, 'first'));
+    });
+    panel.querySelectorAll('.tph-vl').forEach((r) => r.addEventListener('change', (e) => {
+      if (!e.target.checked) return;
+      STORE.settings.turnVibrateLevel = e.target.value;
+      saveStore();
+      buzz(turnVibratePattern(e.target.value, 'first'));
+    }));
+    panel.querySelector('.tph-vibrepeat-toggle').addEventListener('change', (e) => {
+      STORE.settings.turnVibrateRepeat = e.target.checked;
+      saveStore();
+    });
+    panel.querySelector('.tph-test-buzz').addEventListener('click', (e) => {
+      const ok = buzz(turnVibratePattern(STORE.settings.turnVibrateLevel, 'first'));
+      e.target.textContent = ok ? 'Buzzed' : (navigator.vibrate ? 'Blocked — tap the page first' : 'No vibration here');
     });
     panel.querySelector('.tph-turnsound-toggle').addEventListener('change', (e) => {
       STORE.settings.turnSound = e.target.checked;
@@ -14867,6 +14927,11 @@
       COACH_MIN_W,
       COACH_MIN_H,
       TURN_ESCALATE_MS,
+      TURN_VIBRATE_PATTERNS,
+      TURN_REBUZZ_MS,
+      TURN_REBUZZ_MAX,
+      turnVibratePattern,
+      shouldRebuzzTurn,
       shouldEscalateTurnCue,
 
       // --- stateful: reads or writes module-level STORE / heroXid ---

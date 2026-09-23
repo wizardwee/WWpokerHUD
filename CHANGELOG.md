@@ -9,6 +9,32 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.80.0
+A stronger turn buzz, an optional repeat, and a Test buzz button
+
+Reported: "sometimes I miss" the vibrate notification. The first turn cue was a
+single 120ms pulse, shorter than most phones' own notification buzz and easy to
+lose in a pocket or on a table.
+
+Settings > Your turn now has a strength choice. **Strong** (the new default) is
+300-120-300ms when your turn starts and three 500ms pulses at the 10s
+escalation. **Light** keeps the original 120ms / 120-80-120 exactly.
+
+New opt-in **Keep buzzing every 5s until you act**: after the escalation it
+buzzes again up to 6 more times. It is vibration only (a chime every 5s would
+be unbearable in a room), and it stops as soon as the turn ends or the cap is
+reached, so a stuck turn detection cannot buzz forever.
+
+A **Test buzz** button, and ticking the toggle or picking a strength buzzes once
+so you feel it right away. The button reports "No vibration here" where the
+webview has no vibration API (iPhone webviews), and "Blocked — tap the page
+first" when the browser refused it.
+
+The patterns and the repeat decision are pure functions (`turnVibratePattern`,
+`shouldRebuzzTurn`) pinned in `test/turn-cue.test.js`. The test asserts that Light
+still matches the old numbers exactly and that Strong vibrates for longer in
+total, and it checks the repeat bound against literals.
+
 ## 1.79.0
 Star a hand to keep it; the replayer is gone; your cards on every hand
 
