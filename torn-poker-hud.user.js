@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.82.0
+// @version      1.83.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,21 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.83.0 - Table AFq, a new-table message, and the coach pill follows the panel.
+ *            - The table line under the coach now carries the table's average
+ *              AFq, over players with 10+ postflop actions. No "usual" beside
+ *              it: there is no pool figure for AFq.
+ *            - Asked for: a message for each new table joined. When the seats
+ *              settle on a roster that is mostly new — or the blind level
+ *              changes — a short summary appears at the top for 8 seconds:
+ *              the table, soft/mixed/tough, the type mix, VPIP and AFq. It
+ *              never takes a tap. A table that turns over in place gets it too,
+ *              worded "Table has changed". Off switch: Settings > Coach.
+ *            - Reported: moving the coach panel did not move its pill. They
+ *              kept separate positions on purpose; now they share one, so the
+ *              pill appears where the panel was and the panel opens where the
+ *              pill was. Your old separate pill position is no longer used.
  *
  * 1.82.0 - Turn barrels, won at showdown, a table-softness line, P/L by stake.
  *            - Turn barrel / Fold v barrel (Stats tab, report, coach): after
@@ -53,20 +68,6 @@
  *            - Kept on purpose: that unsaved data is "in memory only" when
  *              storage is full, and that you are never dropped by a cleanup.
  *              Both are pinned by tests, and both change what you'd do.
- *
- * 1.80.0 - A stronger turn buzz, an optional repeat, and a Test buzz button.
- *            - Reported: "sometimes I miss" the vibrate. The first cue was ONE
- *              120ms pulse — shorter than a phone's own notification buzz.
- *            - Settings > Your turn now has Strength: Strong (default,
- *              300-120-300 on your turn, three 500ms pulses at the 10s
- *              escalation) or Light (the original numbers, unchanged).
- *            - Optional "Keep buzzing every 5s until you act": after the
- *              escalation, up to 6 more buzzes, vibration only — never the
- *              chime. Stops by itself when the turn ends or the cap is hit.
- *            - Test buzz button, and ticking the toggle or picking a strength
- *              buzzes once so you feel it. It says "No vibration here" where
- *              the webview can't vibrate (iPhone), and "Blocked" when the
- *              browser refused because the page hasn't been tapped yet.
  *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
@@ -129,7 +130,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.82.0';
+  const HUD_VERSION = '1.83.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -545,14 +546,15 @@
     lastSync: 0,
     calibrationMode: false,
     gearPos: null, // {left, top} once you've dragged the HUD button somewhere
-    coachPos: null,      // {left, top} once you've dragged the coach panel
+    coachPos: null,      // {left, top} of the coach panel AND its pill — one
+                         // control in two states, one position (v1.83.0; see
+                         // setCoachHidden). The pill's old separate coachPillPos
+                         // is retired: left alone in stored settings, read by
+                         // nothing.
     coachSize: null,     // {w, h} once you've dragged its resize grip — the panel
                          // is meant to be parked open for a session, and one
                          // fixed size can't serve both "a thin strip out of the
                          // way" and "the whole read"
-    coachPillPos: null,  // {left, top} for the collapsed pill — tracked separately
-                         // from coachPos so collapsing doesn't teleport the pill
-                         // to wherever the big panel happened to be parked
     coachHidden: false,  // collapsed to a pill so it stops covering the table
     showBadges: true,    // per-seat tendency labels; off = table completely clear
     historyLimit: 200, // how many recent hands to keep for the History tab
@@ -577,7 +579,7 @@
     departureWatch: true,
     departureCue: true,
     // {left, top} once you've dragged the departure pill somewhere. Its own
-    // key, not shared with coachPillPos: the two pills can both be on screen
+    // key, not shared with the coach pill's: the two pills can both be on screen
     // at once, so one stored position would stack them on top of each other.
     departPillPos: null,
     departureVibrate: false, // opt-in, same as the turn cue's
@@ -590,6 +592,7 @@
     // Opt-in: after the escalation, buzz again every TURN_REBUZZ_MS until you
     // act, at most TURN_REBUZZ_MAX times.
     turnVibrateRepeat: false,
+    tableAnnounce: true, // summary message when you sit down at a new table
     turnSound: false,   // opt-in: a synthesised two-note chime
     foldGuard: true,    // tap Fold twice to confirm — see foldGuardHandler
     heroName: '',      // YOUR Torn username. Without it P/L and position can't be attributed.
@@ -2794,6 +2797,9 @@
   // is only the in-flight suspicion about players who are "missing" because you
   // are the one who left.
   function noteTableChange() {
+    // Also tells the new-table message to announce whatever settles next.
+    // Declared lower down, but only ever reached at run time, never at load.
+    tableAnnounceForced = true;
     pendingDepartures.clear();
     lastSeatedSnapshot = null; // the next readable sweep becomes a fresh baseline
   }
@@ -6422,6 +6428,11 @@
       // Departure watch. Diffing the seat sweep has to come AFTER the status
       // refresh above, so a player who leaves this tick already has a fresh
       // reading to be judged on rather than one up to 30s old.
+      // Opponents only, sitting-out seats left out — the same list the coach's
+      // table line reads, so the message and the line agree.
+      tickStep('new table', () => {
+        noteTableForAnnounce(Array.from(seatedXids()).filter((x) => !isHeroRecord(x)));
+      });
       tickStep('departures', () => {
         if (!STORE.settings.departureWatch) return;
         alertDepartures(noteSeatDepartures(Array.from(seatedXids({ includeSittingOut: true }))));
@@ -8101,6 +8112,9 @@
   // line would read as an invitation. The verdict needs 3+ rated players.
   const SOFT_TYPES = { Fish: 1, Station: 1 };
   const SOFT_MIN_RATED = 3;
+  // Postflop actions a player needs before their AFq joins the table average.
+  // Same bar the exploit reads use for a per-street aggression figure.
+  const TABLE_AFQ_MIN_ACTIONS = 10;
   function tableSoftness(xids) {
     const counts = {};
     let rated = 0;
@@ -8108,6 +8122,8 @@
     let soft = 0;
     let vpipSum = 0;
     let vpipN = 0;
+    let afqSum = 0;
+    let afqN = 0;
     (xids || []).forEach((xid) => {
       const p = STORE.players[xid];
       if (!p || (p.hands || 0) < STORE.settings.minHands) { fresh += 1; return; }
@@ -8117,13 +8133,23 @@
       if (SOFT_TYPES[label]) soft += 1;
       const v = computeShrunkRates(p).vpip;
       if (v != null) { vpipSum += v; vpipN += 1; }
+      // AFq is lifetime and unshrunk everywhere in this file (no pool figure
+      // exists for it), so the table figure is a plain mean of the raw ones —
+      // over players with enough postflop actions for theirs to mean anything.
+      const r = computeRates(p);
+      const post = POSTFLOP_STREETS.reduce((n, st) => n + (r.byStreet[st].actions || 0), 0);
+      if (r.afq != null && post >= TABLE_AFQ_MIN_ACTIONS) { afqSum += r.afq; afqN += 1; }
     });
     let verdict = null;
     if (rated >= SOFT_MIN_RATED) {
       const share = soft / rated;
       verdict = share >= 0.5 ? 'soft' : share <= 0.2 ? 'tough' : 'mixed';
     }
-    return { rated, fresh, soft, counts, verdict, avgVpip: vpipN ? vpipSum / vpipN : null };
+    return {
+      rated, fresh, soft, counts, verdict,
+      avgVpip: vpipN ? vpipSum / vpipN : null,
+      avgAfq: afqN ? afqSum / afqN : null,
+    };
   }
 
   function classifyProvisional(player) {
@@ -11505,6 +11531,14 @@
        deviation shading is not: a tough table is not "bad", only harder. */
     .tph-coach-table { color: #98a2ac !important; font-size: 11px; margin-top: 6px;
       padding-top: 5px; border-top: 1px solid #3d3d48; }
+    /* New-table message. Top-centre, and pointer-events:none like the turn
+       cue: it must never take a tap meant for the table. It removes itself. */
+    .tph-table-toast { position: fixed; z-index: 100000; top: 64px; left: 50%;
+      transform: translateX(-50%); pointer-events: none; max-width: 86vw;
+      background: #1f2a36; border: 1px solid #4a6a88; border-radius: 8px;
+      padding: 8px 12px; box-shadow: 0 3px 14px rgba(0,0,0,.55);
+      font: 12px/1.4 -apple-system, sans-serif; color: #dfe5ea !important; }
+    .tph-table-toast-h { color: #8ec5f0 !important; font-weight: 700; margin-bottom: 2px; }
     .tph-table-soft { color: #ffc94d !important; }
     .tph-table-mixed { color: #c9d1d9 !important; }
     .tph-table-tough { color: #7fb3e0 !important; }
@@ -12278,7 +12312,19 @@
   const COACH_MIN_W = 170;
   const COACH_MIN_H = 76;
 
+  // The pill and the panel are ONE control in two states, so they share ONE
+  // position (coachPos): whichever is on screen hands its top-left corner to
+  // the other as it swaps. They used to keep separate positions "so collapsing
+  // doesn't teleport the pill" — reported the other way round: moving the
+  // panel left the pill wherever it last was, so the two read as unrelated.
   function setCoachHidden(hidden) {
+    const cur = document.querySelector(hidden ? '.tph-coach' : '.tph-coach-pill');
+    if (cur) {
+      const r = cur.getBoundingClientRect();
+      if (r && (r.width || r.height)) {
+        STORE.settings.coachPos = { left: Math.round(r.left), top: Math.round(r.top) };
+      }
+    }
     STORE.settings.coachHidden = hidden;
     saveStore();
     renderCoachPanel();
@@ -12310,14 +12356,14 @@
         pill = document.createElement('div');
         pill.className = 'tph-coach-pill';
         document.body.appendChild(pill);
-        applyStoredPos(pill, 'coachPillPos', PILL_KEEP_VISIBLE_PX);
+        applyStoredPos(pill, 'coachPos', PILL_KEEP_VISIBLE_PX);
         // The expanded panel was draggable and the collapsed pill was not — it
         // only had a click handler, so there was no way to get it off whatever
         // it was covering. Tap still expands; makeDraggable's threshold keeps a
         // slightly-imprecise tap from being read as a drag.
         makeDraggable(pill, {
           onTap: () => setCoachHidden(false),
-          posKey: 'coachPillPos',
+          posKey: 'coachPos', // shared with the panel — see setCoachHidden
           keepVisiblePx: PILL_KEEP_VISIBLE_PX,
         });
       }
@@ -12407,19 +12453,85 @@
   // record is not part of the table you are choosing — and sitting-out seats
   // are left out, since they are not in the hands. The caller does the seat
   // read, so this formats from a plain list and a test can drive it.
-  function tableSoftnessHtml(xids) {
-    if (!xids || !xids.length) return '';
+  // The body of the summary, shared by the coach line and the new-table
+  // message so the two can never describe one table differently.
+  function tableSummaryInner(xids) {
     const t = tableSoftness(xids);
-    if (!t.rated) {
-      return `<div class="tph-coach-table">Table: ${t.fresh} new player${t.fresh === 1 ? '' : 's'}, none rated yet.</div>`;
-    }
+    if (!t.rated) return `${t.fresh} new player${t.fresh === 1 ? '' : 's'}, none rated yet.`;
     const order = ['Fish', 'Station', 'Maniac', 'LAG', 'TAG', 'Nit', 'Balanced'];
     const mix = order.filter((k) => t.counts[k]).map((k) => `${t.counts[k]} ${shortType(k)}`).join(', ');
     const ref = (POOL_AVG_BY_STAKE[lastSeenBB] || {}).vpip || POOL_AVG.vpip;
     const vp = t.avgVpip != null ? ` · VPIP ${t.avgVpip.toFixed(0)}% vs ${ref.toFixed(0)}% usual` : '';
+    // No "usual" beside AFq: there is no pool figure for it, the same reason
+    // the Stats tab draws it with no tick.
+    const af = t.avgAfq != null ? ` · AFq ${t.avgAfq.toFixed(0)}%` : '';
     const head = t.verdict ? `<b class="tph-table-${t.verdict}">${t.verdict}</b> · ` : '';
-    return `<div class="tph-coach-table">Table: ${head}${mix}`
-      + `${t.fresh ? ` · ${t.fresh} new` : ''}${vp}</div>`;
+    return `${head}${mix}${t.fresh ? ` · ${t.fresh} new` : ''}${vp}${af}`;
+  }
+
+  function tableSoftnessHtml(xids) {
+    if (!xids || !xids.length) return '';
+    return `<div class="tph-coach-table">Table: ${tableSummaryInner(xids)}</div>`;
+  }
+
+  // --- New-table message (v1.83.0) -------------------------------------------
+  //
+  // A short summary when you sit down somewhere new. "New" is decided from the
+  // ROSTER, not from the departure watch's burst guard: that only runs with the
+  // departure watch switched on, and a move between two short tables can
+  // arrive as two departures rather than a burst. A blind change (certain)
+  // forces one as well — see noteTableChange.
+  //
+  // Three rules, and each is there for a reason:
+  //   - At least TABLE_ANNOUNCE_MIN opponents, read the SAME on two sweeps in a
+  //     row. A table still rendering reads short, and announcing a half-drawn
+  //     table would describe the wrong one.
+  //   - Compared against the roster at the LAST announcement, not the last
+  //     sweep. People drift in and out one at a time; that is not a new table
+  //     until most of it has changed.
+  //   - Under TABLE_ANNOUNCE_OVERLAP shared with that roster counts as new. A
+  //     table that has turned over in place gets the message too — worded as
+  //     "changed", since you did not move.
+  const TABLE_ANNOUNCE_MIN = 2;
+  const TABLE_ANNOUNCE_OVERLAP = 0.5;
+  const TABLE_TOAST_MS = 8000;
+  let tableAnnounceBase = null;
+  let tableAnnouncePrev = null;
+  let tableAnnounceForced = false;
+
+  // Pure: returns null (say nothing), 'new' or 'changed'.
+  function tableAnnounceKind(base, prev, now, forced) {
+    const cur = (now || []).map(String);
+    if (cur.length < TABLE_ANNOUNCE_MIN) return null;
+    const same = (a, b) => a && a.length === b.length && a.every((x) => b.indexOf(String(x)) >= 0);
+    if (!same(prev, cur)) return null; // not settled yet
+    if (forced || !base) return 'new';
+    const shared = cur.filter((x) => base.indexOf(x) >= 0).length / cur.length;
+    if (shared >= TABLE_ANNOUNCE_OVERLAP) return null;
+    return shared < 0.25 ? 'new' : 'changed';
+  }
+
+  function noteTableForAnnounce(opponents) {
+    const now = (opponents || []).map(String);
+    const kind = tableAnnounceKind(tableAnnounceBase, tableAnnouncePrev, now, tableAnnounceForced);
+    tableAnnouncePrev = now;
+    if (!kind) return null;
+    tableAnnounceBase = now;
+    tableAnnounceForced = false;
+    if (STORE.settings.tableAnnounce !== false) showTableToast(kind, now);
+    return kind;
+  }
+
+  function showTableToast(kind, xids) {
+    document.querySelectorAll('.tph-table-toast').forEach((el) => el.remove());
+    const el = document.createElement('div');
+    el.className = 'tph-table-toast';
+    const where = plausibleBB(lastSeenBB) ? ` — ${escapeHtml(tableLabel(lastSeenBB))}` : '';
+    el.innerHTML = `<div class="tph-table-toast-h">${kind === 'new' ? 'New table' : 'Table has changed'}${where}</div>`
+      + `<div>${tableSummaryInner(xids)}</div>`;
+    document.body.appendChild(el);
+    pinTextColor(el);
+    setTimeout(() => el.remove(), TABLE_TOAST_MS);
   }
 
   let openPlayerXid = null;
@@ -13669,6 +13781,7 @@
         ${FOLD_ARM_MS / 1000}s. If anything fails, the tap goes straight through.</div>
       <h4>Coach</h4>
       <label><input type="checkbox" class="tph-coach-toggle" ${STORE.settings.coachHidden ? '' : 'checked'}> Show coach panel</label><br>
+      <label><input type="checkbox" class="tph-tableannounce-toggle" ${STORE.settings.tableAnnounce !== false ? 'checked' : ''}> Summary message when you join a new table</label><br>
       <label>Full table size: <input type="number" class="tph-table-max" min="2" max="10" value="${STORE.settings.tableMax}" style="width:60px"></label><br>
       <label>Equity samples: <input type="number" class="tph-equity-iters" min="${EQUITY_ITERS_MIN}" max="${EQUITY_ITERS_MAX}" step="100" value="${STORE.settings.equityIters}" style="width:80px"></label>
       <div style="opacity:.7;margin:2px 0 6px">Lower = faster on a slow phone. 300 &asymp; &plusmn;3 pts,
@@ -13936,6 +14049,10 @@
       const ok = playTurnEscalationChime();
       e.target.textContent = ok ? 'Played' : 'No audio here';
     });
+    panel.querySelector('.tph-tableannounce-toggle').addEventListener('change', (e) => {
+      STORE.settings.tableAnnounce = e.target.checked;
+      saveStore();
+    });
     panel.querySelector('.tph-foldguard-toggle').addEventListener('change', (e) => {
       STORE.settings.foldGuard = e.target.checked;
       saveStore();
@@ -13985,9 +14102,7 @@
     // An escape hatch for a panel dragged somewhere unreachable — e.g. parked in
     // a corner that the other screen orientation doesn't have.
     panel.querySelector('.tph-coach-reset').addEventListener('click', () => {
-      STORE.settings.coachPos = null;
-      STORE.settings.coachPillPos = null; // the pill is draggable too, and can be
-                                          // parked out of reach just as easily
+      STORE.settings.coachPos = null; // the panel and its pill share this
       STORE.settings.departPillPos = null; // and so is the departure pill — one
                                            // button has to recover every floating
                                            // element, or the escape hatch has a gap
@@ -14835,7 +14950,7 @@
       // Both pills, not just the coach's. A rotate that narrows the viewport
       // can leave either of them off screen, and the departure pill is the one
       // carrying a time-limited alert — it is the worse one to lose.
-      [['.tph-coach-pill', 'coachPillPos'], ['.tph-depart-pill', 'departPillPos']].forEach(([sel, key]) => {
+      [['.tph-coach-pill', 'coachPos'], ['.tph-depart-pill', 'departPillPos']].forEach(([sel, key]) => {
         const pill = document.querySelector(sel);
         if (!pill || !STORE.settings[key]) return;
         const pr = pill.getBoundingClientRect();
@@ -15246,6 +15361,13 @@
       plByStake,
       renderPlayerPanelBody,
       tableSoftnessHtml,
+      tableAnnounceKind,
+      noteTableForAnnounce,
+      noteTableChange,
+      TABLE_ANNOUNCE_MIN,
+      TABLE_TOAST_MS,
+      setCoachHidden,
+      renderCoachPanel,
       toggleHandFavorite,
       favoriteHandCount,
       FAVORITE_HANDS_MAX,

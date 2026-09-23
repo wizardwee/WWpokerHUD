@@ -9,6 +9,33 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.83.0
+Table AFq, a new-table message, and the coach pill follows the panel
+
+**Table AFq.** The table line under the coach's advice now carries the table's
+average aggression frequency, over players with at least 10 postflop actions.
+There is no "usual" figure beside it, because there is no pool figure for AFq —
+the same reason the Stats tab draws it with no tick.
+
+**New-table message.** Asked for: a pop-up for each new table joined. When the
+seats settle on a roster that is mostly new to the one last announced, or the
+blind level changes, a summary appears at the top of the screen for 8 seconds —
+the table name, soft/mixed/tough, the type mix, VPIP and AFq. It is the same
+text as the coach's table line, from one function, so the two cannot disagree.
+It never takes a tap. "New" is judged from the roster rather than the departure
+watch, which only runs when that setting is on; it waits for two identical seat
+reads so a half-drawn table is not described, and compares with the last
+announced roster so players drifting in one at a time do not set it off. A
+table that turns over in place is announced as "Table has changed". It can be
+switched off in Settings > Coach.
+
+**Coach pill and panel share one position.** Reported: moving the coach panel
+did not move its pill. They had separate saved positions on purpose ("so
+collapsing doesn't teleport the pill"); that was the wrong call for a control
+that is one thing in two states. Collapsing now puts the pill at the panel's
+top-left corner and expanding opens the panel at the pill's. The old separate
+pill position is no longer read.
+
 ## 1.82.0
 Turn barrels, won at showdown, a table-softness line, and P/L by stake
 

@@ -112,7 +112,8 @@ const fire = (el, name, e) => (el.listeners[name] || []).forEach((fn) => fn(e));
 
 {
   const T = setup();
-  T.STORE.settings.coachPillPos = { left: 10, top: 10 };
+  // The coach pill has shared the coach PANEL's key since v1.83.0.
+  T.STORE.settings.coachPos = { left: 10, top: 10 };
   T.renderDepartedPill();
   const pill = T._sandbox.document.querySelector('.tph-depart-pill');
   t.ok("the coach pill's stored position is not applied to this one",

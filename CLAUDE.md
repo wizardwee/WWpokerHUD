@@ -1267,6 +1267,32 @@ the panel labels it "last N hands" and keeps Lifetime as the exact total. A row
 with no plausible blind is its own chips-only group: it cannot be converted to
 big blinds after the fact.
 
+**Table AFq and the new-table message (v1.83.0).** The table line also
+averages AFq over players with `TABLE_AFQ_MIN_ACTIONS` (10) postflop actions,
+raw and with no "usual" beside it — there is no pool figure for AFq, the same
+reason the Stats tab draws it with no tick. `tableSummaryInner` is the ONE
+source for both the coach line and the new-table message, so they cannot
+describe a table differently.
+
+"New table" is decided from the **roster**, not from the departure watch's
+burst guard — that guard only runs with the departure watch on, and a move
+between short tables can arrive as two departures rather than a burst.
+`tableAnnounceKind` is pure: it needs two identical sweeps in a row (a table
+still rendering reads short), compares against the roster at the LAST
+announcement rather than the last sweep (people drift in one at a time), and
+calls under half shared "changed" and under a quarter "new". A blind change
+forces it through `noteTableChange`. With the setting off the roster is still
+tracked, so switching it back on does not announce a table you have sat at for
+an hour. The toast is `pointer-events: none` and removes itself.
+
+**The coach panel and its pill share ONE position, `coachPos` (v1.83.0).** It
+used to be two keys "so collapsing doesn't teleport the pill"; reported the
+other way — moving the panel left the pill behind, so they read as unrelated.
+`setCoachHidden` hands the visible element's top-left to the other as they
+swap. `coachPillPos` is retired: left in old stored settings, read by nothing,
+and a test scans for it. The departure pill still has its own key, because it
+and the coach pill can be on screen together.
+
 **Considered and not built**: two-pair as its own hand tier (low value, reshapes
 stored data), per-table stats keyed by a table-texture class (needs a scan
 nobody has taken; the user declined the probe), HopesG's IndexedDB backup and
