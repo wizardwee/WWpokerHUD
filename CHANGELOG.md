@@ -9,6 +9,26 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.81.0
+Settings help text, cut to the point
+
+Asked for: "sharpen and shorten each of the settings write up — it's too
+verbose." Every help paragraph in Settings is now one or two short lines saying
+what the control does and the one caveat that changes a decision. The long-form
+reasoning is still in code comments and CLAUDE.md; it just isn't on a phone
+screen any more.
+
+Three lines were also wrong, not just long, and are corrected:
+- The badge example still showed the "15h" window marker, which moved to the
+  tooltip in v1.59.0.
+- The raiser marker was described as tagging "the last preflop raise"; since
+  v1.60.0 every preflop raiser keeps a chip.
+- The history line didn't mention starred hands, which are kept past both caps.
+
+Kept deliberately, because they change what you'd do: a full store says
+unsaved data is "in memory only" and lost on reload, and the cleanup line says
+you are never dropped. Both are pinned by `test/storage-warning.test.js`.
+
 ## 1.80.0
 A stronger turn buzz, an optional repeat, and a Test buzz button
 

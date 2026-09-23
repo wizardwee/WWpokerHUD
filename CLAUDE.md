@@ -919,6 +919,11 @@ between sections.
 it, so it renders permanently expanded above a run of collapsed ones. The test
 asserts there is nothing but whitespace there.
 
+**Help text is one or two short lines per section (v1.81.0).** Asked for
+directly: the old paragraphs were "too verbose". Say what the control does and
+the one caveat that changes a decision; the reasoning belongs in code comments
+and here, not on a phone screen.
+
 **The markup is `settingsPanelHtml()` so a test can read it.** Nothing rendered
 this panel before, which is how `reclaimReportHtml` shipped calling a `const`
 scoped inside another function and threw a `ReferenceError` the instant
@@ -2576,6 +2581,9 @@ is attributed.
   local build to test against. Sequence: `node test/run.js`, bump `@version` and
   `HUD_VERSION` together, commit, push. One commit per change, message naming
   what changed for the user, not the diff.
+  **Push to `main`, always** — the user's standing instruction (v1.80.0). A
+  session branch is fine to work on, but a change that only reaches a feature
+  branch never reaches the phone either; push the branch to `main` as well.
 - **Verify before pushing.** `node` IS available (this claim used to say
   otherwise). Run **`node test/run.js`** on every edit — it syntax-checks the
   script and runs the suite. Add a `test/*.test.js` for anything with an

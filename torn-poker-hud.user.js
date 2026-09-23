@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.80.0
+// @version      1.81.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,22 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.81.0 - Settings help text, cut to the point.
+ *            - Asked for: "sharpen and shorten each of the settings write up —
+ *              it's too verbose." Every help paragraph is now one or two short
+ *              lines saying what the control does and the one caveat that
+ *              matters. The reasoning moved out of the panel, not out of the
+ *              file — it stays in code comments and CLAUDE.md.
+ *            - Three lines were also WRONG and are fixed rather than just
+ *              shortened: the badge example still showed the "15h" window
+ *              marker (on the tooltip since v1.59.0); the raiser marker said
+ *              it tags "the last preflop raise" (every raiser since v1.60.0);
+ *              and the history line didn't mention starred hands, which ride
+ *              past both caps.
+ *            - Kept on purpose: that unsaved data is "in memory only" when
+ *              storage is full, and that you are never dropped by a cleanup.
+ *              Both are pinned by tests, and both change what you'd do.
  *
  * 1.80.0 - A stronger turn buzz, an optional repeat, and a Test buzz button.
  *            - Reported: "sometimes I miss" the vibrate. The first cue was ONE
@@ -51,36 +67,6 @@
  *              them. Now every card shows them: among the showdown lines when
  *              you were still in at one, otherwise a "your cards" line under
  *              the board — never twice. Clipboard and file export match.
- *
- * 1.78.0 - bbHands could still exceed your hand count, and the scan said so.
- *            - Your own scan flagged it: 18,065 hands against 18,710 bbHands.
- *              bbHands is the SUBSET of your hands whose blind level could be
- *              read, so it can never be the larger number.
- *            - v1.71.0 fixed this on one side only. It moved bbHands onto a
- *              wider "did hero take part" test (dealt in, OR won, OR paid in)
- *              and left hero.hands on the narrow dealt-in test. Two tests for
- *              one question, so they kept disagreeing — on every hand you
- *              joined mid-way, which counts toward the denominator and not the
- *              hand count.
- *            - Now ONE predicate, computed once, used by hero.hands, bbHands
- *              and the ledger alike. bbHands <= hands is an invariant again.
- *            - Session hands deliberately stay on the narrow test: session
- *              VPIP/PFR read a play code that only exists for a hand you were
- *              dealt into, so counting a money-only hand there would dilute a
- *              rate whose numerator cannot move.
- *            - The existing "bbHands can never exceed hands" test was VACUOUS
- *              — every hand in it was all-or-nothing on both tests at once, so
- *              the two could not disagree. The block twelve lines above it
- *              violated the invariant and never looked at hands. Now pinned
- *              over a mixed field, and mutation shows the old code producing
- *              hands 5 against bbHands 10.
- *            - The existing excess is NOT repairable: the per-hand blind is
- *              gone after settlement. It is frozen from here, and the scan
- *              now says so rather than leaving it to be re-diagnosed.
- *            - The scan's heroRecord marker is proportional now. A 5-hand gap
- *              on 18,070 is hero's identity binding a beat after the seats
- *              render, not the v1.6.0 split identity it was written for — and
- *              a marker that shouts forever trains you to ignore markers.
  *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
@@ -143,7 +129,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.80.0';
+  const HUD_VERSION = '1.81.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -13285,46 +13271,42 @@
       <button class="tph-open-self" style="width:100%;padding:9px;margin-bottom:6px"${heroUnresolved() ? ' disabled' : ''}>📊 Your own stats${heroUnresolved() ? ' (sit at a table first)' : ''}</button>
       <button class="tph-open-players" style="width:100%;padding:9px;margin-bottom:10px">👥 View tracked players &amp; hand history</button>
       <label><b>Your Torn username:</b> <input type="text" class="tph-hero-name" value="${escapeHtml(STORE.settings.heroName)}" placeholder="required for P/L" style="width:55%"></label><br>
-      <div style="opacity:.7;margin:2px 0 6px">Needed to attribute profit/loss and work out your position.</div>
+      <div style="opacity:.7;margin:2px 0 6px">Needed for P/L and your position.</div>
       ${heroProblem() ? `<div class="tph-warn">⚠ ${escapeHtml(heroProblem())}</div>`
         : (heroSeatEl()
-          ? '<div class="tph-ok">✓ Matched to your seat — profit/loss is being attributed.</div>'
+          ? '<div class="tph-ok">✓ Matched to your seat.</div>'
           // Identity came from STORE.hero.xid, not a seat on screen (see
           // findHeroXid). Saying "matched to your seat" here would be a plain
           // lie — there is no seat — and it matters which one it is: your own
           // stats and Trends read fine either way, but nothing is being
           // attributed while you are not actually in a hand.
-          : '<div class="tph-ok">✓ Remembered from a previous sitting — your own stats and Trends are readable here. Profit/loss resumes when you sit down.</div>')}
+          : '<div class="tph-ok">✓ Remembered from last time. P/L resumes when you sit down.</div>')}
       <label>Min hands before rating: <input type="number" class="tph-min-hands" value="${STORE.settings.minHands}" style="width:60px"></label><br><br>
-      ${bbDisplayModeSuspected ? '<div class="tph-warn">⚠ The blind level read from the log is too small to be a real Torn stake. '
-        + 'Torn is probably set to show amounts in big blinds rather than cash — switch it back to cash, or P/L stays unrecorded '
-        + 'rather than being written wrong.</div>' : ''}
+      ${bbDisplayModeSuspected ? '<div class="tph-warn">⚠ Torn looks set to show amounts in big blinds. '
+        + 'Switch it to cash — P/L is paused until then.</div>' : ''}
       ${plausibleBB(lastSeenBB) ? `<div style="opacity:.7;margin:2px 0 8px">Table: ${escapeHtml(tableLabel(lastSeenBB))}</div>` : ''}
       <div class="tph-set-group">At the table</div>
       <h4>Seat labels</h4>
       <label><input type="checkbox" class="tph-badge-toggle" ${STORE.settings.showBadges ? 'checked' : ''}> Show tendency labels on seats</label><br>
       <label><input type="checkbox" class="tph-selfbadge-toggle" ${STORE.settings.showSelfBadge ? 'checked' : ''}> Include your own seat (green)</label><br>
       <label><input type="checkbox" class="tph-badgestats-toggle" ${STORE.settings.badgeStats !== false ? 'checked' : ''}> Numbers (v/p/a) on the labels</label>
-      <div style="opacity:.7;margin:2px 0 10px">Turn off if a label still reaches the community cards. You keep the
-        type, the this-hand marker and 🤮/🔥 — the read itself. The numbers behind it are one tap away in Stats.</div>
+      <div style="opacity:.7;margin:2px 0 10px">Turn off if labels reach the board. Type, markers and 🤮/🔥 stay;
+        numbers are one tap away.</div>
       <label><input type="checkbox" class="tph-rolebadge-toggle" ${STORE.settings.showRoleBadges !== false ? 'checked' : ''}> Mark this hand's raiser and postflop leads</label>
-      <div style="opacity:.7;margin:2px 0 10px">Gold <b>PFR</b> / <b>3B</b> / <b>4B</b> marks whoever made the last preflop raise.
-        Blue <b>DONK</b> (led out) or <b>RR</b> (check-raised or raised the c-bet) marks anyone taking the lead postflop who wasn't
-        that raiser. Both clear when the hand settles.</div>
+      <div style="opacity:.7;margin:2px 0 10px">Gold <b>PFR</b>/<b>3B</b>/<b>4B</b>: raised preflop.
+        Blue <b>DONK</b>/<b>RR</b>: led or raised postflop after not being the last preflop raiser. Cleared each hand.</div>
       <div style="margin:6px 0">
         <label><input type="radio" name="tph-bm" class="tph-bm" value="session" ${STORE.settings.badgeMode === 'session' ? 'checked' : ''}> Recent form</label>
         &nbsp;<label><input type="radio" name="tph-bm" class="tph-bm" value="lifetime" ${STORE.settings.badgeMode !== 'session' ? 'checked' : ''}> Lifetime</label>
         &nbsp;<label>over <input type="number" class="tph-sw" min="5" max="40" value="${STORE.settings.sessionWindow}" style="width:48px"> hands</label>
       </div>
-      <div style="opacity:.7;margin:2px 0 10px">Recent form shows how they are playing NOW, weighted against their own
-        longer-run baseline: a window with few hands in it reads close to that baseline and moves toward what it is
-        actually seeing as it fills, so the numbers never jump on one hand. The TYPE stays lifetime.
-        🤮 marks a player running ${TILT_VPIP_JUMP}+ points looser than their own norm (${TILT_VPIP_JUMP_AFTER_LOSS}+ if they just lost a ${BIG_LOSS_BB}bb pot). 🔥 marks someone winning a lot of recent pots. Both apply to you too — see the coach panel.</div>
-      <div style="opacity:.7;margin:2px 0 10px">Small line under each seat, e.g. <b>STA 15h v74p12a16</b>:
-        type · window · <b>v</b>pip (hands played) · <b>p</b>fr (raised preflop) · <b>a</b>fq (postflop aggression) · <b>b</b>luff frequency, only when notably high.
-        "15h" means V and P cover your last 15 hands; A is always lifetime, since postflop samples are too scarce
-        for a short window. Types: NIT, TAG, LAG, MAN(iac), STA(tion), FSH, BAL(anced); "?" = provisional.
-        Tap a badge for full stats. Turn off to leave the table completely clear.</div>
+      <div style="opacity:.7;margin:2px 0 10px">Recent form: how they play now, blended with their own history so
+        one hand can't swing it. Type is always lifetime.
+        🤮 ${TILT_VPIP_JUMP}+ pts looser than their norm (${TILT_VPIP_JUMP_AFTER_LOSS}+ after losing a ${BIG_LOSS_BB}bb pot).
+        🔥 winning lots of recent pots. Both apply to you too.</div>
+      <div style="opacity:.7;margin:2px 0 10px">e.g. <b>STA v74p12a16</b>: type · <b>v</b>pip · <b>p</b>fr ·
+        <b>a</b>fq (lifetime) · <b>b</b>luffs, when high. Types: NIT TAG LAG MAN STA FSH BAL; ? = provisional.
+        Tap a label for full stats.</div>
       <h4>Your turn</h4>
       <label><input type="checkbox" class="tph-turncue-toggle" ${STORE.settings.turnCues ? 'checked' : ''}> Highlight the screen when it's your turn</label><br>
       <label><input type="checkbox" class="tph-nextcue-toggle" ${STORE.settings.nextToActCue ? 'checked' : ''}> Amber warning when you're next to act</label><br>
@@ -13338,43 +13320,31 @@
       <label><input type="checkbox" class="tph-turnsound-toggle" ${STORE.settings.turnSound ? 'checked' : ''}> Also play a chime</label>
       <button class="tph-test-chime">Test</button>
       <button class="tph-test-escalation">Test escalation</button>
-      <div style="opacity:.7;margin:2px 0 10px">A pulsing border plus a green button. It never covers the table's
-        controls — the overlay ignores taps entirely. Pre-action buttons ("Check / Fold") don't count as your turn.
-        Phones block audio until you've tapped the page, so use Test to check the chime actually plays here.
-        Still your turn ${TURN_ESCALATE_MS / 1000}s later, and the cue repeats louder: a brighter, faster-pulsing
-        border and a second, stronger chime/buzz — for a phone that's dimmed or been set down since the first one.
-        "Keep buzzing" repeats the buzz after that, up to ${TURN_REBUZZ_MAX} times (vibration only, never the chime).
-        iPhone webviews can't vibrate at all — Test buzz says so if that's the case here.</div>
+      <div style="opacity:.7;margin:2px 0 10px">Green pulsing border; never blocks a tap. Gets louder if it's still
+        your turn after ${TURN_ESCALATE_MS / 1000}s. Keep buzzing adds up to ${TURN_REBUZZ_MAX} more buzzes, no chime.
+        Sound and buzz need one tap on the page first — use Test. iPhones can't vibrate.</div>
       <h4>Fold guard</h4>
       <label><input type="checkbox" class="tph-foldguard-toggle" ${STORE.settings.foldGuard ? 'checked' : ''}> Tap Fold twice to confirm</label>
-      <div style="opacity:.7;margin:2px 0 10px">Guards against misclicking Fold next to Call. It never folds for you —
-        the second tap is your own. If anything goes wrong the tap passes straight through, and missing the
-        ${FOLD_ARM_MS / 1000}s window costs nothing, since Torn folds you on timeout anyway.</div>
+      <div style="opacity:.7;margin:2px 0 10px">Stops a misclick on Fold. Never folds for you; confirm within
+        ${FOLD_ARM_MS / 1000}s. If anything fails, the tap goes straight through.</div>
       <h4>Coach</h4>
       <label><input type="checkbox" class="tph-coach-toggle" ${STORE.settings.coachHidden ? '' : 'checked'}> Show coach panel</label><br>
       <label>Full table size: <input type="number" class="tph-table-max" min="2" max="10" value="${STORE.settings.tableMax}" style="width:60px"></label><br>
       <label>Equity samples: <input type="number" class="tph-equity-iters" min="${EQUITY_ITERS_MIN}" max="${EQUITY_ITERS_MAX}" step="100" value="${STORE.settings.equityIters}" style="width:80px"></label>
-      <div style="opacity:.7;margin:2px 0 6px">How many hands the equity engine simulates. It is spread across frames so
-        it never freezes the table, but a lower number makes the figure land sooner — which is what you feel on a slow
-        phone. Precision scales as 1/&radic;n: 600 is roughly &plusmn;2 points at worst, 1200 &plusmn;1.4,
-        300 &plusmn;2.9 — all smaller than the error the range estimate already carries, so this is a cheap trade.
-        Whatever you set, the call/fold verdict goes quiet and reads &ldquo;marginal&rdquo; when the spot is closer
-        than the simulation can actually resolve.</div>
-      <div style="opacity:.7;margin:2px 0 6px">Equity is always quoted against a full ring of this size, plus the live and heads-up counts.</div>
+      <div style="opacity:.7;margin:2px 0 6px">Lower = faster on a slow phone. 300 &asymp; &plusmn;3 pts,
+        600 &plusmn;2, 1200 &plusmn;1.4. Too-close spots read &ldquo;marginal&rdquo; either way.
+        Table size: equity is quoted vs a full table this size, plus live and heads-up.</div>
       <button class="tph-coach-reset">Reset panel positions &amp; size</button>
-      <div style="opacity:.7;margin:2px 0 10px">Drag the ◢ corner to resize the coach panel — it stays where you put
-        it, at the size you set, and now stays on screen between hands instead of disappearing.</div>
+      <div style="opacity:.7;margin:2px 0 10px">Drag the coach panel's ◢ corner to resize it.</div>
       <div class="tph-set-group">Reading the table</div>
       <h4>Departure watch</h4>
       <label><input type="checkbox" class="tph-depart-toggle" ${STORE.settings.departureWatch ? 'checked' : ''}> Alert when an attackable player leaves</label><br>
       <label><input type="checkbox" class="tph-departcue-toggle" ${STORE.settings.departureCue ? 'checked' : ''}> Flash the screen edge</label><br>
       <label><input type="checkbox" class="tph-departvib-toggle" ${STORE.settings.departureVibrate ? 'checked' : ''}> Also buzz</label><br>
       <label><input type="checkbox" class="tph-departsound-toggle" ${STORE.settings.departureSound ? 'checked' : ''}> Also play a chime</label>
-      <div style="opacity:.7;margin:2px 0 10px">A seat vanishing is the moment they stop being reachable from the
-        table, so the HUD keeps their name, level and attack link for ${DEPARTED_WATCH_MS / 60000} minutes and
-        carries on checking their status — someone hospitalised after leaving stops reading as a target. Only
-        players known to be attackable when they left raise the alert; anyone in hospital, or never checked, is
-        listed without one. Needs a Torn API key, and the flash never intercepts a tap.</div>
+      <div style="opacity:.7;margin:2px 0 10px">Keeps a leaver's name and attack link for
+        ${DEPARTED_WATCH_MS / 60000} min and keeps checking their status. Alerts only for players attackable when
+        they left. Needs a Torn API key.</div>
       <h4>Torn API features</h4>
       <label>Torn API key: <input type="text" class="tph-torn-api-key" value="${escapeHtml(STORE.settings.tornApiKey)}" placeholder="optional, public access is enough" style="width:60%"></label>
       <div class="tph-target-diag ${targetDiagnostic() ? 'tph-target-diag-bad' : 'tph-target-diag-ok'}">${
@@ -13382,14 +13352,9 @@
           ? '⚠ ' + escapeHtml(targetDiagnostic())
           : `✓ Torn API working — ${targetProbe.okCount} lookup${targetProbe.okCount === 1 ? '' : 's'} so far.`
       }</div>
-      <div style="opacity:.7;margin:2px 0 10px">🔗 marks two seated players sharing a faction, 💍 marks two married
-        to each other — both are facts from Torn's own profile data, checked only against whoever is CURRENTLY
-        seated, never stored as a relationship between two players. 🏥 / ✈️ on a seat means something is
-        blocking an attack on them (hospital, jail, travelling) — checked for every seated opponent, refreshed
-        every 30s. No mark means nothing known to be blocking. Tap a seat badge to open their panel: their name
-        there links to their Torn profile, and there's a direct attack link beside their status and level.
-        Leave the key blank and none of this does anything; a public-only key is enough, and it never leaves this
-        device (stripped from Backup/Gist exports, same as the GitHub token).</div>
+      <div style="opacity:.7;margin:2px 0 10px">🔗 same faction · 💍 married, among seated players.
+        🏥/✈️ can't be attacked right now (checked every 30s). Player panels get profile and attack links.
+        A public key is enough, and it never leaves this device.</div>
       <h4>Estimated battle stats</h4>
       <label><input type="checkbox" class="tph-spy-toggle" ${STORE.settings.battleStatsEstimate ? 'checked' : ''}> Show estimated battle stats on departed players</label><br>
       <label>TornStats API key: <input type="text" class="tph-spy-api-key" value="${escapeHtml(STORE.settings.tornStatsApiKey)}" placeholder="from tornstats.com — a separate key from the one above" style="width:60%"></label>
@@ -13398,24 +13363,16 @@
           ? '⚠ ' + escapeHtml(spyDiagnostic())
           : `✓ TornStats working — ${spyProbe.okCount} lookup${spyProbe.okCount === 1 ? '' : 's'} so far.`
       }</div>
-      <div style="opacity:.7;margin:2px 0 10px">Off by default, and a separate key from the Torn API one above. Torn's
-        own API only ever returns the KEY OWNER'S OWN battle stats — there is no way to read a third party's
-        strength, defense, speed or dexterity from Torn directly, at any access level. What shows here instead is a
-        CROWDSOURCED ESTIMATE from TornStats: other players' own in-game "spy" results on that target, pooled and
-        served back — never Torn's own data, and only as fresh as the last time somebody actually spied them.
-        <b>This integration is unverified</b> — nobody working on this holds a TornStats key to confirm it against a
-        live response, so treat a number here as a rough guide, not a fact. Needs its own key from tornstats.com,
-        never the same as your Torn API key, and never leaves this device (stripped from Backup/Gist exports too).</div>
+      <div style="opacity:.7;margin:2px 0 10px">Torn can't show other players' stats, so this is TornStats'
+        crowdsourced spy data — only as fresh as the last spy. <b>Unverified</b>: treat it as a rough guide.
+        Needs its own tornstats.com key, which stays on this device.</div>
       <div class="tph-set-group">Your data</div>
       <h4>Hand log</h4>
-      <div class="tph-exp-lead">Every hand in the store as plain text, for offline analysis —
-        ${(STORE.hands || []).length} hand(s). Not the JSON backup below; this is the readable log.</div>
+      <div class="tph-exp-lead">Every stored hand as readable text — ${(STORE.hands || []).length} hand(s).</div>
       ${exportActionsHtml('handlog', `(${(STORE.hands || []).length})`)}
       <h4>P/L ledger</h4>
-      <div class="tph-exp-lead">One row per hand's chip result, as CSV — a running total column, not just
-        the day's history. Survives long after a hand ages out of the log above: ${(STORE.plLedger || []).length}
-        of up to ${PL_LEDGER_CAP} row(s) kept. Your lifetime total (${fmtSignedMoney(STORE.hero.netChips)}) stays
-        exact regardless of what has aged out of this file.</div>
+      <div class="tph-exp-lead">Each hand's result as CSV, with a running total. ${(STORE.plLedger || []).length}
+        of ${PL_LEDGER_CAP} rows kept; your lifetime total (${fmtSignedMoney(STORE.hero.netChips)}) is always exact.</div>
       ${exportActionsHtml('ledger', `(${(STORE.plLedger || []).length})`)}
       <h4>GitHub Gist sync</h4>
       <label>OAuth App Client ID: <input type="text" class="tph-client-id" value="${escapeHtml(STORE.settings.githubClientId)}" style="width:70%"></label><br>
@@ -13436,18 +13393,15 @@
            store. -->
       <button class="tph-reset-pl">Reset P/L only</button>
       <button class="tph-reset-hero">Reset my stats</button>
-      <div class="tph-stat-legend">P/L only: zeroes every money figure, keeps all stats, ranges and history.
-        My stats: zeroes your own counters and P/L, keeps every opponent and all hand history.</div>
+      <div class="tph-stat-legend">P/L only: zeroes money, keeps stats and history.
+        My stats: zeroes your own stats and P/L, keeps opponents and history.</div>
       <br>
       <button class="tph-reset">Reset all data</button>
       <div class="tph-set-group">Troubleshooting</div>
       <h4>Calibration mode</h4>
       <label><input type="checkbox" class="tph-calib-toggle" ${STORE.settings.calibrationMode ? 'checked' : ''}> Show the deep scan panel</label>
-      <div style="opacity:.7;margin:2px 0 10px">Opens a panel that dumps what the HUD can actually see of Torn's
-        page — the selectors it matched, the log lines it parsed, your identity, the storage backend and its
-        contents. Nobody working on this HUD can log into Torn or look at the live table, so a pasted-back scan is
-        the ONLY way a selector, a log wording or a storage problem ever gets confirmed. Turn it on, tap the panel's
-        Copy button, paste the result back. It changes nothing about how the HUD plays.</div>
+      <div style="opacity:.7;margin:2px 0 10px">A report of what the HUD can see on the page. When asked for a
+        scan: turn this on, tap Copy, paste it back. Changes nothing else.</div>
     `;
   }
 
@@ -13469,21 +13423,21 @@
     const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
     return '<h4>Storage</h4>'
       + (s.failed
-        ? '<div class="tph-warn">⚠ The last save was REFUSED — storage is full. Everything recorded since '
-          + `${new Date(saveFailure.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} `
-          + 'is in memory only and will be lost when this page reloads. Copy a backup below now, then Reset all data.</div>'
+        ? '<div class="tph-warn">⚠ Storage full — everything since '
+          + `${new Date(saveFailure.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}, `
+          + 'is in memory only and lost on reload. Copy a backup below now, then Reset all data.</div>'
         : '')
       + `<div class="tph-storebar"><div class="tph-storebar-fill tph-store-${s.level}" `
       + `style="width:${Math.min(100, s.pct).toFixed(1)}%"></div></div>`
       + `<div class="tph-store-line">${fmtBytes(s.chars)} of ${s.estimated ? 'roughly ' : ''}${fmtBytes(s.quota)} `
       + `(${s.pct.toFixed(0)}%) · ${plural(s.players, 'player')} · ${plural(s.hands, 'hand')} in history</div>`
       + (s.native
-        ? '<div class="tph-store-line">Stored by Torn PDA itself, not in the browser — it survives clearing '
-          + 'the app\'s browser data, and the limit above is the real one, raisable in PDA\'s script settings.</div>'
+        ? '<div class="tph-store-line">Stored by Torn PDA — survives clearing browser data. '
+          + 'Limit raisable in PDA\'s script settings.</div>'
         : '')
       + (s.level === 'warn'
-        ? '<div class="tph-store-line tph-store-warntext">Getting full. A cleanup runs automatically past '
-          + `${STORAGE_WARN_PCT}% — copy a backup below first if you want everything kept.</div>`
+        ? '<div class="tph-store-line tph-store-warntext">Nearly full. Cleanup runs past '
+          + `${STORAGE_WARN_PCT}% — copy a backup first to keep everything.</div>`
         : '')
       + (() => {
         const b = storageBreakdown();
@@ -13501,16 +13455,17 @@
       // wrong: notable hands are kept past the limit, up to
       // HISTORY_PINNED_CEILING. A panel that argues with itself gets read as a
       // bug in the thing it is describing.
-      + `<div class="tph-store-line">History keeps the last `
-      + `${STORE.settings.historyLimit || 200} hands, plus notable ones up to ${HISTORY_PINNED_CEILING}. `
-      + `Past ${STORAGE_WARN_PCT}% a cleanup drops players seen `
-      + `under ${PRUNE_THIN_HANDS} hands and not in ${PRUNE_THIN_DAYS} days, then anything not seen in `
-      + `${PRUNE_MAX_DAYS} days, then the least recently seen down to ${PRUNE_PLAYER_CAP}. Thin records cost `
-      + 'about half what a long-tracked one does and tell you nothing, so they go first. You are never dropped.'
+      // Starred hands named too (v1.79.0): they ride past both numbers, so a
+      // count above the ceiling would otherwise read as the cap failing.
+      + `<div class="tph-store-line">History: last `
+      + `${STORE.settings.historyLimit || 200} hands, notable up to ${HISTORY_PINNED_CEILING}, starred always. `
+      + `Past ${STORAGE_WARN_PCT}%, cleanup drops players under ${PRUNE_THIN_HANDS} hands unseen for `
+      + `${PRUNE_THIN_DAYS} days, then anyone unseen for ${PRUNE_MAX_DAYS} days, then the least recent down to `
+      + `${PRUNE_PLAYER_CAP}. You are never dropped.`
       // Only when it IS an estimate. On the native backend PDA_storage.usage()
       // reports the real limit, and the panel already says so a few lines up —
       // printing both left it flatly contradicting itself.
-      + (s.estimated ? ' The limit is an estimate; the browser does not report the real one here.' : '')
+      + (s.estimated ? ' The limit is an estimate.' : '')
       + '</div>'
       + reclaimReportHtml()
       + pruneReportHtml();
@@ -13531,9 +13486,8 @@
     if (r.ledger) parts.push(n(r.ledger, 'P/L row'));
     if (!parts.length) return '';
     return '<div class="tph-store-line tph-store-warntext">Recovered '
-      + `${parts.join(', ')} from a part-finished upgrade on `
-      + `${new Date(r.at).toLocaleDateString()}. An older copy of the store was `
-      + 'still on the device and had not been read since.</div>';
+      + `${parts.join(', ')} from an older copy of the store (`
+      + `${new Date(r.at).toLocaleDateString()}).</div>`;
   }
 
   function pruneReportHtml() {
