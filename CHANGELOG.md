@@ -9,6 +9,24 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.83.1
+
+History, the P/L log and your totals are saved as each hand ends.
+
+- Found in review: the saved store is split into pieces, and only pieces
+  marked as changed are written. Three of those marks were set by nothing
+  except a full rewrite once a minute: hand history, the P/L log, and the
+  core piece that holds settings, your lifetime totals and the session.
+  So closing the page within a minute of a hand ending lost that hand's
+  history entry, its P/L log row and the change to your lifetime total.
+  The log row and the total could also land a minute apart, which breaks
+  the rule that the log adds up to the total.
+- Hand history is now marked where a hand is recorded. The P/L log is
+  marked where a row is added and by both resets that clear it. Core is
+  marked on every save: it is about 2 KB, and it is written from too many
+  places to mark each one reliably.
+- The once-a-minute full rewrite is still there as the safety net.
+
 ## 1.83.0
 Table AFq, a new-table message, and the coach pill follows the panel
 

@@ -109,9 +109,91 @@ function seeded(n) {
   flush(T);
 
   t.ok('the touched player is written', written.indexOf(KEY + ':p:x2') !== -1);
-  t.eq('and nothing else is', written.length, 1);
+  // Core rides along on every save since v1.83.1 (~2 KB, and it is where
+  // hero.netChips lives) — see the settlement block below.
+  t.eq('and nothing else but core is', written.slice().sort().join(' '),
+    [KEY + ':core', KEY + ':p:x2'].sort().join(' '));
   t.ok('untouched players are not rewritten', written.indexOf(KEY + ':p:x0') === -1);
   t.ok('the ledger is not rewritten for a preflop call', written.indexOf(KEY + ':pl') === -1);
+}
+
+// --- A settled hand lands at once, not a reconcile later (v1.83.1) ----------
+//
+// hands, pl and core used to be marked by nothing but the 60s reconcile, so a
+// page closed inside that window lost the hand's history entry, its ledger row
+// and the hero.netChips update — and the ledger and the total could then
+// disagree. Every block pins lastReconcileAt to NOW and clears the marks
+// first, so the reconcile cannot be what writes the shard.
+
+function midInterval(T) {
+  T.lastReconcileAt = Date.now();
+  T.dirtyCore = false; T.dirtyHands = false; T.dirtyPl = false;
+  T.dirtyPlayers.clear();
+}
+
+{
+  const T = seeded(2);
+  midInterval(T);
+  const h = T.freshHandState();
+  h.gameId = 'abc123';
+  h.dealtInXids = new Set(['x0', 'x1']);
+  h.actions = [{ xid: 'x0', action: 'raise', amount: 100, street: 'preflop' }];
+  h.winners = [];
+  T.recordHandHistory(h);
+  flush(T);
+  const stored = JSON.parse(raw(T, KEY + ':hands'));
+  t.ok('a recorded hand reaches the hands shard inside the reconcile window',
+    stored.some((x) => x.g === 'abc123'));
+  t.ok('and the mark is cleared by that write', !T.dirtyHands);
+}
+
+{
+  const T = seeded(2);
+  midInterval(T);
+  T.STORE.hero.netChips = 5000;
+  T.pushLedgerEntry(5000, 100, 'g1');
+  flush(T);
+  const rows = JSON.parse(raw(T, KEY + ':pl'));
+  t.ok('a ledger row reaches the pl shard inside the reconcile window',
+    rows.some((r) => r.g === 'g1' && r.d === 5000));
+  t.eq('and the total it sums to lands in the SAME save',
+    JSON.parse(raw(T, KEY + ':core')).hero.netChips, 5000);
+}
+
+{
+  const T = seeded(2);
+  T.pushLedgerEntry(700, 100, 'g2');
+  T.STORE.hero.netChips = 700;
+  T.markAllDirty();
+  flush(T);
+  midInterval(T);
+  T.resetProfitLoss();
+  T._sandbox.runTimers();
+  t.eq('a P/L reset empties the stored ledger, not just the one in memory',
+    JSON.parse(raw(T, KEY + ':pl')).length, 0);
+  t.eq('and zeroes the stored total beside it',
+    JSON.parse(raw(T, KEY + ':core')).hero.netChips, 0);
+}
+
+{
+  const T = seeded(2);
+  T.pushLedgerEntry(700, 100, 'g3');
+  T.markAllDirty();
+  flush(T);
+  midInterval(T);
+  T.resetHeroStats();
+  T._sandbox.runTimers();
+  t.eq('resetting hero stats empties the stored ledger too',
+    JSON.parse(raw(T, KEY + ':pl')).length, 0);
+}
+
+{
+  const T = seeded(1);
+  midInterval(T);
+  T.STORE.settings.historyLimit = 123;
+  flush(T);
+  t.eq('a settings change reaches core without its writer marking anything',
+    JSON.parse(raw(T, KEY + ':core')).settings.historyLimit, 123);
 }
 
 // --- getPlayer marks, because that is where mutation goes -------------------

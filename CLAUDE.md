@@ -512,6 +512,15 @@ Measured through the real save path at 900 players: **one action 19ms → 0.037m
   **Over-marking is free; under-marking is bounded.** Don't remove the
   reconcile to save the 23ms — it is what makes the marking safe rather than
   merely fast.
+- **The section shards are marked at their write sites, and core on every
+  save (v1.83.1).** Until then `dirtyHands`/`dirtyPl`/`dirtyCore` were set by
+  nothing but the reconcile, so every hand's history entry, ledger row and
+  `hero.netChips` rode on it — a page closed inside the minute lost all three,
+  and the row and the total could land a minute apart. `recordHandHistory`
+  marks hands, `pushLedgerEntry` and both ledger-clearing resets mark pl, and
+  `saveStore()` marks core unconditionally (~2 KB; written from too many sites
+  to enumerate). The reconcile is the net for a missed mark, not the mechanism
+  for a whole shard. `test/store-shards.test.js` pins each mark by mutation.
 - **A mark is cleared only by its OWN successful write.** A refused write
   leaves that shard dirty so the next save retries it. `flushShards` also
   keeps going after a failure and re-throws at the end, so the shards that fit

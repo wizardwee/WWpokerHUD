@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.83.0
+// @version      1.83.1
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,23 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.83.1 - History, the P/L log and your totals are saved as each hand ends.
+ *            - Found in review: the saved store is split into pieces, and only
+ *              pieces marked as changed are written. Three of those marks were
+ *              set by nothing except a full rewrite once a minute: hand
+ *              history, the P/L log, and the core piece that holds settings,
+ *              your lifetime totals and the session. So closing the page
+ *              within a minute of a hand ending lost that hand's history
+ *              entry, its P/L log row and the change to your lifetime total.
+ *              The log row and the total could also land a minute apart, which
+ *              breaks the rule that the log adds up to the total.
+ *            - Hand history is now marked where a hand is recorded. The P/L
+ *              log is marked where a row is added and by both resets that
+ *              clear it. Core is marked on every save: it is about 2 KB, and
+ *              it is written from too many places to mark each one reliably.
+ *            - The once-a-minute full rewrite is still there as the safety
+ *              net.
  *
  * 1.83.0 - Table AFq, a new-table message, and the coach pill follows the panel.
  *            - The table line under the coach now carries the table's average
@@ -52,22 +69,6 @@
  *            - Your own Stats: "By stake" — net bb, chips, hands and bb/100 at
  *              each blind level, from the P/L log. Covers the hands the log
  *              holds; Lifetime above it is still the exact total.
- *
- * 1.81.0 - Settings help text, cut to the point.
- *            - Asked for: "sharpen and shorten each of the settings write up —
- *              it's too verbose." Every help paragraph is now one or two short
- *              lines saying what the control does and the one caveat that
- *              matters. The reasoning moved out of the panel, not out of the
- *              file — it stays in code comments and CLAUDE.md.
- *            - Three lines were also WRONG and are fixed rather than just
- *              shortened: the badge example still showed the "15h" window
- *              marker (on the tooltip since v1.59.0); the raiser marker said
- *              it tags "the last preflop raise" (every raiser since v1.60.0);
- *              and the history line didn't mention starred hands, which ride
- *              past both caps.
- *            - Kept on purpose: that unsaved data is "in memory only" when
- *              storage is full, and that you are never dropped by a cleanup.
- *              Both are pinned by tests, and both change what you'd do.
  *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
@@ -130,7 +131,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.83.0';
+  const HUD_VERSION = '1.83.1';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -1501,6 +1502,15 @@
   bootStore();
 
   function saveStore() {
+    // Core is marked on EVERY save, not at its write sites. Settings, hero and
+    // session are written from dozens of places — every stat, every setting
+    // toggle, every settled hand — and proving a list of them exhaustive is the
+    // claim this section refuses to rely on. The shard is ~2 KB, so marking it
+    // always costs one small stringify per save; missing a mark cost
+    // hero.netChips for up to a reconcile interval, while the ledger row that
+    // sums to it may already have landed. Before v1.83.1 nothing marked it
+    // between reconciles at all.
+    dirtyCore = true;
     if (saveScheduled) return;
     saveScheduled = true;
     setTimeout(() => {
@@ -1966,6 +1976,7 @@
     // total would leave a ledger whose sum silently disagreed with the very
     // number it exists to break down.
     STORE.plLedger = [];
+    dirtyPl = true;
     saveStore();
   }
 
@@ -2011,6 +2022,7 @@
     // Same reasoning again: the ledger is 100% hero data too, and its rows sum
     // to the hero.netChips this function just zeroed.
     STORE.plLedger = [];
+    dirtyPl = true;
     saveStore();
   }
 
@@ -5269,6 +5281,9 @@
     });
     const limit = STORE.settings.historyLimit || 200;
     STORE.hands = trimHandHistory(STORE.hands, limit, HISTORY_PINNED_CEILING);
+    // Marked at the write site. Until v1.83.1 only the 60s reconcile wrote
+    // this shard, so a page closed inside that window lost the hand.
+    dirtyHands = true;
   }
 
   // Has this Torn game id already been written to history? Only the newest few
@@ -9307,6 +9322,9 @@
     if (STORE.plLedger.length > PL_LEDGER_CAP) {
       STORE.plLedger.splice(0, STORE.plLedger.length - PL_LEDGER_CAP);
     }
+    // Marked here, beside the append. Core (hero.netChips) is marked by
+    // saveStore itself, so the row and the total it sums to land together.
+    dirtyPl = true;
   }
 
   // Your results split by stake (v1.82.0), from the ledger alone. Each row
