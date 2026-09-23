@@ -9,6 +9,40 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.82.0
+Turn barrels, won at showdown, a table-softness line, and P/L by stake
+
+Four reads chosen from a comparison with HopesG's HUD and ordinary HUD
+practice, each because it could be built mostly from data already held.
+
+**Turn barrel / Fold v barrel.** After the preflop raiser bets the flop and is
+only called, how often do they bet the turn again when it is theirs to bet, and
+how often does the flop caller fold to that second bet? Shown in the Stats tab,
+the tendency report and the coach. It is a new, strictly defined stat rather
+than a change to C-bet: the existing C-bet figure counts an opportunity on
+every street for whoever last bet, so it already mixes flop and turn, and the
+pool average was measured off it — redefining it would reprice every stored
+number. Computed from each finished hand's action list, which also let it be
+seeded once from your stored hand history. With 10+ spots the exact read
+replaces the older "aggression collapses on the turn" read rather than sitting
+beside it.
+
+**Won SD.** Of the showdowns where a player's cards were seen, how often they
+won. It pairs with WTSD: getting to showdown a lot and losing there is a caller
+of worse; winning most of what they show means their river bets are real. No
+new collection — it reads the showdown record already kept. It inherits that
+record's bias (an unseen muck isn't counted), and your own record reads — here.
+
+**Table softness.** One line under the coach's advice: soft / mixed / tough,
+the type mix, how many seats are new to you, and average VPIP against the usual
+figure for the stake. Only players you have a rating on count toward the
+verdict, and it needs three of them.
+
+**By stake.** Your own Stats tab now splits your results by blind level — net
+bb, chips, hands and bb/100 — from the P/L log. It covers the hands the log
+holds (since v1.55.0, up to 20,000); the Lifetime line above it stays the exact
+total. Hands with no readable blind are grouped separately, in chips only.
+
 ## 1.81.0
 Settings help text, cut to the point
 

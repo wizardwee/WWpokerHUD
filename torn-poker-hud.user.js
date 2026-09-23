@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.81.0
+// @version      1.82.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,26 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.82.0 - Turn barrels, won at showdown, a table-softness line, P/L by stake.
+ *            - Turn barrel / Fold v barrel (Stats tab, report, coach): after
+ *              c-betting the flop and being called, how often the raiser bets
+ *              the turn again — and how often the flop caller then folds. A
+ *              NEW stat; the existing C-bet figure already mixes streets and
+ *              the pool average was measured off it, so it is left alone.
+ *              Seeded once from your stored hand history, so it is not empty
+ *              on day one. Once a player has 10 spots it replaces the rougher
+ *              "aggression collapses on the turn" read instead of repeating it.
+ *            - Won SD: of the showdowns where their cards were seen, how often
+ *              they won. Pairs with WTSD — reaching showdown a lot and losing
+ *              there is a caller of worse. Needs no new data.
+ *            - Coach panel: one line on the table you are at — soft / mixed /
+ *              tough, the type mix, new faces, and average VPIP against the
+ *              usual figure for the stake. Only rated players count toward
+ *              the verdict.
+ *            - Your own Stats: "By stake" — net bb, chips, hands and bb/100 at
+ *              each blind level, from the P/L log. Covers the hands the log
+ *              holds; Lifetime above it is still the exact total.
  *
  * 1.81.0 - Settings help text, cut to the point.
  *            - Asked for: "sharpen and shorten each of the settings write up —
@@ -47,26 +67,6 @@
  *              buzzes once so you feel it. It says "No vibration here" where
  *              the webview can't vibrate (iPhone), and "Blocked" when the
  *              browser refused because the page hasn't been tapped yet.
- *
- * 1.79.0 - Star a hand to keep it; the replayer is gone; your cards on every hand.
- *            - Asked for: a way to save / favourite a specific hand. Each
- *              History card now has a star at the end of its tag row. A
- *              starred hand is never evicted — not by historyLimit, not by the
- *              pinned ceiling — and a new "Saved" chip lists them. Capped at
- *              100 stars (the tap says so when full). A gist merge keeps a star
- *              from either device, same rule as manual tags and notes.
- *            - Asked for: strip out the hand replayer. Removed — the button,
- *              the panel, its step/equity code and its styles. The star takes
- *              the button's place without the extra line per hand.
- *            - Reported with a screenshot: you bet three streets to a
- *              showdown, the opponent's cards printed and yours did not. The
- *              showdown lines only ever list h.shown, which the seat poll
- *              never fills for you (your cards are face up all hand); the log
- *              reveal sometimes names you, which is why it was "sometimes".
- *              Your cards were stored all along but only the replayer printed
- *              them. Now every card shows them: among the showdown lines when
- *              you were still in at one, otherwise a "your cards" line under
- *              the board — never twice. Clipboard and file export match.
  *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
@@ -129,7 +129,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.81.0';
+  const HUD_VERSION = '1.82.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -5173,6 +5173,8 @@
       noteShowdown(xid, hand.shownCards[xid], hand);
       noteBetTexture(xid, hand.shownCards[xid], hand);
     });
+    // From the finished action list — see barrelEventsFor.
+    noteBarrels(hand.actions, (xid) => getPlayer(xid));
 
     recordHandHistory(hand);
     saveStore();
@@ -6666,6 +6668,118 @@
   //
   // Idempotent by a store flag rather than by being safe to re-run: it adds to
   // counters, so running it twice would double-count every backfilled hand.
+  // --- Turn barrels (v1.82.0) -----------------------------------------------
+  //
+  // "Fires the flop, gives up the turn" was only visible as a drop in per-street
+  // aggression — which mixes every bet anyone makes on each street. This is the
+  // precise version: the preflop raiser bet the flop, was only called, and is
+  // first to put money in on the turn (nobody bet into them). Did they bet
+  // again? And for each player who called that flop bet: when the second barrel
+  // came, did they fold?
+  //
+  // Deliberately NOT folded into the existing C-bet stat. That one grants an
+  // opportunity to whoever last bet or raised on EVERY street, so it already
+  // mixes flop c-bets with later barrels — and POOL_AVG.cbet was measured off
+  // it. Redefining it would silently reprice every stored figure and the
+  // anchor with them (the same reason AFq keeps its denominator).
+  //
+  // Computed from the finished hand's ACTION LIST rather than hooked into the
+  // live parse. One pure function, so it is testable on its own, it cannot
+  // disagree with what History shows, and it backfills from STORE.hands with
+  // no second implementation (backfillBarrels).
+  const BARREL_AGG = { bet: 1, raise: 1, 'all-in': 1 };
+  // Sample gates for the exploit reads. Judgement calls, not measurements —
+  // there is no pool figure for either stat yet, so these fire on bare
+  // thresholds, the same as bluff and slowplay rates.
+  const BARREL_MIN = 10;
+  const FOLD_BARREL_MIN = 8;
+
+  // Returns null when the hand holds no barrel spot at all, otherwise
+  // { xid, made, facers: [{ xid, folded }] }.
+  function barrelEventsFor(actions) {
+    const acts = Array.isArray(actions) ? actions : [];
+    const on = (street) => acts.filter((a) => a && a.s === street && a.x);
+    const same = (a, b) => String(a) === String(b);
+    // The preflop raiser is the LAST raiser — the same player c-bet tracking
+    // treats as the aggressor. An all-in counts as a raise (open finding #3).
+    let pfr = null;
+    on('preflop').forEach((a) => { if (a.a === 'raise' || a.a === 'all-in') pfr = a.x; });
+    if (!pfr) return null;
+    const flop = on('flop');
+    const first = flop.findIndex((a) => BARREL_AGG[a.a]);
+    // Their own flop c-bet: the first money on the flop, and nobody raised it.
+    if (first < 0 || !same(flop[first].x, pfr)) return null;
+    const afterBet = flop.slice(first + 1);
+    if (afterBet.some((a) => BARREL_AGG[a.a])) return null;
+    const callers = [];
+    afterBet.forEach((a) => {
+      if (a.a === 'call' && !callers.some((c) => same(c, a.x))) callers.push(a.x);
+    });
+    const turn = on('turn');
+    const at = turn.findIndex((a) => same(a.x, pfr));
+    if (at < 0) return null; // no turn for them: everyone folded, or they were all in
+    // Somebody led into them: they are facing a bet, not choosing to barrel.
+    if (turn.slice(0, at).some((a) => BARREL_AGG[a.a])) return null;
+    const act = turn[at].a;
+    const made = !!BARREL_AGG[act];
+    if (!made && act !== 'check') return null;
+    const facers = [];
+    if (made) {
+      callers.forEach((c) => {
+        if (same(c, pfr)) return;
+        const rest = turn.slice(at + 1);
+        const idx = rest.findIndex((a) => same(a.x, c));
+        if (idx < 0) return;
+        // A raise in between means they faced more than the barrel.
+        if (rest.slice(0, idx).some((a) => BARREL_AGG[a.a])) return;
+        facers.push({ xid: c, folded: rest[idx].a === 'fold' });
+      });
+    }
+    return { xid: pfr, made, facers };
+  }
+
+  // Sparse per player, `{m, o, fm, fo}` — made/opportunities, and folded/faced.
+  // Absent until a player is first seen in a barrel spot, because this rides
+  // on every record forever (open finding #2's growth shape).
+  function noteBarrels(actions, resolve) {
+    const ev = barrelEventsFor(actions);
+    if (!ev) return false;
+    const bump = (xid, field) => {
+      const p = resolve(xid);
+      if (!p) return;
+      if (!p.barrel || typeof p.barrel !== 'object') p.barrel = {};
+      p.barrel[field] = (p.barrel[field] || 0) + 1;
+    };
+    bump(ev.xid, 'o');
+    if (ev.made) bump(ev.xid, 'm');
+    ev.facers.forEach((f) => {
+      bump(f.xid, 'fo');
+      if (f.folded) bump(f.xid, 'fm');
+    });
+    return true;
+  }
+
+  // Once, from init — same shape and same flag discipline as
+  // backfillBoardTexture: it ADDS, so the flag is what makes it safe, and it
+  // runs before the watchers so no live hand can be counted twice.
+  function backfillBarrels() {
+    if (STORE.barrelBackfilled) return 0;
+    let spots = 0;
+    (STORE.hands || []).forEach((h) => {
+      if (!h) return;
+      const hit = noteBarrels(h.actions, (xid) => {
+        const p = STORE.players[xid];
+        if (!p) return null; // pruned since; nothing to attribute to
+        markPlayerDirty(xid);
+        return p;
+      });
+      if (hit) spots += 1;
+    });
+    STORE.barrelBackfilled = true;
+    saveStore();
+    return spots;
+  }
+
   function backfillBoardTexture() {
     if (STORE.boardTexBackfilled) return 0;
     let seeded = 0;
@@ -6740,6 +6854,20 @@
     // checked against (v1.26.0's lesson: gate on the number the figure is
     // actually computed from, never a larger neighbouring count).
     const texBetSample = (tex.madeBets || 0) + (tex.drawBets || 0) + (tex.bluffBets || 0);
+    // Turn barrels (v1.82.0), stored sparsely — see barrelEventsFor.
+    const bar = (p.barrel && typeof p.barrel === 'object') ? p.barrel : {};
+    // Won at showdown, off the showdowns whose cards were SEEN — the same
+    // sample shownHands already holds, so it needs no collection of its own.
+    // It inherits that sample's bias: a showdown loser who mucks unseen is not
+    // in it, so treat a high figure with some caution.
+    let sdSeen = 0;
+    let sdWon = 0;
+    Object.keys(p.shownHands || {}).forEach((cls) => {
+      const e = p.shownHands[cls];
+      if (!e) return;
+      sdSeen += e.seen || 0;
+      sdWon += e.won || 0;
+    });
     return {
       vpip: pct(p.vpip, p.hands),
       pfr: pct(p.pfr, p.hands),
@@ -6763,6 +6891,12 @@
       postflopRR: pct(rrMade, rrFaced),
       rrSample: rrFaced,
       wtsd: pct(p.wtsd, p.hands),
+      wsd: pct(sdWon, sdSeen),
+      wsdSample: sdSeen,
+      barrel: pct(bar.m || 0, bar.o || 0),
+      barrelOpp: bar.o || 0,
+      foldToBarrel: pct(bar.fm || 0, bar.fo || 0),
+      foldToBarrelOpp: bar.fo || 0,
       medianBetPct: median(p.betSizes),
       // Median bet/raise size as % of pot, split by what they were caught
       // holding at showdown: two pair+, a live draw, or nothing at all. A
@@ -7951,6 +8085,47 @@
   // Shrunk rates, not raw: without them a player seen for two hands who happened
   // to play both reads as a 100%-VPIP maniac. With them they read as roughly
   // pool-average until there is evidence otherwise.
+  // --- Table softness (v1.82.0) -----------------------------------------------
+  //
+  // One line in the coach panel summing up who you are sitting with, built
+  // entirely from reads already held — no collection, no API. For deciding
+  // whether to stay at a table, not for any single decision.
+  //
+  // Only RATED players (minHands and up) count toward the verdict — the same
+  // bar that makes a player Unrated everywhere else. A new face is counted
+  // separately rather than guessed at: calling a table soft off two players
+  // with three hands each is reading noise.
+  //
+  // Soft = Fish + Station, the two types that pay off. Maniacs are not counted
+  // soft: exploitable, but they are the swingiest seat at the table and the
+  // line would read as an invitation. The verdict needs 3+ rated players.
+  const SOFT_TYPES = { Fish: 1, Station: 1 };
+  const SOFT_MIN_RATED = 3;
+  function tableSoftness(xids) {
+    const counts = {};
+    let rated = 0;
+    let fresh = 0;
+    let soft = 0;
+    let vpipSum = 0;
+    let vpipN = 0;
+    (xids || []).forEach((xid) => {
+      const p = STORE.players[xid];
+      if (!p || (p.hands || 0) < STORE.settings.minHands) { fresh += 1; return; }
+      const label = classify(p);
+      rated += 1;
+      counts[label] = (counts[label] || 0) + 1;
+      if (SOFT_TYPES[label]) soft += 1;
+      const v = computeShrunkRates(p).vpip;
+      if (v != null) { vpipSum += v; vpipN += 1; }
+    });
+    let verdict = null;
+    if (rated >= SOFT_MIN_RATED) {
+      const share = soft / rated;
+      verdict = share >= 0.5 ? 'soft' : share <= 0.2 ? 'tough' : 'mixed';
+    }
+    return { rated, fresh, soft, counts, verdict, avgVpip: vpipN ? vpipSum / vpipN : null };
+  }
+
   function classifyProvisional(player) {
     const r = computeShrunkRates(player);
     for (const rule of ARCHETYPE_RULES) {
@@ -9108,6 +9283,27 @@
     }
   }
 
+  // Your results split by stake (v1.82.0), from the ledger alone. Each row
+  // already carries the blind it was played at (`b`), so this needs no new
+  // collection. It is bounded by what the ledger still holds — the rows
+  // since v1.55.0, up to PL_LEDGER_CAP — so it is a breakdown of RECENT
+  // history, never a restatement of the exact lifetime total, and the panel
+  // says which. A row with no readable blind (b = 0) is kept as its own group
+  // in chips only: it cannot be converted to big blinds after the fact.
+  // Returns [{ bb, hands, chips, bbNet }], most-played first.
+  function plByStake() {
+    const groups = {};
+    (STORE.plLedger || []).forEach((row) => {
+      if (!row || typeof row.d !== 'number') return;
+      const bb = plausibleBB(row.b) ? row.b : 0;
+      const g = groups[bb] || (groups[bb] = { bb, hands: 0, chips: 0, bbNet: 0 });
+      g.hands += 1;
+      g.chips += row.d;
+      if (bb) g.bbNet += row.d / bb;
+    });
+    return Object.keys(groups).map((k) => groups[k]).sort((a, b) => b.hands - a.hands);
+  }
+
   // CSV, not the plain-text style every other export here uses — this is data
   // meant for a spreadsheet ("for my analysis"), not prose meant for reading.
   // A running total column is computed here rather than stored per-row: it
@@ -9713,7 +9909,51 @@
     // there is, and it needs the per-street split to be visible at all.
     const f = r.byStreet.flop;
     const tn = r.byStreet.turn;
-    if (f.afq != null && tn.afq != null && f.actions >= 8 && tn.actions >= 6 && f.afq - tn.afq > 20) {
+    // The exact turn-barrel stat, once it has the sample, REPLACES the two
+    // per-street-aggression reads below rather than sitting beside them: they
+    // are approximations of the same question, and two reads saying one thing
+    // is how the coach ends up repeating itself.
+    const barrelRead = r.barrel != null && r.barrelOpp >= BARREL_MIN;
+    if (barrelRead && r.barrel <= 35) {
+      add(90, 'Turn',
+        `Bets the flop, then bets the turn again only ${fmtPct(r.barrel)} of the time `
+          + `(${r.barrelOpp} spots). Call their flop c-bet in position and bet when they check the turn.`,
+        `After c-betting the flop you bet the turn again only ${fmtPct(r.barrel)} of the time `
+          + `(${r.barrelOpp} spots) — opponents can call your flop bet and take the pot when you check. `
+          + 'Barrel more turns, or c-bet fewer flops you will not follow through on.',
+        'float, stab turn', 'barrel more turns', ['postflop'],
+        thresholdEdge(35 - r.barrel, 0, 30));
+    } else if (barrelRead && r.barrel >= 70) {
+      add(70, 'Turn',
+        `Bets the turn again ${fmtPct(r.barrel)} of the time after c-betting (${r.barrelOpp} spots) — `
+          + 'a turn bet from them is not extra strength. Call down with real hands.',
+        `You bet the turn again ${fmtPct(r.barrel)} of the time after c-betting (${r.barrelOpp} spots) — `
+          + 'observant players will call your flop bet planning to call the turn too. Make sure the second '
+          + 'barrel has a hand or real equity behind it.',
+        'turn bets are routine', 'barrel with a plan', ['turn', 'facing'],
+        thresholdEdge(r.barrel, 70, 95));
+    }
+    if (r.foldToBarrel != null && r.foldToBarrelOpp >= FOLD_BARREL_MIN) {
+      if (r.foldToBarrel >= 60) {
+        add(88, 'Barrel',
+          `Calls your flop c-bet, then folds to a turn bet ${fmtPct(r.foldToBarrel)} of the time `
+            + `(${r.foldToBarrelOpp} spots). Keep betting the turn.`,
+          `You call flop c-bets and then fold to the turn bet ${fmtPct(r.foldToBarrel)} of the time `
+            + `(${r.foldToBarrelOpp} spots) — you are paying for one street and giving up. Fold more flops, `
+            + 'or continue on more turns.',
+          'bet the turn again', 'call flops you keep', ['turn', 'lead'],
+          thresholdEdge(r.foldToBarrel, 60, 85));
+      } else if (r.foldToBarrel <= 25) {
+        add(78, 'Barrel',
+          `Once they call your flop c-bet they rarely fold the turn (${fmtPct(r.foldToBarrel)}, `
+            + `${r.foldToBarrelOpp} spots). Bet the turn for value only.`,
+          `Once you call a flop c-bet you rarely fold the turn (${fmtPct(r.foldToBarrel)}, `
+            + `${r.foldToBarrelOpp} spots) — you are paying off second barrels. Let weak pairs go.`,
+          'no turn bluffs', 'fold more turns', ['turn', 'lead'],
+          thresholdEdge(25 - r.foldToBarrel, 0, 20));
+      }
+    }
+    if (!barrelRead && f.afq != null && tn.afq != null && f.actions >= 8 && tn.actions >= 6 && f.afq - tn.afq > 20) {
       add(90, 'Turn',
         `Aggression collapses from ${fmtPct(f.afq)} on the flop to ${fmtPct(tn.afq)} on the turn. `
           + 'Float their flop bet in position and take it away on the turn when they check.',
@@ -9724,7 +9964,7 @@
         'float, stab turn', 'follow through on turns', ['postflop'],
         thresholdEdge(f.afq - tn.afq, 20, 60));
     }
-    if (tn.afq != null && tn.actions >= 6 && tn.afq > 55) {
+    if (!barrelRead && tn.afq != null && tn.actions >= 6 && tn.afq > 55) {
       add(70, 'Turn',
         `Keeps firing turns (${fmtPct(tn.afq)} aggression, ${tn.actions} actions) — `
           + 'their turn bets are not automatic bluffs; call down with real hands rather than floats.',
@@ -9823,6 +10063,29 @@
             + 'barrel yourself rather than folding to every bet you face.',
           'barrel more', 'call down more', ['postflop'],
           thresholdEdge(18 - r.wtsd, 0, 12));
+      }
+    }
+    // Won at showdown, off the showdowns whose cards were seen. Pairs with
+    // WTSD: getting there a lot and losing there a lot is a caller of worse;
+    // winning most of what they show is a player who only arrives with it.
+    const WSD_MIN = 10;
+    if (r.wsd != null && r.wsdSample >= WSD_MIN) {
+      if (r.wsd <= 40) {
+        add(76, 'Won SD',
+          `Wins only ${fmtPct(r.wsd)} of the showdowns seen (${r.wsdSample}) — they call down with worse. `
+            + 'Value-bet thinner against them, and do not bluff.',
+          `You win only ${fmtPct(r.wsd)} of your showdowns (${r.wsdSample}) — you are calling down with `
+            + 'worse. Fold more rivers.',
+          'value bet thinner', 'fold more rivers', ['river'],
+          thresholdEdge(40 - r.wsd, 0, 20));
+      } else if (r.wsd >= 65) {
+        add(74, 'Won SD',
+          `Wins ${fmtPct(r.wsd)} of the showdowns seen (${r.wsdSample}) — when they get there, they have it. `
+            + 'Fold medium hands to their river bets.',
+          `You win ${fmtPct(r.wsd)} of your showdowns (${r.wsdSample}) — you may be folding too much before `
+            + 'the river. Call down a little lighter.',
+          'respect river bets', 'call down lighter', ['river', 'facing'],
+          thresholdEdge(r.wsd, 65, 90));
       }
     }
 
@@ -10528,6 +10791,18 @@
 
     const post = sec('Postflop');
     if (r.cbet != null) add(post, `Continuation-bets ${fmtPct(r.cbet)} of flop opportunities.`);
+    if (r.barrel != null) {
+      add(post, `Bets the turn again after a flop c-bet ${fmtPct(r.barrel)} of the time (${r.barrelOpp} spots).`,
+        r.barrelOpp < BARREL_MIN ? null
+          : r.barrel <= 35 ? 'Gives up the turn — call the flop and bet when they check.'
+            : r.barrel >= 70 ? 'Barrels by habit — a turn bet is not extra strength.' : null);
+    }
+    if (r.foldToBarrel != null) {
+      add(post, `Folds to a turn barrel after calling the flop ${fmtPct(r.foldToBarrel)} of the time (${r.foldToBarrelOpp} spots).`,
+        r.foldToBarrelOpp < FOLD_BARREL_MIN ? null
+          : r.foldToBarrel >= 60 ? 'Bet the turn again after they call your c-bet.'
+            : r.foldToBarrel <= 25 ? 'They do not fold the turn — value only.' : null);
+    }
     if (r.foldToCbet != null) {
       add(post, `Folds to c-bets ${fmtPct(r.foldToCbet)} (${p.foldToCbetOpp} samples, pool ${POOL_AVG.foldToCbet}%).`,
         r.foldToCbet > 60 ? 'C-betting into them prints — fire the flop with anything.'
@@ -10570,6 +10845,12 @@
       add(show, `Typically bets ${sz.toFixed(0)}% of pot (median of ${betSizeSample(p)} sized bets).`,
         sz > 85 ? 'Oversized — usually polarised to strong hands or bluffs.'
           : sz < 45 ? 'Consistently small — float and take it away on a later street.' : null);
+    }
+    if (r.wsd != null) {
+      add(show, `Wins ${fmtPct(r.wsd)} of the showdowns seen (${r.wsdSample}).`,
+        r.wsdSample < 10 ? null
+          : r.wsd <= 40 ? 'Calls down with worse — value-bet thinner.'
+            : r.wsd >= 65 ? 'Arrives with it — fold medium hands to river bets.' : null);
     }
     if (r.wtsd != null) {
       add(show, `Goes to showdown ${fmtPct(r.wtsd)} of hands played.`,
@@ -11219,6 +11500,14 @@
     /* Between hands. Says the panel is alive rather than leaving a blank box —
        the panel now stays mounted so it can be parked open all session. */
     .tph-coach-idle { color: #8d959c !important; font-style: italic; }
+    /* The table-softness line, below the advice. Quiet grey; the verdict word
+       carries the colour, and it is not red/green for the same reason the
+       deviation shading is not: a tough table is not "bad", only harder. */
+    .tph-coach-table { color: #98a2ac !important; font-size: 11px; margin-top: 6px;
+      padding-top: 5px; border-top: 1px solid #3d3d48; }
+    .tph-table-soft { color: #ffc94d !important; }
+    .tph-table-mixed { color: #c9d1d9 !important; }
+    .tph-table-tough { color: #7fb3e0 !important; }
     /* Resize grip, bottom-right. A real element with pointer handlers rather
        than the CSS resize property: the native handle is mouse-only in practice
        and this only ever runs in a touch webview. Sized for a thumb, and its own
@@ -12107,10 +12396,30 @@
     }
 
     const coachBody = el.querySelector('.tph-coach-body');
-    coachBody.innerHTML = idle
+    coachBody.innerHTML = (idle
       ? '<div class="tph-coach-idle">No read for this decision.</div>'
-      : advice.map((line) => `<div>${line}</div>`).join('');
+      : advice.map((line) => `<div>${line}</div>`).join(''))
+      + tableSoftnessHtml(Array.from(seatedXids()).filter((x) => !isHeroRecord(x)));
     pinTextColor(coachBody);
+  }
+
+  // The table-softness line under the coach's advice. Opponents only — your own
+  // record is not part of the table you are choosing — and sitting-out seats
+  // are left out, since they are not in the hands. The caller does the seat
+  // read, so this formats from a plain list and a test can drive it.
+  function tableSoftnessHtml(xids) {
+    if (!xids || !xids.length) return '';
+    const t = tableSoftness(xids);
+    if (!t.rated) {
+      return `<div class="tph-coach-table">Table: ${t.fresh} new player${t.fresh === 1 ? '' : 's'}, none rated yet.</div>`;
+    }
+    const order = ['Fish', 'Station', 'Maniac', 'LAG', 'TAG', 'Nit', 'Balanced'];
+    const mix = order.filter((k) => t.counts[k]).map((k) => `${t.counts[k]} ${shortType(k)}`).join(', ');
+    const ref = (POOL_AVG_BY_STAKE[lastSeenBB] || {}).vpip || POOL_AVG.vpip;
+    const vp = t.avgVpip != null ? ` · VPIP ${t.avgVpip.toFixed(0)}% vs ${ref.toFixed(0)}% usual` : '';
+    const head = t.verdict ? `<b class="tph-table-${t.verdict}">${t.verdict}</b> · ` : '';
+    return `<div class="tph-coach-table">Table: ${head}${mix}`
+      + `${t.fresh ? ` · ${t.fresh} new` : ''}${vp}</div>`;
   }
 
   let openPlayerXid = null;
@@ -12432,6 +12741,16 @@
           ${statRow('Fold v 3B', r.foldTo3Bet, s.foldTo3Bet, 'foldTo3Bet', null, s.anchor)}
           ${statRow('C-Bet', r.cbet, s.cbet, 'cbet', null, s.anchor)}
           ${statRow('Fold v CB', r.foldToCbet, s.foldToCbet, 'foldToCbet', null, s.anchor)}
+          <tr title="After betting the flop as the preflop raiser and only being called, how often they bet the turn again when it is theirs to bet. No pool figure yet, so no tick and no verdict.">
+            <td class="tph-stat-l">Turn barrel</td>
+            <td class="tph-stat-v"><b>${fmtPct(r.barrel)}</b></td>
+            <td class="tph-stat-n"><span class="tph-stat-norm">${r.barrelOpp} spot${r.barrelOpp === 1 ? '' : 's'}${r.barrelOpp > 0 && r.barrelOpp < BARREL_MIN ? ', low' : ''}</span></td>
+          </tr>
+          <tr title="After calling a flop c-bet, how often they fold when the same player bets the turn again.">
+            <td class="tph-stat-l">Fold v barrel</td>
+            <td class="tph-stat-v"><b>${fmtPct(r.foldToBarrel)}</b></td>
+            <td class="tph-stat-n"><span class="tph-stat-norm">${r.foldToBarrelOpp} spot${r.foldToBarrelOpp === 1 ? '' : 's'}${r.foldToBarrelOpp > 0 && r.foldToBarrelOpp < FOLD_BARREL_MIN ? ', low' : ''}</span></td>
+          </tr>
           ${statRow('Limp', r.limpShareOfVpip, s.limpShareOfVpip, 'limpShareOfVpip', null, s.anchor)}
           <tr title="Limped, then re-raised the SAME hand — the trap line. Almost nobody does this light, so treat it as the strongest preflop signal on the table. Rare by nature, which is why the raw count sits beside the percentage: 2% off three hands and off three hundred are different claims. No pool figure exists for it, so there is no tick and no verdict.">
             <td class="tph-stat-l">Limp-3bet</td>
@@ -12445,6 +12764,11 @@
             <td class="tph-stat-n"><span class="tph-stat-norm">${r.rrSample} faced${r.rrSample > 0 && r.rrSample < 10 ? ', low' : ''}</span></td>
           </tr>
           ${statRow('WTSD', r.wtsd, r.wtsd, null)}
+          <tr title="Of the showdowns where we saw their cards, how often they won the pot. A loser who mucks unseen is not counted, so read a high figure with some caution. Your own record has no seen showdowns, so it reads — here.">
+            <td class="tph-stat-l">Won SD</td>
+            <td class="tph-stat-v"><b>${fmtPct(r.wsd)}</b></td>
+            <td class="tph-stat-n"><span class="tph-stat-norm">${r.wsdSample} seen${r.wsdSample > 0 && r.wsdSample < 10 ? ', low' : ''}</span></td>
+          </tr>
           <tr title="Median bet or raise as a percentage of the pot as it stood BEFORE that bet, over the most recent bets (see legend). 100% is a pot-sized bet. Every bet and raise on every street counts, so it is a sizing habit, not a street-specific one. A median, not an average, so one huge all-in shove does not drag the whole figure with it.">
             <td class="tph-stat-l">Bet size</td>
             <td class="tph-stat-v"><b>${r.medianBetPct != null ? r.medianBetPct.toFixed(0) + '%' : '—'}</b></td>
@@ -12558,8 +12882,24 @@
               <b>${fmtSignedMoney(STORE.session.net)}</b></td>
             <td class="tph-stat-n"><span class="tph-stat-norm">${STORE.session.hands} hands</span></td>
           </tr>
+          ${(() => {
+            const rows = plByStake();
+            if (!rows.length) return '';
+            const logged = rows.reduce((a, g) => a + g.hands, 0);
+            const col = (v) => `color:${v >= 0 ? '#7ed957' : '#ff6b6b'} !important`;
+            return `<tr class="tph-stat-head"><td colspan="3"><b>By stake</b> — last ${logged} hand${logged === 1 ? '' : 's'}</td></tr>`
+              + rows.map((g) => {
+                const name = g.bb ? (tableNameForBB(g.bb) || fmtMoney(g.bb) + ' BB') : 'Blind unknown';
+                const rate = g.bb ? fmtBB100(g.bbNet, g.hands) : '';
+                return `<tr><td class="tph-stat-l">${escapeHtml(name)}</td>`
+                  + `<td class="tph-stat-v" style="${col(g.chips)}"><b>${g.bb ? fmtBB(g.bbNet) : fmtSignedMoney(g.chips)}</b></td>`
+                  + `<td class="tph-stat-n tph-stat-wrap"><span class="tph-stat-norm">${g.hands} hands`
+                  + `${g.bb ? ' · ' + fmtSignedMoney(g.chips) : ''}${rate ? ' · ' + escapeHtml(rate) : ''}</span></td></tr>`;
+              }).join('');
+          })()}
           <tr><td colspan="3" class="tph-stat-legend">The P/L column elsewhere means "your result against
-            that player", so it has no meaning here — these are your own totals.</td></tr>
+            that player", so it has no meaning here — these are your own totals. By stake comes from the
+            P/L log (up to ${PL_LEDGER_CAP} most recent hands); Lifetime above is the exact total.</td></tr>
           ` : `
           <tr class="tph-stat-head"><td colspan="3"><b>Your P/L vs them</b></td></tr>
           <tr>
@@ -14896,6 +15236,16 @@
       formatHandHtml,
       recordHandHistory,
       heroCardsPlacement,
+      barrelEventsFor,
+      noteBarrels,
+      backfillBarrels,
+      BARREL_MIN,
+      FOLD_BARREL_MIN,
+      tableSoftness,
+      SOFT_MIN_RATED,
+      plByStake,
+      renderPlayerPanelBody,
+      tableSoftnessHtml,
       toggleHandFavorite,
       favoriteHandCount,
       FAVORITE_HANDS_MAX,
@@ -14982,6 +15332,8 @@
       set departedPanelOpen(v) { departedPanelOpen = v; },
       get STORE() { return STORE; },
       set STORE(s) { STORE = s; },
+      get openPlayerXid() { return openPlayerXid; },
+      set openPlayerXid(x) { openPlayerXid = x; },
       get heroXid() { return heroXid; },
       set heroXid(x) { heroXid = x; },
     };
@@ -15015,6 +15367,7 @@
     // Before the watchers, so the first hand of the session already has the
     // history-seeded figures behind it rather than starting from zero.
     backfillBoardTexture();
+    backfillBarrels();
     // Discards affiliation timestamps written while the transport was broken,
     // so the badges do not stay dead for up to 24h after the fix. Once only.
     repairAffiliationCache();

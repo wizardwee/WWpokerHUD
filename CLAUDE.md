@@ -1222,6 +1222,56 @@ the hand is there because you put it there — but tags still narrow it.
 (recording relies on the 60s reconcile), so a star without the mark would be
 lost if the page closed inside that window.
 
+## Turn barrels, won at showdown, table softness, P/L by stake (v1.82.0)
+
+Picked from a comparison with HopesG's HUD and ordinary HUD practice; each was
+chosen because it reuses data already held.
+
+**Turn barrels are a NEW stat, not a fix to C-bet.** The existing C-bet stat
+grants an opportunity to whoever last bet or raised on EVERY street, so it
+already mixes flop c-bets with later barrels — and `POOL_AVG.cbet` was measured
+off it. Redefining it would silently reprice every stored figure and the
+anchor (the AFq argument again). `barrelEventsFor(actions)` is strict: the
+preflop raiser made the first flop bet, nobody raised it, and nobody led into
+them on the turn. Callers of that flop bet who then face the turn bet — with
+no raise in between — are the fold-to-barrel sample.
+
+- **Computed from the finished action list, at settlement**, by one pure
+  function. It is testable alone, cannot disagree with History, and
+  `backfillBarrels()` seeds it from `STORE.hands` once (flag
+  `STORE.barrelBackfilled`, same discipline as `backfillBoardTexture`: it ADDS,
+  so the flag is the safety, and it runs from `init()` before the watchers).
+- **Stored sparsely** as `p.barrel = {m, o, fm, fo}`, absent until a player is
+  first in a spot — open finding #2's growth shape.
+- **The exact read REPLACES the per-street-aggression approximations** once it
+  has `BARREL_MIN` spots, rather than firing beside them. Two reads for one
+  question is how the coach repeats itself. The thresholds (35/70, 60/25) are
+  judgement calls with no pool figure behind them; measure before moving them.
+
+**Won at showdown needs no collection**: it is won/seen summed over
+`p.shownHands`. It inherits that sample's bias — a loser who mucks unseen is
+not counted — and hero's record reads `—`, because hero is never harvested into
+`shownHands`. So the W$SD leak text can never fire for hero today.
+
+**Table softness** (`tableSoftness` / `tableSoftnessHtml`) is one line under
+the coach's advice. Only players at `minHands` count toward the verdict, the
+same bar as Unrated everywhere else; newer seats are counted as "new", never
+guessed at. Soft = Fish + Station only — Maniacs are exploitable but the
+swingiest seat, and "soft" would read as an invitation. `tableSoftnessHtml`
+takes the xid list from its caller so a test can drive the formatting: it runs
+on every coach render, and a throw there takes the whole panel down.
+
+**P/L by stake** (`plByStake`) groups the ledger by its per-row blind `b`. It
+is bounded by what the ledger holds (since v1.55.0, up to `PL_LEDGER_CAP`), so
+the panel labels it "last N hands" and keeps Lifetime as the exact total. A row
+with no plausible blind is its own chips-only group: it cannot be converted to
+big blinds after the fact.
+
+**Considered and not built**: two-pair as its own hand tier (low value, reshapes
+stored data), per-table stats keyed by a table-texture class (needs a scan
+nobody has taken; the user declined the probe), HopesG's IndexedDB backup and
+cross-script window bridge (neither exists in the PDA runtime).
+
 ## The History tab's filters (v1.52.0)
 
 Three layers, and they compose: the **mode** chips (Played / Notable / All,
