@@ -1302,6 +1302,24 @@ swap. `coachPillPos` is retired: left in old stored settings, read by nothing,
 and a test scans for it. The departure pill still has its own key, because it
 and the coach pill can be on screen together.
 
+**Covered seats hide their tag (v1.84.0).** Asked for: tags off while the
+table-selection screen is open, back when it closes. That screen has never
+been scanned, so `seatCovered` does not look for it: it hit-tests five points
+on each seat with `elementsFromPoint` and hides the tag when every tested point
+lands on something that is neither the seat, inside it, nor an ancestor of it.
+HUD elements are looked through; off-screen points are skipped; no hit test or
+nothing testable **fails open** (visible). Five points rather than the centre,
+because a chip stack or the dealer button over the centre is not the seat being
+covered. A 1s watcher compares the covered set with the last render's and
+redraws only on a change, so tags leave and return within a second without a
+full rebuild every tick.
+
+**Hiding low-stake tables in that screen is NOT built** — it needs the list's
+markup. The deep scan has a `--- TABLE SELECT ---` section (every known table
+name found on the page, its ancestry, and the nearest repeating ancestor as the
+likely row). Build the filter from a scan taken with that screen open, not from
+a guess.
+
 **Considered and not built**: two-pair as its own hand tier (low value, reshapes
 stored data), per-table stats keyed by a table-texture class (needs a scan
 nobody has taken; the user declined the probe), HopesG's IndexedDB backup and

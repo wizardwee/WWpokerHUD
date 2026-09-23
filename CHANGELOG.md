@@ -9,6 +9,25 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.84.0
+Player tags step aside when Torn draws something over the seats
+
+Asked for: hide the player tags while the table-selection screen is open, and
+bring them back when you return to the game, so the table options are readable.
+
+Nothing in the HUD knows that screen's markup — it has never been scanned — so
+this does not look for it. Each seat is checked at five points for what the
+browser actually has on top of it. If every point lands on something of Torn's
+that is not the seat, the seat is covered and its tag is not drawn. Five points
+rather than one, so a chip stack or the dealer button over the middle of a seat
+does not hide its tag. The HUD's own panels are looked through. A check every
+second redraws the tags only when a seat becomes covered or uncovered, so they
+leave and return within a second. If the check cannot run, tags show as before.
+
+Not yet built: hiding tables below a stake in the selection list. That needs the
+list's markup. The deep scan gains a TABLE SELECT section that finds every known
+table name on the page and prints where it sits and what looks like its row —
+one scan taken with the list open is enough to build the filter from.
 ## 1.83.1
 
 History, the P/L log and your totals are saved as each hand ends.

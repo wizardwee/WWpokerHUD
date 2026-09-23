@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.83.1
+// @version      1.84.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,18 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.84.0 - Player tags step aside when Torn draws something over the seats.
+ *            - Asked for: hide the tags while the table-selection screen is
+ *              open, and bring them back when it closes. Each seat is checked
+ *              at five points for what is actually drawn on top of it; if
+ *              every point is covered by something of Torn's, that seat's tag
+ *              is hidden. Checked every second, so tags leave and return
+ *              within a second. Works for any Torn window over the table, and
+ *              needs no knowledge of that screen's markup.
+ *            - Fails open: if the check cannot run, tags show as before.
+ *            - Not yet built: hiding low-stake tables in the list. That needs
+ *              the list's markup, which has never been scanned. The deep scan
+ *              now has a TABLE SELECT section — take one with the list open.
  * 1.83.1 - History, the P/L log and your totals are saved as each hand ends.
  *            - Found in review: the saved store is split into pieces, and only
  *              pieces marked as changed are written. Three of those marks were
@@ -49,26 +61,6 @@
  *              kept separate positions on purpose; now they share one, so the
  *              pill appears where the panel was and the panel opens where the
  *              pill was. Your old separate pill position is no longer used.
- *
- * 1.82.0 - Turn barrels, won at showdown, a table-softness line, P/L by stake.
- *            - Turn barrel / Fold v barrel (Stats tab, report, coach): after
- *              c-betting the flop and being called, how often the raiser bets
- *              the turn again — and how often the flop caller then folds. A
- *              NEW stat; the existing C-bet figure already mixes streets and
- *              the pool average was measured off it, so it is left alone.
- *              Seeded once from your stored hand history, so it is not empty
- *              on day one. Once a player has 10 spots it replaces the rougher
- *              "aggression collapses on the turn" read instead of repeating it.
- *            - Won SD: of the showdowns where their cards were seen, how often
- *              they won. Pairs with WTSD — reaching showdown a lot and losing
- *              there is a caller of worse. Needs no new data.
- *            - Coach panel: one line on the table you are at — soft / mixed /
- *              tough, the type mix, new faces, and average VPIP against the
- *              usual figure for the stake. Only rated players count toward
- *              the verdict.
- *            - Your own Stats: "By stake" — net bb, chips, hands and bb/100 at
- *              each blind level, from the P/L log. Covers the hands the log
- *              holds; Lifetime above it is still the exact total.
  *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
@@ -131,7 +123,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.83.1';
+  const HUD_VERSION = '1.84.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -12086,6 +12078,64 @@
     return `${tag} = re-raised preflop, a ${tag.replace('B', '')}-bet.`;
   }
 
+  // --- Covered seats (v1.84.0) ------------------------------------------------
+  //
+  // Asked for: hide the player tags while the table-selection screen is open,
+  // and bring them back when it closes. Nothing here knows that screen's
+  // markup — nobody has scanned it — so this does not look for it. It asks the
+  // browser what is actually drawn on top of each seat instead: a seat whose
+  // sampled points all land on something else (that screen, or any other Torn
+  // window over the felt) gets no tag. Selector-free, so it cannot be broken
+  // by a redeploy renaming the screen's classes.
+  //
+  // Five points, not one: a chip stack or the dealer button over the centre of
+  // a seat is not the seat being covered, and one visible point is enough to
+  // keep the tag. HUD elements are looked THROUGH — our own panel or badge
+  // over a seat is not Torn covering it. A point off screen says nothing.
+  //
+  // Fails OPEN: no elementsFromPoint, or no point that could be tested, means
+  // "visible" — exactly the old behaviour.
+  const SEAT_COVER_POINTS = [[0.5, 0.5], [0.2, 0.25], [0.8, 0.25], [0.2, 0.8], [0.8, 0.8]];
+  function isHudElement(el) {
+    return !!(el && typeof el.closest === 'function' && el.closest('[class*="tph-"]'));
+  }
+  function seatCovered(seat, rect, pointsAt, vw, vh) {
+    if (typeof pointsAt !== 'function' || !rect) return false;
+    let tested = 0;
+    for (const [fx, fy] of SEAT_COVER_POINTS) {
+      const x = rect.left + rect.width * fx;
+      const y = rect.top + rect.height * fy;
+      if (x < 0 || y < 0 || x >= vw || y >= vh) continue;
+      let list;
+      try { list = pointsAt(x, y) || []; } catch (e) { return false; }
+      const top = Array.prototype.find.call(list, (el) => !isHudElement(el));
+      if (!top) continue;
+      tested += 1;
+      if (top === seat || (seat.contains && seat.contains(top)) || (top.contains && top.contains(seat))) return false;
+    }
+    return tested > 0;
+  }
+  function seatHitTester() {
+    return typeof document.elementsFromPoint === 'function'
+      ? (x, y) => document.elementsFromPoint(x, y) : null;
+  }
+
+  // Which seats are covered right now, as a string. Compared on a 1s tick
+  // against the last render's so the tags hide and return promptly without
+  // rebuilding every badge every second.
+  let lastCoverSig = '';
+  function seatCoverSignature() {
+    const hit = seatHitTester();
+    if (!hit) return '';
+    const out = [];
+    seatEls().forEach((seat) => {
+      const rect = seat.getBoundingClientRect();
+      if (!rect.width && !rect.height) return;
+      if (seatCovered(seat, rect, hit, window.innerWidth, window.innerHeight)) out.push(resolveSeatKey(seat) || '?');
+    });
+    return out.sort().join(',');
+  }
+
   function renderBadges() {
     document.querySelectorAll('.tph-badge').forEach((el) => el.remove());
     if (!STORE.settings.showBadges) return;
@@ -12105,6 +12155,8 @@
     // — and renderBadges is rAF-driven on scroll, so nine per FRAME while the
     // table moved. That made it the worst scroll-jank offender in the file.
     const measured = [];
+    const hit = seatHitTester();
+    const covered = [];
     seatEls().forEach((seat) => {
       const xid = resolveSeatKey(seat);
       if (!xid) return;
@@ -12117,8 +12169,11 @@
       if (isSelf && !STORE.settings.showSelfBadge) return;
       const rect = seat.getBoundingClientRect();
       if (!rect.width && !rect.height) return; // seat not laid out (empty/hidden)
+      // Something of Torn's is on top of this seat — see seatCovered.
+      if (seatCovered(seat, rect, hit, window.innerWidth, window.innerHeight)) { covered.push(xid); return; }
       measured.push({ xid, isSelf, rect });
     });
+    lastCoverSig = covered.sort().join(',');
 
     // Built into a fragment and attached in ONE write, so the badges cost a
     // single layout between them rather than one apiece.
@@ -14661,6 +14716,44 @@
     });
     L.push('');
 
+    // The table-selection screen. Nothing here knows its markup yet, and
+    // hiding low-stake tables needs it — take this scan WITH THAT SCREEN OPEN.
+    // Probes every known table name and prints where it sits, plus the nearest
+    // ancestor that repeats (the likely row), so one paste shows how to find a
+    // row and read its stake.
+    L.push('--- TABLE SELECT (take this scan with the table list open) ---');
+    (() => {
+      const hit = seatHitTester();
+      L.push('seats covered right now: ' + (hit ? (seatCoverSignature() || 'none') : 'elementsFromPoint unavailable'));
+      let found = 0;
+      Object.keys(TORN_STAKES).forEach((bb) => {
+        const name = TORN_STAKES[bb];
+        const hits = findByText(name, 1).filter((h) => !isHudElement(h));
+        if (!hits.length) return;
+        found += 1;
+        const h = hits[0];
+        L.push(`table "${name}" (${fmtMoney(Number(bb))} BB):`);
+        L.push('  ' + ancestry(h, 7));
+        // Nearest ancestor whose parent holds 3+ siblings with the same tag
+        // and first class — a list row.
+        let row = h;
+        for (let i = 0; i < 8 && row && row.parentElement; i++) {
+          const par = row.parentElement;
+          const firstCls = (typeof row.className === 'string' ? row.className.split(/\s+/)[0] : '') || '';
+          const sibs = Array.from(par.children).filter((c) => c.tagName === row.tagName
+            && (!firstCls || (typeof c.className === 'string' && c.className.split(/\s+/)[0] === firstCls)));
+          if (sibs.length >= 3) {
+            L.push(`  row?: ${elSig(row)} — ${sibs.length} like it under ${elSig(par)}`);
+            L.push('   row text: ' + squish(row.textContent, 120));
+            break;
+          }
+          row = par;
+        }
+      });
+      if (!found) L.push('no table names found on the page — open the table list and scan again');
+    })();
+    L.push('');
+
     L.push('--- HERO CARDS ---');
     const hc = document.querySelectorAll(SELECTORS.heroCards);
     L.push('matched: ' + hc.length);
@@ -15379,6 +15472,8 @@
       plByStake,
       renderPlayerPanelBody,
       tableSoftnessHtml,
+      seatCovered,
+      isHudElement,
       tableAnnounceKind,
       noteTableForAnnounce,
       noteTableChange,
@@ -15514,6 +15609,13 @@
     bootstrapTableWatchers();
 
     setInterval(renderBadges, 4000);
+    // Cheap check between the 4s redraws: only redraw when a seat has become
+    // covered or uncovered, so tags leave within a second of the table-select
+    // screen opening and come back within a second of it closing.
+    setInterval(() => {
+      if (!STORE.settings.showBadges) return;
+      try { if (seatCoverSignature() !== lastCoverSig) renderBadges(); } catch (e) { /* next tick */ }
+    }, 1000);
     setInterval(renderCoachPanel, 1500);
     // Faster than the coach panel: a turn cue that arrives 1.5s late has missed
     // a meaningful slice of the decision clock. Cheap — one button sweep.
