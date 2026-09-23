@@ -772,9 +772,11 @@ is the release noting "new native storage for script developers", so a build
 older than that genuinely has nothing to find. The next scan distinguishes
 them: a bare identifier reading `object` means it was there all along.
 
-Until one of those is confirmed, **nothing here should be reasoned about as if
-the native store were in play** — the live figure is `storage: 2.9 MB of
-~5.0 MB (58%) backend: localStorage`.
+**Settled by a later scan: the native store IS in play.** `PDA_storage: PRESENT
+(bare identifier: object, window.PDA_storage: undefined)` — exactly the scoped
+binding the v1.75.0 probe was written to find, invisible on `window` — with
+`storage: 3.2 MB of 20.0 MB (16%) backend: PDA_storage`, all eight methods
+present, no legacy blob left. The 5 MB estimate no longer governs this device.
 
 ### `test/run.js` fails a file that exits without reporting
 
@@ -1314,11 +1316,33 @@ covered. A 1s watcher compares the covered set with the last render's and
 redraws only on a change, so tags leave and return within a second without a
 full rebuild every tick.
 
-**Hiding low-stake tables in that screen is NOT built** — it needs the list's
-markup. The deep scan has a `--- TABLE SELECT ---` section (every known table
-name found on the page, its ancestry, and the nearest repeating ancestor as the
-likely row). Build the filter from a scan taken with that screen open, not from
-a guess.
+**Confirmed on the device (scan, v1.84.0 with the list open):** the
+opponents' seats are not laid out at all while the table list is up
+(`seatRing: UNREADABLE (0 seats)`), so they get no tag by the zero-rect rule,
+and hero's seat — laid out separately — read as covered. Both paths hid the
+tags; the screenshot showed none over the list.
+
+**The table-list filter (v1.85.0) finds rows by TEXT, not class.** From the
+screenshot a row reads `name | $amount | speed | seated/max`. The list's table
+names are **not** `TORN_STAKES`' names (those are the 9-seat tables; the list
+shown was 6-seat — Spilled Milk, Dive Bar, Lost at Sea…), which is why the
+v1.84.0 name probe found nothing. `tableRowFor` climbs from a bare `$amount`
+text node to the smallest block with exactly one amount and one `n/m` seat
+count, and accepts it only among `TABLE_ROW_MIN_SIBLINGS` (3) blocks alike;
+seats, the log and HUD elements are excluded outright. Rows below
+`minTableStake` get `display:none` plus `data-tph-hid`, so lowering or clearing
+the setting restores exactly those. The amount compared is **whatever the row
+shows** — whether that column is the big blind or a buy-in is unconfirmed, and
+the setting is worded to match.
+
+**The seat-count pattern must not use `\b`.** `textContent` joins cells with no
+separator, so a row reads `"…regular0/6"` and a word boundary before the `0`
+never matches — the v1.0.0 concatenation lesson again, caught by the test on
+the first run. It is bounded by a non-digit instead, with no lookaround.
+**Build fixtures that pass every check except the one under test**: the first
+seat and log fixtures glued digits (`"$168,410,0832/6"`) and were rejected for
+reading as garbage, so the exclusion they were meant to prove went unexercised
+until mutation showed it.
 
 **Considered and not built**: two-pair as its own hand tier (low value, reshapes
 stored data), per-table stats keyed by a table-texture class (needs a scan

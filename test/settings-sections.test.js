@@ -36,6 +36,7 @@ const EXPECTED = [
   'Your turn',
   'Fold guard',
   'Coach',
+  'Table list',
   // Reading the table — what the HUD works out about the other players.
   'Departure watch',
   'Torn API features',

@@ -9,6 +9,33 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.85.0
+Hide low-stake tables in Torn's table list
+
+Asked for: "I am only interested in higher stakes tables (500k +)". Settings >
+Table list > "Hide tables below $" hides every row in Torn's table list showing
+less than the amount you enter. 0, the default, shows everything.
+
+Built from the user's screenshot and scan of that list rather than from class
+names, which Torn hashes and renames. A row reads name, one dollar amount, the
+speed, and "seated/max" (e.g. "Dive Bar  $100,000  regular  0/6"), so a row is
+the smallest block holding exactly one dollar amount and one seat count, among
+at least three blocks alike. Seats, the game log and the HUD's own elements are
+excluded outright. Hidden rows are marked, so lowering or clearing the setting
+restores exactly those and nothing else.
+
+The amount compared is whatever each row shows; whether Torn's column is the
+big blind or a buy-in is not confirmed, and the setting is worded to match.
+
+Caught before shipping: `textContent` joins the cells with no separator, so a
+row reads "…regular0/6" and the first seat-count pattern (anchored on a word
+boundary) would have matched no row at all on the device.
+
+Also from that scan: the v1.84.0 tag hiding works with the list open, and the
+list's tables are the 6-seat ones with names of their own — which is why the
+scan's name probe found nothing. The scan now reports the rows the filter finds.
+It also confirmed Torn PDA's native storage is in use (3.2 MB of 20 MB).
+
 ## 1.84.0
 Player tags step aside when Torn draws something over the seats
 

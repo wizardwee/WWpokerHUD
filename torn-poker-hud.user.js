@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.84.0
+// @version      1.85.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -17,6 +17,20 @@
  * behaviour change — nothing automates it, and userscript managers compare
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
+ *
+ * 1.85.0 - Hide low-stake tables in Torn's table list.
+ *            - Asked for: only show tables from $500k up. Settings > Table
+ *              list > "Hide tables below $". 0 (the default) shows all.
+ *            - Rows are recognised from their text, as the screenshot showed
+ *              them: name, one dollar amount, speed, "seated/max". The block
+ *              must sit among 3+ rows alike; seats, the game log and the HUD
+ *              are never touched. Hidden rows are marked, so lowering or
+ *              clearing the setting brings back exactly those.
+ *            - Compared with the amount each row SHOWS. Whether that column is
+ *              the big blind or a buy-in is not confirmed.
+ *            - The v1.84.0 scan probe looked for the wrong table names (the
+ *              list's 6-seat tables have their own); the scan now reports the
+ *              rows the filter finds instead.
  *
  * 1.84.0 - Player tags step aside when Torn draws something over the seats.
  *            - Asked for: hide the tags while the table-selection screen is
@@ -46,21 +60,6 @@
  *              it is written from too many places to mark each one reliably.
  *            - The once-a-minute full rewrite is still there as the safety
  *              net.
- *
- * 1.83.0 - Table AFq, a new-table message, and the coach pill follows the panel.
- *            - The table line under the coach now carries the table's average
- *              AFq, over players with 10+ postflop actions. No "usual" beside
- *              it: there is no pool figure for AFq.
- *            - Asked for: a message for each new table joined. When the seats
- *              settle on a roster that is mostly new — or the blind level
- *              changes — a short summary appears at the top for 8 seconds:
- *              the table, soft/mixed/tough, the type mix, VPIP and AFq. It
- *              never takes a tap. A table that turns over in place gets it too,
- *              worded "Table has changed". Off switch: Settings > Coach.
- *            - Reported: moving the coach panel did not move its pill. They
- *              kept separate positions on purpose; now they share one, so the
- *              pill appears where the panel was and the panel opens where the
- *              pill was. Your old separate pill position is no longer used.
  *
  * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
  * of narrative above the first line of code, paid for by every read of this
@@ -123,7 +122,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.84.0';
+  const HUD_VERSION = '1.85.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -586,6 +585,7 @@
     // act, at most TURN_REBUZZ_MAX times.
     turnVibrateRepeat: false,
     tableAnnounce: true, // summary message when you sit down at a new table
+    minTableStake: 0,    // hide table-list rows showing less than this; 0 = show all
     turnSound: false,   // opt-in: a synthesised two-note chime
     foldGuard: true,    // tap Fold twice to confirm — see foldGuardHandler
     heroName: '',      // YOUR Torn username. Without it P/L and position can't be attributed.
@@ -12136,6 +12136,95 @@
     return out.sort().join(',');
   }
 
+  // --- Table-list filter (v1.85.0) --------------------------------------------
+  //
+  // Asked for: hide the low-stake tables in Torn's table list. Built from a
+  // screenshot and a scan of that list (not from class names, which Torn
+  // hashes and renames on redeploy): each row reads
+  //     name | $amount | speed | seated/max     e.g. "Dive Bar  $100,000  regular  0/6"
+  // So a row is recognised by its TEXT: the smallest block holding exactly one
+  // dollar amount and one "n/m" seat count, sitting among at least
+  // TABLE_ROW_MIN_SIBLINGS blocks that read the same way. That shape is a
+  // list, not a seat, a log line or a stack.
+  //
+  // The amount compared is whatever the row shows. Nobody here has confirmed
+  // whether Torn's column is the big blind or a buy-in, so the setting is
+  // worded "below $X as shown", never "below a $X blind".
+  //
+  // Never touched: anything inside a seat, the game log, or the HUD. Hidden
+  // rows are marked, so turning the filter down or off restores exactly what
+  // was hidden and nothing else.
+  const TABLE_ROW_MIN_SIBLINGS = 3;
+  const TABLE_ROW_MAX_CLIMB = 6;
+  // No \b: textContent joins cells with NO separator, so a row reads
+  // "...regular0/6" and a word boundary before the 0 never matches (the
+  // v1.0.0 lesson, again). Bounded by a non-digit instead, and without a
+  // lookaround, which older iOS JSC cannot construct.
+  const TABLE_ROW_SEATS_RE = /(^|[^\d\/])\d{1,2}\s*\/\s*\d{1,2}($|[^\d\/])/;
+  const TABLE_ROW_EXCLUDE = '[id^="player-"], [class*="messagesList_"], [class*="tph-"]';
+  function moneyAmounts(text) {
+    const out = [];
+    const re = /\$\s?(\d{1,3}(?:,\d{3})+|\d+)/g;
+    let m;
+    while ((m = re.exec(String(text || '')))) out.push(Number(m[1].replace(/,/g, '')));
+    return out;
+  }
+  // The stake a block shows, when it reads like one table row; else null.
+  function tableRowStake(el) {
+    if (!el) return null;
+    const text = el.textContent || '';
+    const money = moneyAmounts(text);
+    if (money.length !== 1 || !TABLE_ROW_SEATS_RE.test(text)) return null;
+    return money[0];
+  }
+  // From an element holding a bare dollar amount, the row it belongs to — or
+  // null when nothing above it reads like a row among rows.
+  function tableRowFor(el) {
+    let cur = el;
+    for (let i = 0; i < TABLE_ROW_MAX_CLIMB && cur; i++, cur = cur.parentElement) {
+      if (typeof cur.closest === 'function' && cur.closest(TABLE_ROW_EXCLUDE)) return null;
+      if (tableRowStake(cur) == null) continue;
+      const par = cur.parentElement;
+      if (!par) return null;
+      const likeIt = Array.prototype.filter.call(par.children || [], (c) => tableRowStake(c) != null).length;
+      return likeIt >= TABLE_ROW_MIN_SIBLINGS ? cur : null;
+    }
+    return null;
+  }
+  // Every table row on the page. Walks TEXT nodes for a bare dollar amount,
+  // which is cheap next to reading every element's textContent.
+  function findTableRows() {
+    if (typeof document.createTreeWalker !== 'function' || !document.body) return [];
+    const rows = [];
+    const walker = document.createTreeWalker(document.body, 4 /* NodeFilter.SHOW_TEXT */);
+    let n;
+    while ((n = walker.nextNode())) {
+      if (!/^\s*\$\s?[\d,]+\s*$/.test(n.nodeValue || '')) continue;
+      const row = tableRowFor(n.parentElement);
+      if (row && rows.indexOf(row) < 0) rows.push(row);
+    }
+    return rows;
+  }
+  // Pure: which rows to hide at a given minimum. 0 or less hides nothing.
+  function tableRowsToHide(rows, min) {
+    if (!(min > 0)) return [];
+    return rows.filter((r) => { const v = tableRowStake(r); return v != null && v < min; });
+  }
+  function applyTableFilter() {
+    const min = Number(STORE.settings.minTableStake) || 0;
+    const hide = min > 0 ? tableRowsToHide(findTableRows(), min) : [];
+    document.querySelectorAll('[data-tph-hid]').forEach((el) => {
+      if (hide.indexOf(el) >= 0) return;
+      el.style.display = '';
+      el.removeAttribute('data-tph-hid');
+    });
+    hide.forEach((el) => {
+      if (el.style.display !== 'none') el.style.display = 'none';
+      el.setAttribute('data-tph-hid', '1');
+    });
+    return hide.length;
+  }
+
   function renderBadges() {
     document.querySelectorAll('.tph-badge').forEach((el) => el.remove());
     if (!STORE.settings.showBadges) return;
@@ -13862,6 +13951,10 @@
         Table size: equity is quoted vs a full table this size, plus live and heads-up.</div>
       <button class="tph-coach-reset">Reset panel positions &amp; size</button>
       <div style="opacity:.7;margin:2px 0 10px">Drag the coach panel's ◢ corner to resize it.</div>
+      <h4>Table list</h4>
+      <label>Hide tables below $ <input type="number" class="tph-min-stake" min="0" step="100000" value="${Number(STORE.settings.minTableStake) || 0}" style="width:110px"></label>
+      <div style="opacity:.7;margin:2px 0 10px">Compared with the amount each row of Torn's table list shows.
+        0 shows every table.</div>
       <div class="tph-set-group">Reading the table</div>
       <h4>Departure watch</h4>
       <label><input type="checkbox" class="tph-depart-toggle" ${STORE.settings.departureWatch ? 'checked' : ''}> Alert when an attackable player leaves</label><br>
@@ -14121,6 +14214,13 @@
     panel.querySelector('.tph-test-escalation').addEventListener('click', (e) => {
       const ok = playTurnEscalationChime();
       e.target.textContent = ok ? 'Played' : 'No audio here';
+    });
+    panel.querySelector('.tph-min-stake').addEventListener('change', (e) => {
+      const v = Math.max(0, Math.floor(Number(e.target.value) || 0));
+      STORE.settings.minTableStake = v;
+      e.target.value = v;
+      saveStore();
+      try { applyTableFilter(); } catch (err) { /* the 1s tick retries */ }
     });
     panel.querySelector('.tph-tableannounce-toggle').addEventListener('change', (e) => {
       STORE.settings.tableAnnounce = e.target.checked;
@@ -14725,32 +14825,22 @@
     (() => {
       const hit = seatHitTester();
       L.push('seats covered right now: ' + (hit ? (seatCoverSignature() || 'none') : 'elementsFromPoint unavailable'));
-      let found = 0;
-      Object.keys(TORN_STAKES).forEach((bb) => {
-        const name = TORN_STAKES[bb];
-        const hits = findByText(name, 1).filter((h) => !isHudElement(h));
-        if (!hits.length) return;
-        found += 1;
-        const h = hits[0];
-        L.push(`table "${name}" (${fmtMoney(Number(bb))} BB):`);
-        L.push('  ' + ancestry(h, 7));
-        // Nearest ancestor whose parent holds 3+ siblings with the same tag
-        // and first class — a list row.
-        let row = h;
-        for (let i = 0; i < 8 && row && row.parentElement; i++) {
-          const par = row.parentElement;
-          const firstCls = (typeof row.className === 'string' ? row.className.split(/\s+/)[0] : '') || '';
-          const sibs = Array.from(par.children).filter((c) => c.tagName === row.tagName
-            && (!firstCls || (typeof c.className === 'string' && c.className.split(/\s+/)[0] === firstCls)));
-          if (sibs.length >= 3) {
-            L.push(`  row?: ${elSig(row)} — ${sibs.length} like it under ${elSig(par)}`);
-            L.push('   row text: ' + squish(row.textContent, 120));
-            break;
-          }
-          row = par;
-        }
-      });
-      if (!found) L.push('no table names found on the page — open the table list and scan again');
+      // Found by the same text shape the filter uses (v1.85.0) — the list's
+      // table names are NOT the ones in TORN_STAKES (the 6-seat tables have
+      // their own), which is why the earlier name probe found nothing.
+      const rows = findTableRows();
+      const min = Number(STORE.settings.minTableStake) || 0;
+      L.push(`table rows found: ${rows.length}   filter: ${min > 0 ? 'hide below ' + fmtMoney(min) : 'off'}`
+        + `   hidden now: ${document.querySelectorAll('[data-tph-hid]').length}`);
+      if (rows.length) {
+        L.push('  list: ' + elSig(rows[0].parentElement));
+        rows.slice(0, 4).forEach((r) => {
+          L.push(`  row ${elSig(r)} -> ${fmtMoney(tableRowStake(r))}`);
+          L.push('    text: ' + squish(r.textContent, 90));
+        });
+      } else {
+        L.push('no table rows found — open the table list and scan again');
+      }
     })();
     L.push('');
 
@@ -15474,6 +15564,10 @@
       tableSoftnessHtml,
       seatCovered,
       isHudElement,
+      moneyAmounts,
+      tableRowStake,
+      tableRowFor,
+      tableRowsToHide,
       tableAnnounceKind,
       noteTableForAnnounce,
       noteTableChange,
@@ -15615,6 +15709,13 @@
     setInterval(() => {
       if (!STORE.settings.showBadges) return;
       try { if (seatCoverSignature() !== lastCoverSig) renderBadges(); } catch (e) { /* next tick */ }
+    }, 1000);
+    // The table list re-renders as it scrolls and as seats fill, so the filter
+    // is re-applied each second rather than once. Does nothing while off, and
+    // nothing leaves a trace once turned off (see applyTableFilter).
+    setInterval(() => {
+      if (!(Number(STORE.settings.minTableStake) > 0) && !document.querySelector('[data-tph-hid]')) return;
+      try { applyTableFilter(); } catch (e) { /* next tick */ }
     }, 1000);
     setInterval(renderCoachPanel, 1500);
     // Faster than the coach panel: a turn cue that arrives 1.5s late has missed
