@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.85.0
+// @version      1.85.1
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,19 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.85.1 - Hands logged in big blinds are no longer stored as tiny amounts, or twice.
+ *            - Reported from History: one hand showed $9 bets and a $252 win
+ *              beside $2.5M blinds, and the same hand appeared again at
+ *              $22.5M. Every figure in the second was 2.5M times the first.
+ *            - Torn can show amounts in big blinds ("called 9 BB"). That was
+ *              read as $9. It is now priced with the table's blind; with no
+ *              blind known the amount is withheld and BB display mode is
+ *              flagged, rather than recorded tiny. "$22.5M" also reads right.
+ *            - Switching units rewrites every log row, so no row matched the
+ *              last read and the whole visible log was replayed into the live
+ *              hand. The log is now compared with amounts blanked out, so a
+ *              unit switch is a re-render and replays nothing.
+ *            - The two hands already stored stay as they are, P/L included.
  * 1.85.0 - Hide low-stake tables in Torn's table list.
  *            - Asked for: only show tables from $500k up. Settings > Table
  *              list > "Hide tables below $". 0 (the default) shows all.
@@ -44,43 +57,6 @@
  *            - Not yet built: hiding low-stake tables in the list. That needs
  *              the list's markup, which has never been scanned. The deep scan
  *              now has a TABLE SELECT section — take one with the list open.
- * 1.83.1 - History, the P/L log and your totals are saved as each hand ends.
- *            - Found in review: the saved store is split into pieces, and only
- *              pieces marked as changed are written. Three of those marks were
- *              set by nothing except a full rewrite once a minute: hand
- *              history, the P/L log, and the core piece that holds settings,
- *              your lifetime totals and the session. So closing the page
- *              within a minute of a hand ending lost that hand's history
- *              entry, its P/L log row and the change to your lifetime total.
- *              The log row and the total could also land a minute apart, which
- *              breaks the rule that the log adds up to the total.
- *            - Hand history is now marked where a hand is recorded. The P/L
- *              log is marked where a row is added and by both resets that
- *              clear it. Core is marked on every save: it is about 2 KB, and
- *              it is written from too many places to mark each one reliably.
- *            - The once-a-minute full rewrite is still there as the safety
- *              net.
- *
- * Earlier versions: CHANGELOG.md. The full history used to sit here — 780 lines
- * of narrative above the first line of code, paid for by every read of this
- * file from the top. Three entries is enough for a fresh reader to see what
- * just changed; the archive holds the rest, and git holds it twice.
- *
- * KNOWN GAPS (reviewed, deliberately not fixed — CLAUDE.md has the reasoning,
- * and numbers the same way):
- *  3. An all-in counts as a raise in preflopRaiseEvents, so a short-stack
- *     all-in CALL can make the coach read the spot as facing a 3-bet. Fixing it
- *     needs the all-in amount compared against the current bet, which the log
- *     does not always print.
- *  5. tableMax (default 9) drives ONLY the equity quote. The preflop charts read
- *     the per-hand seat count instead, so at a 6-max table with the default left
- *     alone the equity figure reads pessimistically (quoted vs 8 opponents).
- *
- * Findings 1 (no pot cross-check) and 2 (unbounded STORE.players) were closed in
- * 0.18.0 and 0.40.0-0.41.0; 4 (calibration's refresh only arming if the setting
- * was on at load) in 1.37.0. A "KNOWN UNRESOLVED" note used to sit here claiming
- * actionButtons and the dealer button match nothing; it was stale from 0.22.0,
- * when both gained a working path, and is deleted rather than carried.
  */
 
 /*
@@ -122,7 +98,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.85.0';
+  const HUD_VERSION = '1.85.1';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -3391,8 +3367,8 @@
     // The id is captured: it uniquely names one real hand, which is what lets a
     // re-read of the same marker be ignored instead of opening a second record.
     { type: 'newHandMarker', re: /^(?:game\s+)?([0-9a-f]{6,})\s+started\b/i },
-    { type: 'postSB', re: /^(.+?)\s+post(?:s|ed)?\s+(?:the\s+)?small\s*blind(?:\s*\$?([\d,]+))?/i },
-    { type: 'postBB', re: /^(.+?)\s+post(?:s|ed)?\s+(?:the\s+)?big\s*blind(?:\s*\$?([\d,]+))?/i },
+    { type: 'postSB', re: /^(.+?)\s+post(?:s|ed)?\s+(?:the\s+)?small\s*blind(?:\s*\$?([\d,]+(?:\.\d+)?(?:\s*BB|[kmb]\b)?))?/i },
+    { type: 'postBB', re: /^(.+?)\s+post(?:s|ed)?\s+(?:the\s+)?big\s*blind(?:\s*\$?([\d,]+(?:\.\d+)?(?:\s*BB|[kmb]\b)?))?/i },
     // A bare "Name posted $2,500,000" — a dead blind, posted when rejoining
     // after sitting out or missing a blind. Seen unparsed on a live scan.
     // MUST stay below postSB/postBB, which are more specific; it is anchored to
@@ -3401,18 +3377,18 @@
     // The money is real and goes into the pot, so it is contributed — but it is
     // FORCED, so it must not count as VPIP or as a limp. Treating it as a call
     // would have made anyone rejoining a table look voluntarily loose.
-    { type: 'postDead', re: /^(.+?)\s+post(?:s|ed)?\s+\$?([\d,]+)\s*$/i },
-    { type: 'allin', re: /^(.+?)\s+(?:is\s+|goes\s+|went\s+)?all[\s-]?in(?:\s*(?:for|with)?\s*\$?([\d,]+))?/i },
+    { type: 'postDead', re: /^(.+?)\s+post(?:s|ed)?\s+\$?([\d,]+(?:\.\d+)?(?:\s*BB|[kmb]\b)?)\s*$/i },
+    { type: 'allin', re: /^(.+?)\s+(?:is\s+|goes\s+|went\s+)?all[\s-]?in(?:\s*(?:for|with)?\s*\$?([\d,]+(?:\.\d+)?(?:\s*BB|[kmb]\b)?))?/i },
     { type: 'fold', re: /^(.+?)\s+fold(?:s|ed)?\b/i },
     { type: 'check', re: /^(.+?)\s+check(?:s|ed)?\b/i },
-    { type: 'call', re: /^(.+?)\s+call(?:s|ed)?\b(?:\s*\$?([\d,]+))?/i },
+    { type: 'call', re: /^(.+?)\s+call(?:s|ed)?\b(?:\s*\$?([\d,]+(?:\.\d+)?(?:\s*BB|[kmb]\b)?))?/i },
     // "raised $1,000,000 to $2,000,000" states the increment first and the total
     // second; the total is the number that matters for pot and bet-sizing math,
     // so match this shape ahead of the generic raise below, which would
     // otherwise capture the increment and understate every raise.
-    { type: 'raise', re: /^(.+?)\s+raise[sd]?\s+\$?[\d,]+\s+to\s+\$?([\d,]+)/i },
-    { type: 'raise', re: /^(.+?)\s+raise[sd]?\b(?:\s+to)?(?:\s*\$?([\d,]+))?/i },
-    { type: 'bet', re: /^(.+?)\s+bet(?:s|ted)?\b(?:\s*\$?([\d,]+))?/i },
+    { type: 'raise', re: /^(.+?)\s+raise[sd]?\s+\$?[\d,]+(?:\.\d+)?(?:\s*BB|[kmb])?\s+to\s+\$?([\d,]+(?:\.\d+)?(?:\s*BB|[kmb]\b)?)/i },
+    { type: 'raise', re: /^(.+?)\s+raise[sd]?\b(?:\s+to)?(?:\s*\$?([\d,]+(?:\.\d+)?(?:\s*BB|[kmb]\b)?))?/i },
+    { type: 'bet', re: /^(.+?)\s+bet(?:s|ted)?\b(?:\s*\$?([\d,]+(?:\.\d+)?(?:\s*BB|[kmb]\b)?))?/i },
     // Torn writes "The flop:  5♣, 7♦, A♦" — the definite article and the double
     // space both defeated an anchor on the bare street name, so the board was
     // never read from the log and the street never advanced.
@@ -3435,7 +3411,7 @@
     // SHOWS produces "won $65,000,000 with [J J]", which contains no "show" and
     // parsed correctly, so P/L worked on some hands and vanished on others.
     // Confirmed from a live deep scan at v1.1.0.
-    { type: 'wins', re: /^(.+?)\s+w(?:ins?|on)\b(?:\s+the\s+pot)?(?:\s*\$?([\d,]+))?/i },
+    { type: 'wins', re: /^(.+?)\s+w(?:ins?|on)\b(?:\s+the\s+pot)?(?:\s*\$?([\d,]+(?:\.\d+)?(?:\s*BB|[kmb]\b)?))?/i },
     // Showdowns read "_AY_  reveals [9♥, 7♠] (Two Pairs: Nines and Sevens)".
     // "reveals" was the confirmed wording, but the pattern only accepted
     // reveal/reveals — "revealed" and "turns over" fell straight through to the
@@ -4397,7 +4373,7 @@
 
     if (type === 'postSB' || type === 'postBB') {
       const xid = nameToXidGuess(cleanName(m[1]));
-      const amt = m[2] ? parseAmount(m[2]) : 0;
+      const amt = logAmount(m[2], hand);
       addContribution(hand, xid, amt);
       logAction(hand, xid, type === 'postSB' ? 'sb' : 'bb', amt);
       if (type === 'postSB') {
@@ -4414,7 +4390,7 @@
 
     if (type === 'postDead') {
       const xid = nameToXidGuess(cleanName(m[1]));
-      const amt = m[2] ? parseAmount(m[2]) : 0;
+      const amt = logAmount(m[2], hand);
       addContribution(hand, xid, amt);
       logAction(hand, xid, 'post', amt);
       // Deliberately no maybeCountVpip / maybeCountLimp: a dead blind is forced
@@ -4447,7 +4423,7 @@
 
     if (type === 'call') {
       const xid = nameToXidGuess(cleanName(m[1]));
-      const amt = m[2] ? parseAmount(m[2]) : 0;
+      const amt = logAmount(m[2], hand);
       addContribution(hand, xid, amt);
       recordStreetAction(xid, 'call', hand);
       logAction(hand, xid, 'call', amt);
@@ -4458,7 +4434,7 @@
 
     if (type === 'bet') {
       const xid = nameToXidGuess(cleanName(m[1]));
-      const amt = m[2] ? parseAmount(m[2]) : 0;
+      const amt = logAmount(m[2], hand);
       const potBefore = hand.pot;
       noteBetSizing(xid, amt, potBefore);
       addContribution(hand, xid, amt);
@@ -4472,7 +4448,7 @@
 
     if (type === 'raise') {
       const xid = nameToXidGuess(cleanName(m[1]));
-      const amt = m[2] ? parseAmount(m[2]) : 0;
+      const amt = logAmount(m[2], hand);
       const potBefore = hand.pot;
       noteBetSizing(xid, amt, potBefore);
       addContribution(hand, xid, amt);
@@ -4484,7 +4460,7 @@
 
     if (type === 'allin') {
       const xid = nameToXidGuess(cleanName(m[1]));
-      const amt = m[2] ? parseAmount(m[2]) : 0;
+      const amt = logAmount(m[2], hand);
       const potBefore = hand.pot;
       if (amt) { noteBetSizing(xid, amt, potBefore); addContribution(hand, xid, amt); }
       recordStreetAction(xid, 'raise', hand);
@@ -4543,14 +4519,43 @@
       // consecutive "X wins $Y" lines, and settling on the first would reset
       // hand state before the second winner's line arrives.
       const xid = nameToXidGuess(cleanName(m[1]));
-      const amt = m[2] ? parseAmount(m[2]) : 0;
+      const amt = logAmount(m[2], hand);
       hand.winners.push({ xid, amount: amt });
       return;
     }
   }
 
-  function parseAmount(str) {
-    return parseInt(String(str).replace(/,/g, ''), 10) || 0;
+  // Chips from an amount as Torn writes it: "$2,500,000", "$22.5M", or — with
+  // Torn set to show amounts in big blinds — "9 BB" / "22.50 BB".
+  //
+  // The BB form is priced with `bb`, and returns 0 when there is no plausible
+  // blind to price it with: an unknown amount, never a tiny one. It used to be
+  // read as a bare number, so "9 BB" became $9. A live History showed the
+  // result — one hand stored with $9 bets and a $252 win beside $2.5M blinds,
+  // and the SAME hand stored again at $22.5M, 2.5M times larger. Nothing
+  // looked broken; the figures were just small.
+  function parseAmount(str, bb) {
+    const s = String(str).replace(/[\s,$]/g, '');
+    const m = /^(\d+(?:\.\d+)?)(bb|k|m|b)?$/i.exec(s);
+    if (!m) return parseInt(s, 10) || 0;
+    const n = parseFloat(m[1]);
+    const unit = (m[2] || '').toLowerCase();
+    if (unit === 'bb') return plausibleBB(bb) ? Math.round(n * bb) : 0;
+    const mul = unit === 'k' ? 1e3 : unit === 'm' ? 1e6 : unit === 'b' ? 1e9 : 1;
+    return Math.round(n * mul) || 0;
+  }
+
+  // A log amount, priced in this hand's blind (else the last one seen).
+  //
+  // Known limit, stated rather than solved: a BB-denominated line at a NEW
+  // table is priced with the old table's blind until a dollar blind line
+  // lands, because a BB-mode log never states the blind in chips. An amount
+  // that cannot be priced at all flags BB display mode, which withholds P/L.
+  function logAmount(str, hand) {
+    if (!str) return 0;
+    const amt = parseAmount(str, (hand && hand.bbAmount) || lastSeenBB);
+    if (!amt && /bb$/i.test(String(str).trim())) bbDisplayModeSuspected = true;
+    return amt;
   }
 
   // Short keys — this array is persisted for every retained hand, so verbose
@@ -6115,6 +6120,44 @@
     return 0;
   }
 
+  // The same line with every amount blanked — the key the diff aligns on.
+  //
+  // Torn can show amounts in dollars or in big blinds, and switching rewrites
+  // EVERY row in place: "called $22,500,000" becomes "called 9 BB". Diffed on
+  // raw text, nothing overlapped, so the whole visible log was taken as new
+  // and replayed into the hand in progress — in both units, which is how one
+  // hand was reported stored twice, once with $9 bets and once at $22.5M.
+  // Blanking the amounts makes the two renderings the same line. A row whose
+  // only change is its unit is a re-render, not an event.
+  const LOG_AMOUNT_TOKEN_RE = /\$?\d[\d,]*(?:\.\d+)?(?:\s*BB|[kmb]\b)?/gi;
+  // A "Game <hex> started" marker is kept verbatim: its id is the strongest
+  // anchor in the log, and blanking digits out of it would let two different
+  // hands' markers read alike.
+  function logLineKey(line) {
+    const s = String(line);
+    return /^game\s+[0-9a-f]{6,}\s+started/i.test(s) ? s : s.replace(LOG_AMOUNT_TOKEN_RE, '#');
+  }
+
+  // Which lines of `cur` are new since `prev`. Pure: returns the lines (oldest
+  // first) and the orientation to latch.
+  function diffLogRows(prev, cur, orientation) {
+    const pk = prev.map(logLineKey);
+    const ck = cur.map(logLineKey);
+    const tailN = tailOverlap(pk, ck);
+    const headN = headOverlap(pk, ck);
+
+    // Which end the log grows from isn't documented and can't be checked without
+    // a live table, so infer it and latch it. A tie means no usable overlap
+    // (the list was replaced wholesale); reuse the direction already observed
+    // rather than guessing again and replaying a hand backwards.
+    if (tailN > headN) return { fresh: cur.slice(tailN), orientation: 'append' };
+    if (headN > tailN) return { fresh: cur.slice(0, cur.length - headN).reverse(), orientation: 'prepend' };
+    return {
+      fresh: orientation === 'prepend' ? cur.slice(0, cur.length - headN).reverse() : cur.slice(tailN),
+      orientation,
+    };
+  }
+
   // Returns true if the structured path handled this tick, false if there are no
   // log rows to read and the caller should fall back to parsing added nodes.
   function scanLogRows() {
@@ -6152,25 +6195,9 @@
       return true;
     }
 
-    const tailN = tailOverlap(logSnapshot, cur);
-    const headN = headOverlap(logSnapshot, cur);
-
-    // Which end the log grows from isn't documented and can't be checked without
-    // a live table, so infer it and latch it. A tie means no usable overlap
-    // (the list was replaced wholesale); reuse the direction already observed
-    // rather than guessing again and replaying a hand backwards.
-    let fresh;
-    if (tailN > headN) {
-      logOrientation = 'append';
-      fresh = cur.slice(tailN);
-    } else if (headN > tailN) {
-      logOrientation = 'prepend';
-      fresh = cur.slice(0, cur.length - headN).reverse();
-    } else {
-      fresh = logOrientation === 'prepend'
-        ? cur.slice(0, cur.length - headN).reverse()
-        : cur.slice(tailN);
-    }
+    const diff = diffLogRows(logSnapshot, cur, logOrientation);
+    logOrientation = diff.orientation;
+    const fresh = diff.fresh;
 
     // Snapshot before parsing: handleLogLine can render panels, and a re-entrant
     // scan must not see the pre-update snapshot and emit these lines twice.
@@ -15194,6 +15221,8 @@
       cleanName,
       containsNameToken,
       parseAmount,
+      diffLogRows,
+      logLineKey,
       RFI_RANGES,
       THREE_BET_RANGES,
       FOUR_BET_RANGE,
@@ -15523,6 +15552,8 @@
       ensureHeroShape,
       get lastSeenBB() { return lastSeenBB; },
       set lastSeenBB(v) { lastSeenBB = v; },
+      get bbDisplayModeSuspected() { return bbDisplayModeSuspected; },
+      set bbDisplayModeSuspected(v) { bbDisplayModeSuspected = v; },
       STORE_VERSION,
       migrateStore,
       HUD_VERSION,

@@ -1611,6 +1611,22 @@ that session rather than written wrong, and `bbDisplayModeSuspected` surfaces it
 in Settings and the deep scan. Withholding is the right trade: a gap in the data
 is recoverable, a silently wrong win rate is not.
 
+**BB display mode is now parsed, not just detected (v1.85.1).** It showed up
+live: one hand stored with `$9` bets beside `$2.5M` blinds, and the same hand
+again at `$22.5M`. Two faults:
+
+- The patterns dropped the unit, so `called 9 BB` read as $9. The amount
+  capture now keeps `BB` / `k` / `M` / `B`, and `logAmount` prices a BB figure
+  with the hand's blind (else `lastSeenBB`). **Unpriceable means 0 and flags
+  display mode, never a tiny number.** Known limit: at a new table in BB mode
+  the old blind prices it until a dollar blind line lands.
+- Switching units rewrites every row, so the raw-text diff found no overlap and
+  replayed the whole visible log into the live hand. `diffLogRows` aligns on
+  `logLineKey` (amounts blanked; `Game <hex>` lines verbatim, since they are the
+  anchor). **A row whose only change is its unit is a re-render, not an event.**
+  Same principle as the snapshot diff itself: content, not node identity, and
+  now content modulo units.
+
 ## Session reads and tilt (v0.26.0)
 
 `player.recent` is a capped array of one digit per hand — `0` folded, `1`

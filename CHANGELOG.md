@@ -9,6 +9,34 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.85.1
+Hands logged in big blinds are no longer stored as tiny amounts, or twice
+
+Reported from a History screenshot: one hand showed $9 bets and a $252 win
+beside $2.5M blinds, and the same hand appeared again with a $585M pot. Every
+figure in the second was 2.5M (the big blind) times the first, so they were one
+hand read in two units.
+
+Torn can show amounts in big blinds ("called 9 BB"). The log patterns captured
+the digits and dropped the unit, so that read as $9. `parseAmount` now takes
+units: BB amounts are priced with the hand's blind (else the last one seen), and
+"$22.5M"/"500k" read as written. With no blind known, a BB amount is withheld
+(0) and BB display mode is flagged, which already withholds P/L.
+
+Switching units rewrites every row in place. `scanLogRows` diffs on text, so
+nothing overlapped the previous snapshot and the whole visible log was replayed
+into the hand in progress, in both units. The diff (`diffLogRows`, now pure)
+aligns on `logLineKey`, which blanks amounts, so a unit switch replays nothing.
+`Game <hex> started` lines are kept verbatim, since they anchor the diff.
+
+Known limit: a BB-mode log at a NEW table is priced with the old blind until a
+dollar blind line lands, because a BB-mode log never states the blind in chips.
+
+The two hands already stored are not repaired, and neither is the P/L they
+recorded: the per-hand figures needed to undo it are gone.
+
+`test/bb-display.test.js` drives the real parser and diff, mutation-checked.
+
 ## 1.85.0
 Hide low-stake tables in Torn's table list
 
