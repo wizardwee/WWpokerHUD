@@ -83,4 +83,15 @@ t.ok('the deep scan has a table-select section', /--- TABLE SELECT/.test(src));
     T.coveredSeatKeys([E('1', false), E('2', false)], cov(['2'])).join(','), '2');
 }
 
+// The table list sits over the middle of the felt, leaving edge seats with a
+// sliver showing. Most points covered hides the tag; a minority does not.
+{
+  let k = 0;
+  const threeOfFive = () => ((k++ % 5) < 3 ? [overlay, page] : [avatar, seat]);
+  t.eq('three of five points under the list: hidden', T.seatCovered(seat, rect, threeOfFive, VW, VH), true);
+  k = 0;
+  const twoOfFive = () => ((k++ % 5) < 2 ? [overlay, page] : [avatar, seat]);
+  t.eq('two of five: still visible', T.seatCovered(seat, rect, twoOfFive, VW, VH), false);
+}
+
 process.exit(t.report());

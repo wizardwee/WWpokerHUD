@@ -9,6 +9,34 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.86.0
+The table-list filter works on cash games, by big blind
+
+Reported: "The filter doesn't work." v1.85.0 was built from a screenshot of the
+Tournaments tab, where each row shows a single buy-in, and looked for exactly
+one dollar amount per row. The Cash Games list shows the blinds as a pair,
+abbreviated with a lowercase suffix ("$500 / $1k", "$1.25m / $2.5m"), so no row
+ever matched.
+
+Cash rows are now recognised by the blinds cell: two dollar amounts joined by a
+slash, read from the cell's OWN text (one text node or split across spans).
+`textContent` glues the timer onto the row ("$5 / $10" + "30" reads
+"$5 / $1030"), so the row's text is never parsed for the stake. The row is the
+first block above the cell holding exactly one blinds pair, among at least three
+alike; seats, the log and the HUD stay excluded. Tournament rows have no pair
+and are never hidden, as asked. The comparison is against the big blind.
+
+The setting ("Hide cash tables with big blind below $") is now a text box that
+takes 500k / 1m / 2.5m, read by `parseAmount`, and shows the value back exactly
+(`minStakeInputText`; `fmtMoney` would have rounded $1.25M to "1.3m" and the
+next edit would have saved it).
+
+Also from the same screenshot: tags stayed drawn over the table list on edge
+seats. `seatCovered` required ALL tested points to be covered, and the list
+leaves a sliver of the edge seats showing. It now needs a majority, which still
+ignores a chip stack or dealer button over a single point. Hero's rule
+(v1.85.2) is unchanged, so hero's tag shows while any opponent's does.
+
 ## 1.85.2
 Your own seat's tag is back
 

@@ -1,7 +1,8 @@
-// v1.85.0: hiding low-stake rows in Torn's table list. The list's markup was
-// never scanned by class; rows are recognised by their TEXT, shaped exactly as
-// the user's screenshot shows them:  name | $amount | speed | seated/max.
-// Driven through the real exported functions on stand-in nodes.
+// Hiding low-stake CASH tables in Torn's table list (v1.85.0, rebuilt v1.86.0).
+// Rows are recognised by their TEXT, shaped as the user's screenshot of the
+// Cash Games list shows them:  name | $sb / $bb | timer | seated/max.
+// v1.85.0 was built from the Tournaments tab (one amount per row) and matched
+// nothing on the cash list. Driven through the real functions on stand-ins.
 
 const { load, runner } = require('./harness');
 
@@ -27,76 +28,108 @@ function node(opts, kids) {
   (kids || []).forEach((k) => { k.parentElement = n; n.children.push(k); });
   return n;
 }
-// One list row, four cells — the money cell is what the walker starts from.
-function row(name, amount, seats) {
-  const money = node({ text: amount });
-  return { el: node({ cls: 'row' }, [node({ text: name }), node({}, [money]), node({ text: 'regular' }), node({ text: seats })]), money };
+// One cash row, four cells. `split` renders the blinds as three spans instead
+// of one text node — both must be read.
+function row(name, blinds, seats, split) {
+  const cell = split
+    ? node({}, blinds.split(/(\s*\/\s*)/).map((p) => node({ text: p })))
+    : node({ text: blinds });
+  return { el: node({ cls: 'row' }, [node({ text: name }), cell, node({ text: '15' }), node({ text: seats })]), cell };
 }
 const rows = [
-  row('Cut the Cord', '$250,000,000', '4/6'),
-  row('Spilled Milk', '$10,000', '0/6'),
-  row('Dive Bar', '$100,000', '0/6'),
-  row('Lost at Sea', '$1,000,000', '0/6'),
-  row('Jaded', '$10,000,000', '0/6'),
-  row('Bloody Hell', '$10,000,000,000', '0/6'),
+  row('Newbie Corner', '$5 / $10', '9/9'),
+  row('Gatling Gun II', '$500 / $1k', '9/9'),
+  row('Ballsy', '$12.5k / $25k', '9/9', true),
+  row('Periodic', '$50k / $100k', '9/9'),
+  row('River Wizard II', '$500k / $1m', '9/9'),
+  row('Cat\'s Chance', '$1.25m / $2.5m', '9/9', true),
 ];
 const list = node({ cls: 'list' }, rows.map((r) => r.el));
 node({ cls: 'page' }, [list]);
 
-// --- reading the text -----------------------------------------------------------
+// --- reading the blinds -------------------------------------------------------------
 
-t.eq('amounts parse with commas, up to billions',
-  JSON.stringify(T.moneyAmounts('Bloody Hell$10,000,000,000regular0/6')), JSON.stringify([10000000000]));
-t.eq('a row reads its one stake', T.tableRowStake(rows[2].el), 100000);
-// textContent has no separators between cells — the row reads "Dive Bar$100,000regular0/6".
-t.eq('the seat count is found glued to the word before it', T.tableRowStake(node({ text: 'Dive Bar$100,000regular0/6' })), 100000);
-t.eq('a date-like 12/25/2026 is not a seat count', T.tableRowStake(node({ text: 'x$5 on 12/25/2026' })), null);
-t.eq('the whole list is not a row (many amounts)', T.tableRowStake(list), null);
-t.eq('the money cell alone is not a row (no seat count)', T.tableRowStake(rows[2].money), null);
+t.eq('big blind of "$5 / $10"', T.tableBlindsBB('$5 / $10'), 10);
+t.eq('abbreviated k', T.tableBlindsBB('$12.5k / $25k'), 25000);
+t.eq('lowercase m with decimals', T.tableBlindsBB('$1.25m / $2.5m'), 2500000);
+t.eq('full figures with commas', T.tableBlindsBB('$500,000 / $1,000,000'), 1000000);
+t.eq('a tournament buy-in (one amount) is not a cash row', T.tableBlindsBB('$250,000,000'), null);
+t.eq('a small blind above the big is not blinds', T.tableBlindsBB('$10 / $5'), null);
+// textContent glues the timer on: "$5 / $10" + "30" reads "$5 / $1030". The
+// stake must come from the cell's own text, never the row's.
+t.eq('the row text is never parsed as blinds', T.tableBlindsBB(rows[0].el.textContent), null);
+t.eq('the blinds cell is found from one text node', T.tableBlindsCell(rows[0].cell), rows[0].cell);
+t.eq('...and from a span inside a split cell', T.tableBlindsCell(rows[2].cell.children[0]), rows[2].cell);
+t.eq('a split cell reads its big blind', T.tableBlindsBB(rows[2].cell.textContent), 25000);
 
-// --- finding the row from its amount ---------------------------------------------
+// --- finding the row from its blinds ---------------------------------------------
 
-t.eq('climbs from the amount to the row', T.tableRowFor(rows[3].money), rows[3].el);
+t.eq('climbs from the blinds to the row', T.tableRowFor(rows[3].cell), rows[3].el);
+t.eq('...from a split cell too', T.tableRowFor(rows[5].cell), rows[5].el);
 
-// A seat shows bare money too (its stack). Built so that EVERYTHING but the
-// seat exclusion would accept it — readable amount, a seat-count-like figure,
-// and three seats alike beside it — so only the exclusion can stop it.
-const mkSeat = (id, stackText) => {
-  const money = node({ text: stackText });
-  return { money, el: node({ id, cls: 'opponent___x' }, [node({ text: 'Call ' }), money, node({ text: ' 2/6' })]) };
+// A seat with blinds-like text, three alike, so that ONLY the seat exclusion
+// can stop it.
+const mkSeat = (id) => {
+  const cell = node({ text: '$5 / $10' });
+  return { cell, el: node({ id, cls: 'opponent___x' }, [node({ text: 'Mob' }), cell]) };
 };
-const seats = [mkSeat('player-1', '$168,410,083'), mkSeat('player-2', '$590,625,000'), mkSeat('player-3', '$101,380,074')];
+const seats = [mkSeat('player-1'), mkSeat('player-2'), mkSeat('player-3')];
 node({ cls: 'ring' }, seats.map((x) => x.el));
-t.eq('the fixture reads like a row to everything but the exclusion', T.tableRowStake(seats[0].el), 168410083);
-t.eq('a seat is never taken for a row', T.tableRowFor(seats[0].money), null);
+t.eq('the seat fixture has readable blinds', T.tableBlindsBB(seats[0].cell.textContent), 10);
+t.eq('a seat is never taken for a row', T.tableRowFor(seats[0].cell), null);
 
-// Same for the game log: three lines alike, each with an amount and an n/m.
-const mkLine = (amt) => {
-  const money = node({ text: amt });
-  return { money, el: node({ cls: 'message___x' }, [node({ text: 'Luki2202 called ' }), money, node({ text: ' 1/2' })]) };
+// Same for the game log.
+const mkLine = () => {
+  const cell = node({ text: '$5 / $10' });
+  return { cell, el: node({ cls: 'message___x' }, [node({ text: 'Luki2202 said ' }), cell]) };
 };
-const lines = [mkLine('$2,500,000'), mkLine('$5,000,000'), mkLine('$1,250,000')];
+const lines = [mkLine(), mkLine(), mkLine()];
 node({}, [node({ cls: 'messagesList___S3XYg' }, lines.map((x) => x.el))]);
-t.eq('a log line is never taken for a row', T.tableRowFor(lines[0].money), null);
+t.eq('a log line is never taken for a row', T.tableRowFor(lines[0].cell), null);
 
 // A lone block that reads exactly like a row but has no siblings like it.
-const loneMoney = node({ text: '$500,000' });
-const lone = node({}, [node({ text: 'Somewhere' }), loneMoney, node({ text: 'regular' }), node({ text: '3/9' })]);
+const loneCell = node({ text: '$50k / $100k' });
+const lone = node({}, [node({ text: 'Somewhere' }), loneCell, node({ text: '15' }), node({ text: '3/9' })]);
 node({}, [lone, node({ text: 'unrelated' })]);
-t.eq('the lone fixture reads like a row on its own', T.tableRowStake(lone), 500000);
-t.eq('fewer than 3 rows like it: not a list, left alone', T.tableRowFor(loneMoney), null);
+t.eq('the lone fixture has readable blinds', T.tableBlindsBB(loneCell.textContent), 100000);
+t.eq('fewer than 3 rows like it: not a list, left alone', T.tableRowFor(loneCell), null);
+
+// A block holding TWO tables is never taken for one row, even among three
+// single-table blocks — hiding it would hide both tables for one's stake.
+{
+  const pairCell = node({ text: '$5 / $10' });
+  const two = node({ cls: 'two' }, [
+    node({}, [node({ text: 'A' }), pairCell]),
+    node({}, [node({ text: 'B' }), node({ text: '$50k / $100k' })]),
+  ]);
+  const one = () => node({}, [node({ text: 'C' }), node({ text: '$1m / $2m' })]);
+  node({}, [two, one(), one(), one()]);
+  t.eq('a block of two tables is not a row', T.tableRowFor(pairCell), null);
+}
 
 // --- what gets hidden ---------------------------------------------------------------
 
-const all = rows.map((r) => r.el);
+const entries = rows.map((r) => ({ row: r.el, bb: T.tableBlindsBB(r.cell.textContent) }));
 const names = (els) => els.map((e) => e.children[0].ownText).join(',');
-t.eq('a $500k minimum hides the two below it', names(T.tableRowsToHide(all, 500000)), 'Spilled Milk,Dive Bar');
-t.eq('the minimum itself is kept (below, not at)', names(T.tableRowsToHide(all, 1000000)), 'Spilled Milk,Dive Bar');
-t.eq('0 hides nothing', T.tableRowsToHide(all, 0).length, 0);
+t.eq('a $1M minimum hides every big blind below $1M',
+  names(T.tableRowsToHide(entries, 1000000)), 'Newbie Corner,Gatling Gun II,Ballsy,Periodic');
+t.eq('the minimum itself is kept (below, not at)',
+  names(T.tableRowsToHide(entries, 2500000)), 'Newbie Corner,Gatling Gun II,Ballsy,Periodic,River Wizard II');
+t.eq('0 hides nothing', T.tableRowsToHide(entries, 0).length, 0);
 t.eq('the default is 0 (off)', T.DEFAULT_SETTINGS.minTableStake, 0);
+
+// --- the settings box ----------------------------------------------------------------
+
+t.eq('"1m" is a million', T.parseAmount('1m'), 1000000);
+t.eq('"2.5m" is $2.5M', T.parseAmount('2.5m'), 2500000);
+t.eq('"500k" is $500k', T.parseAmount('500k'), 500000);
+t.eq('the box shows it back exactly', T.minStakeInputText(1250000), '1.25m');
+t.eq('...never rounded', T.minStakeInputText(T.parseAmount(T.minStakeInputText(1250000))), '1.25m');
+t.eq('off reads blank', T.minStakeInputText(0), '');
+t.eq('small figures stay plain', T.minStakeInputText(500), '500');
 
 const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'torn-poker-hud.user.js'), 'utf8');
 t.ok('hidden rows are marked so turning it off restores exactly those', /data-tph-hid/.test(src) && /removeAttribute\('data-tph-hid'\)/.test(src));
-t.ok('the deep scan reports the rows it finds', /table rows found: /.test(src));
+t.ok('the deep scan reports the rows it finds', /cash table rows found: /.test(src));
 
 process.exit(t.report());

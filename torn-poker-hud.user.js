@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.85.2
+// @version      1.86.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,16 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.86.0 - The table-list filter works on cash games, by big blind.
+ *            - v1.85.0 was built from the Tournaments tab, where each row
+ *              shows one buy-in. Cash rows show the blinds as a pair
+ *              ("$12.5k / $25k", "$1.25m / $2.5m"), so it matched nothing.
+ *            - It now finds cash rows by their blinds and compares the BIG
+ *              blind. Tournaments are never hidden.
+ *            - The setting takes 500k, 1m, 2.5m... instead of a long number.
+ *            - Seat tags drawn over the table list: a seat now counts as
+ *              covered when most of it is, not all of it, so edge seats with
+ *              a sliver showing no longer keep their tag over the list.
  * 1.85.2 - Your own seat's tag is back.
  *            - v1.84.0 hides a tag when something of Torn's is drawn over the
  *              seat. Your seat sits below the felt beside your cards, and
@@ -26,19 +36,6 @@
  *            - Your tag now follows the table: it hides only while no
  *              opponent's seat is showing, which is what the table-selection
  *              screen does. Opponents' tags are unchanged.
- * 1.85.1 - Hands logged in big blinds are no longer stored as tiny amounts, or twice.
- *            - Reported from History: one hand showed $9 bets and a $252 win
- *              beside $2.5M blinds, and the same hand appeared again at
- *              $22.5M. Every figure in the second was 2.5M times the first.
- *            - Torn can show amounts in big blinds ("called 9 BB"). That was
- *              read as $9. It is now priced with the table's blind; with no
- *              blind known the amount is withheld and BB display mode is
- *              flagged, rather than recorded tiny. "$22.5M" also reads right.
- *            - Switching units rewrites every log row, so no row matched the
- *              last read and the whole visible log was replayed into the live
- *              hand. The log is now compared with amounts blanked out, so a
- *              unit switch is a re-render and replays nothing.
- *            - The two hands already stored stay as they are, P/L included.
  */
 
 /*
@@ -80,7 +77,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.85.2';
+  const HUD_VERSION = '1.86.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -12098,8 +12095,8 @@
   // by a redeploy renaming the screen's classes.
   //
   // Five points, not one: a chip stack or the dealer button over the centre of
-  // a seat is not the seat being covered, and one visible point is enough to
-  // keep the tag. HUD elements are looked THROUGH — our own panel or badge
+  // a seat is not the seat being covered. Most of the five must be covered
+  // (v1.86.0; it used to be all five — see the end of seatCovered). HUD elements are looked THROUGH — our own panel or badge
   // over a seat is not Torn covering it. A point off screen says nothing.
   //
   // Fails OPEN: no elementsFromPoint, or no point that could be tested, means
@@ -12111,6 +12108,7 @@
   function seatCovered(seat, rect, pointsAt, vw, vh) {
     if (typeof pointsAt !== 'function' || !rect) return false;
     let tested = 0;
+    let hidden = 0;
     for (const [fx, fy] of SEAT_COVER_POINTS) {
       const x = rect.left + rect.width * fx;
       const y = rect.top + rect.height * fy;
@@ -12120,9 +12118,13 @@
       const top = Array.prototype.find.call(list, (el) => !isHudElement(el));
       if (!top) continue;
       tested += 1;
-      if (top === seat || (seat.contains && seat.contains(top)) || (top.contains && top.contains(seat))) return false;
+      if (!(top === seat || (seat.contains && seat.contains(top)) || (top.contains && top.contains(seat)))) hidden += 1;
     }
-    return tested > 0;
+    // MOST of the seat, not all of it (v1.86.0). The table list sits over the
+    // middle of the felt, so the edge seats are left with a sliver showing —
+    // and one visible point used to keep their tag drawn over the list.
+    // A majority still ignores a chip stack or dealer button over one point.
+    return tested > 0 && hidden * 2 > tested;
   }
   // Which of the laid-out seats count as covered. Pure: `entries` are
   // {key, isSelf, seat, rect}, `isCovered(entry)` is the hit test.
@@ -12173,79 +12175,96 @@
       (e) => seatCovered(e.seat, e.rect, hit, window.innerWidth, window.innerHeight)).join(',');
   }
 
-  // --- Table-list filter (v1.85.0) --------------------------------------------
+  // --- Table-list filter (v1.85.0, rebuilt v1.86.0) ---------------------------
   //
-  // Asked for: hide the low-stake tables in Torn's table list. Built from a
-  // screenshot and a scan of that list (not from class names, which Torn
-  // hashes and renames on redeploy): each row reads
-  //     name | $amount | speed | seated/max     e.g. "Dive Bar  $100,000  regular  0/6"
-  // So a row is recognised by its TEXT: the smallest block holding exactly one
-  // dollar amount and one "n/m" seat count, sitting among at least
-  // TABLE_ROW_MIN_SIBLINGS blocks that read the same way. That shape is a
-  // list, not a seat, a log line or a stack.
+  // Asked for: hide the low-stake CASH tables in Torn's table list. Recognised
+  // by TEXT, not class names (Torn hashes and renames those). A cash row reads
+  //     name | $sb / $bb | timer | seated/max     e.g. "Ballsy  $12.5k / $25k  15  9/9"
+  // and the blinds cell is the one thing no other row on the page has: two
+  // dollar amounts joined by a slash. Tournament rows show a single buy-in and
+  // are left alone — asked for directly, "only target regular tables".
   //
-  // The amount compared is whatever the row shows. Nobody here has confirmed
-  // whether Torn's column is the big blind or a buy-in, so the setting is
-  // worded "below $X as shown", never "below a $X blind".
+  // v1.85.0 was built from a screenshot of the TOURNAMENT tab (one amount per
+  // row) and so matched nothing on the cash list. Two traps it also fell in:
+  // the amounts are abbreviated ("$1.25m", lowercase), and textContent glues
+  // cells together ("$5 / $10" + "30" reads "$5 / $1030"), so the stake is read
+  // from the blinds cell's OWN text, anchored, never from the row's.
   //
   // Never touched: anything inside a seat, the game log, or the HUD. Hidden
   // rows are marked, so turning the filter down or off restores exactly what
   // was hidden and nothing else.
   const TABLE_ROW_MIN_SIBLINGS = 3;
+  const TABLE_CELL_MAX_CLIMB = 3;
   const TABLE_ROW_MAX_CLIMB = 6;
-  // No \b: textContent joins cells with NO separator, so a row reads
-  // "...regular0/6" and a word boundary before the 0 never matches (the
-  // v1.0.0 lesson, again). Bounded by a non-digit instead, and without a
-  // lookaround, which older iOS JSC cannot construct.
-  const TABLE_ROW_SEATS_RE = /(^|[^\d\/])\d{1,2}\s*\/\s*\d{1,2}($|[^\d\/])/;
+  const TABLE_BLINDS_CELL_RE = /^\s*\$\s?(\d[\d,]*(?:\.\d+)?\s*[kmb]?)\s*\/\s*\$\s?(\d[\d,]*(?:\.\d+)?\s*[kmb]?)\s*$/i;
+  const TABLE_BLINDS_ANY_RE = /\$\s?\d[\d,]*(?:\.\d+)?\s*[kmb]?\s*\/\s*\$\s?\d/gi;
   const TABLE_ROW_EXCLUDE = '[id^="player-"], [class*="messagesList_"], [class*="tph-"]';
-  function moneyAmounts(text) {
-    const out = [];
-    const re = /\$\s?(\d{1,3}(?:,\d{3})+|\d+)/g;
-    let m;
-    while ((m = re.exec(String(text || '')))) out.push(Number(m[1].replace(/,/g, '')));
-    return out;
+  // The big blind a blinds cell shows, in chips — or null if the text is not
+  // exactly "$sb / $bb" with the small blind no bigger than the big.
+  function tableBlindsBB(text) {
+    const m = TABLE_BLINDS_CELL_RE.exec(String(text || ''));
+    if (!m) return null;
+    const sb = parseAmount(m[1]);
+    const bb = parseAmount(m[2]);
+    return (sb > 0 && bb >= sb) ? bb : null;
   }
-  // The stake a block shows, when it reads like one table row; else null.
-  function tableRowStake(el) {
-    if (!el) return null;
-    const text = el.textContent || '';
-    const money = moneyAmounts(text);
-    if (money.length !== 1 || !TABLE_ROW_SEATS_RE.test(text)) return null;
-    return money[0];
+  function blindPairCount(text) {
+    return (String(text || '').match(TABLE_BLINDS_ANY_RE) || []).length;
   }
-  // From an element holding a bare dollar amount, the row it belongs to — or
-  // null when nothing above it reads like a row among rows.
-  function tableRowFor(el) {
-    let cur = el;
+  // From a blinds cell, the row it belongs to: the first block up that holds
+  // exactly one blinds pair and sits among TABLE_ROW_MIN_SIBLINGS blocks alike.
+  function tableRowFor(cell) {
+    let cur = cell;
     for (let i = 0; i < TABLE_ROW_MAX_CLIMB && cur; i++, cur = cur.parentElement) {
       if (typeof cur.closest === 'function' && cur.closest(TABLE_ROW_EXCLUDE)) return null;
-      if (tableRowStake(cur) == null) continue;
+      if (blindPairCount(cur.textContent) !== 1) return null;
       const par = cur.parentElement;
       if (!par) return null;
-      const likeIt = Array.prototype.filter.call(par.children || [], (c) => tableRowStake(c) != null).length;
-      return likeIt >= TABLE_ROW_MIN_SIBLINGS ? cur : null;
+      const alike = Array.prototype.filter.call(par.children || [], (c) => blindPairCount(c.textContent) === 1).length;
+      if (alike >= TABLE_ROW_MIN_SIBLINGS) return cur;
     }
     return null;
   }
-  // Every table row on the page. Walks TEXT nodes for a bare dollar amount,
-  // which is cheap next to reading every element's textContent.
+  // The smallest element at or above `el` whose own text is a blinds pair —
+  // one text node or split across spans, either way.
+  function tableBlindsCell(el) {
+    let cur = el;
+    for (let i = 0; i < TABLE_CELL_MAX_CLIMB && cur; i++, cur = cur.parentElement) {
+      if (tableBlindsBB(cur.textContent) != null) return cur;
+    }
+    return null;
+  }
+  // Every cash-table row on the page, with its big blind.
   function findTableRows() {
     if (typeof document.createTreeWalker !== 'function' || !document.body) return [];
-    const rows = [];
+    const out = [];
     const walker = document.createTreeWalker(document.body, 4 /* NodeFilter.SHOW_TEXT */);
     let n;
     while ((n = walker.nextNode())) {
-      if (!/^\s*\$\s?[\d,]+\s*$/.test(n.nodeValue || '')) continue;
-      const row = tableRowFor(n.parentElement);
-      if (row && rows.indexOf(row) < 0) rows.push(row);
+      if ((n.nodeValue || '').indexOf('$') < 0) continue;
+      const cell = tableBlindsCell(n.parentElement);
+      if (!cell) continue;
+      const row = tableRowFor(cell);
+      if (row && !out.some((e) => e.row === row)) out.push({ row, bb: tableBlindsBB(cell.textContent) });
     }
-    return rows;
+    return out;
   }
-  // Pure: which rows to hide at a given minimum. 0 or less hides nothing.
-  function tableRowsToHide(rows, min) {
+  // The setting as it reads back in its box: "1m", "1.25m", "500k", "" for
+  // off. Exact, never rounded — fmtMoney would show $1.25M as "1.3m", and the
+  // next edit would save 1.3M.
+  function minStakeInputText(v) {
+    const n = Math.round(Number(v) || 0);
+    if (!(n > 0)) return '';
+    const units = [[1e9, 'b'], [1e6, 'm'], [1e3, 'k']];
+    for (let i = 0; i < units.length; i++) {
+      if (n >= units[i][0]) return String(Number((n / units[i][0]).toFixed(6))) + units[i][1];
+    }
+    return String(n);
+  }
+  // Pure: which rows to hide at a given big-blind minimum. 0 hides nothing.
+  function tableRowsToHide(entries, min) {
     if (!(min > 0)) return [];
-    return rows.filter((r) => { const v = tableRowStake(r); return v != null && v < min; });
+    return entries.filter((e) => e.bb < min).map((e) => e.row);
   }
   function applyTableFilter() {
     const min = Number(STORE.settings.minTableStake) || 0;
@@ -13991,9 +14010,8 @@
       <button class="tph-coach-reset">Reset panel positions &amp; size</button>
       <div style="opacity:.7;margin:2px 0 10px">Drag the coach panel's ◢ corner to resize it.</div>
       <h4>Table list</h4>
-      <label>Hide tables below $ <input type="number" class="tph-min-stake" min="0" step="100000" value="${Number(STORE.settings.minTableStake) || 0}" style="width:110px"></label>
-      <div style="opacity:.7;margin:2px 0 10px">Compared with the amount each row of Torn's table list shows.
-        0 shows every table.</div>
+      <label>Hide cash tables with big blind below $ <input type="text" inputmode="decimal" class="tph-min-stake" value="${minStakeInputText(STORE.settings.minTableStake)}" placeholder="e.g. 1m" style="width:90px"></label>
+      <div style="opacity:.7;margin:2px 0 10px">Type 500k, 1m, 2.5m… Blank or 0 shows every table. Tournaments are never hidden.</div>
       <div class="tph-set-group">Reading the table</div>
       <h4>Departure watch</h4>
       <label><input type="checkbox" class="tph-depart-toggle" ${STORE.settings.departureWatch ? 'checked' : ''}> Alert when an attackable player leaves</label><br>
@@ -14255,9 +14273,9 @@
       e.target.textContent = ok ? 'Played' : 'No audio here';
     });
     panel.querySelector('.tph-min-stake').addEventListener('change', (e) => {
-      const v = Math.max(0, Math.floor(Number(e.target.value) || 0));
+      const v = Math.max(0, parseAmount(e.target.value || '0'));
       STORE.settings.minTableStake = v;
-      e.target.value = v;
+      e.target.value = minStakeInputText(v);
       saveStore();
       try { applyTableFilter(); } catch (err) { /* the 1s tick retries */ }
     });
@@ -14855,11 +14873,9 @@
     });
     L.push('');
 
-    // The table-selection screen. Nothing here knows its markup yet, and
-    // hiding low-stake tables needs it — take this scan WITH THAT SCREEN OPEN.
-    // Probes every known table name and prints where it sits, plus the nearest
-    // ancestor that repeats (the likely row), so one paste shows how to find a
-    // row and read its stake.
+    // The table-selection screen — take this scan WITH THE CASH GAMES LIST
+    // OPEN. Prints the rows the filter finds, the big blind it read off each,
+    // and the row text, so one paste shows whether the filter can see the list.
     L.push('--- TABLE SELECT (take this scan with the table list open) ---');
     (() => {
       const hit = seatHitTester();
@@ -14869,16 +14885,16 @@
       // their own), which is why the earlier name probe found nothing.
       const rows = findTableRows();
       const min = Number(STORE.settings.minTableStake) || 0;
-      L.push(`table rows found: ${rows.length}   filter: ${min > 0 ? 'hide below ' + fmtMoney(min) : 'off'}`
+      L.push(`cash table rows found: ${rows.length}   filter: ${min > 0 ? 'hide BB below ' + fmtMoney(min) : 'off'}`
         + `   hidden now: ${document.querySelectorAll('[data-tph-hid]').length}`);
       if (rows.length) {
-        L.push('  list: ' + elSig(rows[0].parentElement));
+        L.push('  list: ' + elSig(rows[0].row.parentElement));
         rows.slice(0, 4).forEach((r) => {
-          L.push(`  row ${elSig(r)} -> ${fmtMoney(tableRowStake(r))}`);
-          L.push('    text: ' + squish(r.textContent, 90));
+          L.push(`  row ${elSig(r.row)} -> BB ${fmtMoney(r.bb)}`);
+          L.push('    text: ' + squish(r.row.textContent, 90));
         });
       } else {
-        L.push('no table rows found — open the table list and scan again');
+        L.push('no cash table rows found — open the Cash Games list and scan again');
       }
     })();
     L.push('');
@@ -15608,8 +15624,9 @@
       seatCovered,
       coveredSeatKeys,
       isHudElement,
-      moneyAmounts,
-      tableRowStake,
+      tableBlindsBB,
+      minStakeInputText,
+      tableBlindsCell,
       tableRowFor,
       tableRowsToHide,
       tableAnnounceKind,

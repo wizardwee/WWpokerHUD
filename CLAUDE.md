@@ -1328,6 +1328,16 @@ tag vanished at a live table in plain view. `coveredSeatKeys` now judges hero
 by the TABLE: hidden only when no opponent seat is showing. Opponents keep
 their own hit test. Don't route hero back through `seatCovered` alone.
 
+**Rebuilt for CASH games in v1.86.0 — the paragraph below describes v1.85.0,
+which was built from the TOURNAMENTS tab and matched nothing on the cash list.**
+Cash rows read `name | $sb / $bb | timer | seated/max` with abbreviated,
+lowercase amounts (`$1.25m / $2.5m`). The row is found from the blinds cell
+(two amounts joined by a slash, parsed from the cell's OWN text — the row's
+text glues the timer onto the big blind), and the stake compared is the BIG
+blind. Tournament rows (one buy-in, no pair) are never hidden, by request.
+`seatCovered` now needs a MAJORITY of its points covered, because the list
+leaves a sliver of the edge seats showing.
+
 **The table-list filter (v1.85.0) finds rows by TEXT, not class.** From the
 screenshot a row reads `name | $amount | speed | seated/max`. The list's table
 names are **not** `TORN_STAKES`' names (those are the 9-seat tables; the list
