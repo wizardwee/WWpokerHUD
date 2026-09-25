@@ -1364,6 +1364,15 @@ seat and log fixtures glued digits (`"$168,410,0832/6"`) and were rejected for
 reading as garbage, so the exclusion they were meant to prove went unexercised
 until mutation showed it.
 
+**Target boxes (v1.87.0).** A red box round a seat worth exploiting: solid =
+calls too much (Fish/Station or 📞), dashed = folds to aggression (🚪, or a fold
+read from `buildExploitPlan`). **Two kinds because they are opposite plays** —
+one box would say "target" without saying bluff or value bet. The fold reads
+come from a `folds: true` mark set on the three folding branches inside
+`buildTendencyEntries`, never a second copy of the thresholds; add the mark to
+any new "folds too much" rule or the box will not know about it. Manual tag
+wins; 🤥/🐍 suppress. Rated only, never hero, `pointer-events: none`.
+
 **Considered and not built**: two-pair as its own hand tier (low value, reshapes
 stored data), per-table stats keyed by a table-texture class (needs a scan
 nobody has taken; the user declined the probe), HopesG's IndexedDB backup and

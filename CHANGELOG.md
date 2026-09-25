@@ -9,6 +9,32 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.87.0
+Red boxes round players worth exploiting
+
+Asked for: highlight the players to exploit — fish/stations and people who fold
+to aggression — with a red box round their seat.
+
+Two kinds, because they call for opposite plays, and one box for both would say
+"target" without saying which way:
+- **Solid red, 'value':** the Fish/Station archetype, or your 📞 tag. Value bet,
+  never bluff.
+- **Dashed red, 'bluff':** a folds-to-aggression read from `buildExploitPlan` —
+  fold to c-bet, fold to 3-bet, or fold to a turn barrel — or your 🚪 tag.
+
+`exploitTargetKind(p)` decides. The manual tag wins; 🤥 and 🐍 suppress the box,
+since both say "careful". The fold reads are not re-derived: the three folding
+branches of `buildTendencyEntries` now mark their entry (`folds: true`), and
+the box reads that mark, so the box and the Exploit tab cannot disagree about
+who folds too much. Rated players only (the `minHands` bar), never hero, never a
+covered seat. The box is `pointer-events: none` and drawn round the seat, not
+on it. Settings > Seat labels > "Red box round players to exploit", on by
+default.
+
+`test/target-box.test.js` drives it through the real plan, mutation-checked,
+including a mixed player whose non-folding c-bet read sits ahead of a
+fold-to-3-bet read (only the fold is marked).
+
 ## 1.86.0
 The table-list filter works on cash games, by big blind
 

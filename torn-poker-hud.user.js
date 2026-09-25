@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.86.0
+// @version      1.87.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,14 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.87.0 - Red boxes round players worth exploiting.
+ *            - Solid red: calls too much (Fish/Station, or your 📞 tag).
+ *              Value bet them; don't bluff.
+ *            - Dashed red: folds to aggression (folds to c-bets, 3-bets or
+ *              turn barrels past the Exploit tab's own thresholds, or your 🚪
+ *              tag). Bet and bluff at them.
+ *            - Your tag wins; 🤥 and 🐍 mean no box. Rated players only, never
+ *              you. The box never takes a tap. Settings > Seat labels.
  * 1.86.0 - The table-list filter works on cash games, by big blind.
  *            - v1.85.0 was built from the Tournaments tab, where each row
  *              shows one buy-in. Cash rows show the blinds as a pair
@@ -28,14 +36,6 @@
  *            - Seat tags drawn over the table list: a seat now counts as
  *              covered when most of it is, not all of it, so edge seats with
  *              a sliver showing no longer keep their tag over the list.
- * 1.85.2 - Your own seat's tag is back.
- *            - v1.84.0 hides a tag when something of Torn's is drawn over the
- *              seat. Your seat sits below the felt beside your cards, and
- *              Torn's own pieces overlap it, so it read as covered with the
- *              table in plain view and your tag disappeared.
- *            - Your tag now follows the table: it hides only while no
- *              opponent's seat is showing, which is what the table-selection
- *              screen does. Opponents' tags are unchanged.
  */
 
 /*
@@ -77,7 +77,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.86.0';
+  const HUD_VERSION = '1.87.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -512,6 +512,7 @@
     badgeMode: 'session',
     sessionWindow: 15,
     showSelfBadge: true, // badge your own seat too — see renderBadges
+    targetBoxes: true,   // red box round seats worth exploiting — see exploitTargetKind
     badgeStats: true,  // V/P/A on the seat badge. Off leaves type + role + state
                        // emoji, which is the read; the numbers are the evidence
                        // for it and are one tap away. The escape hatch for a
@@ -8124,6 +8125,39 @@
   // soft: exploitable, but they are the swingiest seat at the table and the
   // line would read as an invitation. The verdict needs 3+ rated players.
   const SOFT_TYPES = { Fish: 1, Station: 1 };
+
+  // --- Target boxes (v1.87.0) --------------------------------------------------
+  //
+  // Asked for: "highlight certain types of players to exploit … fish/stations,
+  // and people who fold to aggression … a red box around their square."
+  //
+  // Two kinds, because they call for OPPOSITE plays: a station pays off value
+  // bets and must never be bluffed; a folder is exactly who you bluff. One box
+  // for both would say "target" without saying which way, and the wrong way
+  // round costs money. Same red, drawn solid for 'value' and dashed for
+  // 'bluff'.
+  //
+  // Your manual tag wins (📞 → value, 🚪 → bluff; 🤥 and 🐍 → no box, since
+  // both say "careful", not "go"). Otherwise: a folds-to-aggression read from
+  // buildExploitPlan (fold to c-bet, fold to 3-bet or fold to a turn barrel
+  // past the SAME thresholds the Exploit tab uses, read off its own mark), then
+  // the Fish/Station archetype. Only RATED players — the minHands bar that
+  // decides Unrated everywhere else, and the same one tableSoftness uses.
+  // Never hero.
+  function exploitTargetKind(p) {
+    if (!p) return null;
+    const tag = p.tag;
+    if (tag === 'station') return 'value';
+    if (tag === 'folds') return 'bluff';
+    if (tag === 'bluff' || tag === 'trap') return null;
+    if ((p.hands || 0) < STORE.settings.minHands) return null;
+    if (buildExploitPlan(p).some((e) => e.folds)) return 'bluff';
+    return SOFT_TYPES[classify(p)] ? 'value' : null;
+  }
+  const TARGET_BOX_TEXT = {
+    value: 'Calls too much — value bet, never bluff.',
+    bluff: 'Folds to aggression — bet and bluff at them.',
+  };
   const SOFT_MIN_RATED = 3;
   // Postflop actions a player needs before their AFq joins the table average.
   // Same bar the exploit reads use for a per-street aggression figure.
@@ -9921,6 +9955,11 @@
       when: when || null,
       edge: typeof edge === 'number' ? edge : null,
     });
+    // Marks the entry just added as a "folds to aggression" read. The seat
+    // highlight (exploitTargetKind) reads THIS mark rather than re-testing the
+    // thresholds, so the box and the Exploit tab cannot disagree about who
+    // folds too much.
+    const markFolds = () => { out[out.length - 1].folds = true; };
     const n = p.hands || 0;
 
     // --- Postflop: the biggest lever against a passive pool ------------------
@@ -9935,6 +9974,7 @@
             + 'of your range, especially in position; anyone paying attention is printing off you right now.',
           'fire every flop', 'defend flops more', ['flop', 'lead'],
           spreadEdge(s.foldToCbet, POOL_AVG.foldToCbet, POOL_SPREAD.foldToCbet));
+        markFolds();
       } else if (s.foldToCbet < POOL_AVG.foldToCbet - POOL_SPREAD.foldToCbet) {
         add(95, 'C-bet',
           `Folds to c-bets only ${fmtPct(r.foldToCbet)} (${p.foldToCbetOpp} spots). `
@@ -9985,6 +10025,7 @@
             + 'or continue on more turns.',
           'bet the turn again', 'call flops you keep', ['turn', 'lead'],
           thresholdEdge(r.foldToBarrel, 60, 85));
+        markFolds();
       } else if (r.foldToBarrel <= 25) {
         add(78, 'Barrel',
           `Once they call your flop c-bet they rarely fold the turn (${fmtPct(r.foldToBarrel)}, `
@@ -10028,6 +10069,7 @@
             + '3-betting you light and taking the pot uncontested; 4-bet or continue more instead of folding.',
           '3-bet them light', 'defend your opens', ['preflop'],
           spreadEdge(s.foldTo3Bet, PA.foldTo3Bet, POOL_SPREAD.foldTo3Bet));
+        markFolds();
       } else if (s.foldTo3Bet < PA.foldTo3Bet - POOL_SPREAD.foldTo3Bet) {
         add(60, '3-bet',
           `Rarely folds to 3-bets (${fmtPct(r.foldTo3Bet)}). 3-bet for value only — `
@@ -10981,6 +11023,9 @@
     /* Deliberately understated and anchored UNDER the seat: at 11px with a solid
        border sitting above the seat it covered the player's name, which is the
        one thing on a seat you always need to read. */
+    .tph-target-box { position: fixed; z-index: 99997; pointer-events: none; box-sizing: border-box;
+      border: 2px solid #ff3b3b; border-radius: 6px; }
+    .tph-target-bluff { border-style: dashed; }
     .tph-badge { position: fixed; z-index: 99998; background: rgba(10,10,14,0.82) !important;
       color: #cfd6dd !important; border: none; border-radius: 3px; padding: 1px 3px;
       font: 10px/1.45 -apple-system, sans-serif !important;
@@ -12282,7 +12327,7 @@
   }
 
   function renderBadges() {
-    document.querySelectorAll('.tph-badge').forEach((el) => el.remove());
+    document.querySelectorAll('.tph-badge, .tph-target-box').forEach((el) => el.remove());
     if (!STORE.settings.showBadges) return;
     // Computed once for the whole table, not per seat — it walks the action log.
     const roles = STORE.settings.showRoleBadges === false
@@ -12512,6 +12557,20 @@
         + ' Tap for full stats.';
       badge.addEventListener('click', () => openPlayerPanel(xid));
       frag.appendChild(badge);
+      // The target box: drawn AROUND the seat, never on it, and never takes a
+      // tap (pointer-events: none) — the seat and the game's controls under it
+      // stay exactly as reachable as before. Covered seats never reach here.
+      const target = !isSelf && STORE.settings.targetBoxes !== false ? exploitTargetKind(player) : null;
+      if (target) {
+        const box = document.createElement('div');
+        box.className = 'tph-target-box tph-target-' + target;
+        box.style.left = (rect.left - 2) + 'px';
+        box.style.top = (rect.top - 2) + 'px';
+        box.style.width = (rect.width + 4) + 'px';
+        box.style.height = (rect.height + 4) + 'px';
+        frag.appendChild(box);
+        badge.title += ' ' + (target === 'value' ? '▭ solid red box: ' : '▭ dashed red box: ') + TARGET_BOX_TEXT[target];
+      }
     });
     document.body.appendChild(frag);
   }
@@ -13964,6 +14023,9 @@
       <label><input type="checkbox" class="tph-badgestats-toggle" ${STORE.settings.badgeStats !== false ? 'checked' : ''}> Numbers (v/p/a) on the labels</label>
       <div style="opacity:.7;margin:2px 0 10px">Turn off if labels reach the board. Type, markers and 🤮/🔥 stay;
         numbers are one tap away.</div>
+      <label><input type="checkbox" class="tph-targetbox-toggle" ${STORE.settings.targetBoxes !== false ? 'checked' : ''}> Red box round players to exploit</label>
+      <div style="opacity:.7;margin:2px 0 10px">Solid: calls too much (fish, station, 📞) — value bet, don't bluff.
+        Dashed: folds to aggression (🚪) — bet at them. Rated players only.</div>
       <label><input type="checkbox" class="tph-rolebadge-toggle" ${STORE.settings.showRoleBadges !== false ? 'checked' : ''}> Mark this hand's raiser and postflop leads</label>
       <div style="opacity:.7;margin:2px 0 10px">Gold <b>PFR</b>/<b>3B</b>/<b>4B</b>: raised preflop.
         Blue <b>DONK</b>/<b>RR</b>: led or raised postflop after not being the last preflop raiser. Cleared each hand.</div>
@@ -14295,6 +14357,11 @@
     });
     panel.querySelector('.tph-rolebadge-toggle').addEventListener('change', (e) => {
       STORE.settings.showRoleBadges = e.target.checked;
+      saveStore();
+      renderBadges();
+    });
+    panel.querySelector('.tph-targetbox-toggle').addEventListener('change', (e) => {
+      STORE.settings.targetBoxes = e.target.checked;
       saveStore();
       renderBadges();
     });
@@ -15623,6 +15690,7 @@
       tableSoftnessHtml,
       seatCovered,
       coveredSeatKeys,
+      exploitTargetKind,
       isHudElement,
       tableBlindsBB,
       minStakeInputText,
