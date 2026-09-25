@@ -9,6 +9,26 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.85.2
+Your own seat's tag is back
+
+Reported by screenshot: hero's tag missing at a live table, with "Include your
+own seat" on. v1.84.0's covered-seat check hit-tests five points on each seat
+and hides the tag when all of them land on something else. Hero's seat is laid
+out apart from the ring, below the felt beside the cards, and Torn's own pieces
+overlap that strip, so its hit test read "covered" with the table in view.
+
+`coveredSeatKeys` now decides for both `renderBadges` and the 1s watcher's
+signature. Opponents are judged on their own hit test as before. Hero follows
+the table: hidden only when hero reads covered AND no opponent seat is showing,
+which is what the table-selection screen produces (opponents are not laid out
+while it is open, confirmed by scan in v1.84.0). The v1.84.0 note calling
+hero's covered reading a confirmation was wrong: it read covered all the time.
+
+Known edge: sitting alone at a table, hero's tag hides as it did before.
+
+`test/seat-cover.test.js` drives `coveredSeatKeys`, mutation-checked.
+
 ## 1.85.1
 Hands logged in big blinds are no longer stored as tiny amounts, or twice
 

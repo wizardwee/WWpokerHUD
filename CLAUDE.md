@@ -1322,6 +1322,12 @@ opponents' seats are not laid out at all while the table list is up
 and hero's seat — laid out separately — read as covered. Both paths hid the
 tags; the screenshot showed none over the list.
 
+**That hero reading was not a confirmation — it reads covered ALL the time
+(v1.85.2).** Torn's own pieces overlap hero's strip below the felt, so hero's
+tag vanished at a live table in plain view. `coveredSeatKeys` now judges hero
+by the TABLE: hidden only when no opponent seat is showing. Opponents keep
+their own hit test. Don't route hero back through `seatCovered` alone.
+
 **The table-list filter (v1.85.0) finds rows by TEXT, not class.** From the
 screenshot a row reads `name | $amount | speed | seated/max`. The list's table
 names are **not** `TORN_STAKES`' names (those are the 9-seat tables; the list

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.85.1
+// @version      1.85.2
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,14 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.85.2 - Your own seat's tag is back.
+ *            - v1.84.0 hides a tag when something of Torn's is drawn over the
+ *              seat. Your seat sits below the felt beside your cards, and
+ *              Torn's own pieces overlap it, so it read as covered with the
+ *              table in plain view and your tag disappeared.
+ *            - Your tag now follows the table: it hides only while no
+ *              opponent's seat is showing, which is what the table-selection
+ *              screen does. Opponents' tags are unchanged.
  * 1.85.1 - Hands logged in big blinds are no longer stored as tiny amounts, or twice.
  *            - Reported from History: one hand showed $9 bets and a $252 win
  *              beside $2.5M blinds, and the same hand appeared again at
@@ -31,32 +39,6 @@
  *              hand. The log is now compared with amounts blanked out, so a
  *              unit switch is a re-render and replays nothing.
  *            - The two hands already stored stay as they are, P/L included.
- * 1.85.0 - Hide low-stake tables in Torn's table list.
- *            - Asked for: only show tables from $500k up. Settings > Table
- *              list > "Hide tables below $". 0 (the default) shows all.
- *            - Rows are recognised from their text, as the screenshot showed
- *              them: name, one dollar amount, speed, "seated/max". The block
- *              must sit among 3+ rows alike; seats, the game log and the HUD
- *              are never touched. Hidden rows are marked, so lowering or
- *              clearing the setting brings back exactly those.
- *            - Compared with the amount each row SHOWS. Whether that column is
- *              the big blind or a buy-in is not confirmed.
- *            - The v1.84.0 scan probe looked for the wrong table names (the
- *              list's 6-seat tables have their own); the scan now reports the
- *              rows the filter finds instead.
- *
- * 1.84.0 - Player tags step aside when Torn draws something over the seats.
- *            - Asked for: hide the tags while the table-selection screen is
- *              open, and bring them back when it closes. Each seat is checked
- *              at five points for what is actually drawn on top of it; if
- *              every point is covered by something of Torn's, that seat's tag
- *              is hidden. Checked every second, so tags leave and return
- *              within a second. Works for any Torn window over the table, and
- *              needs no knowledge of that screen's markup.
- *            - Fails open: if the check cannot run, tags show as before.
- *            - Not yet built: hiding low-stake tables in the list. That needs
- *              the list's markup, which has never been scanned. The deep scan
- *              now has a TABLE SELECT section — take one with the list open.
  */
 
 /*
@@ -98,7 +80,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.85.1';
+  const HUD_VERSION = '1.85.2';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -12142,6 +12124,28 @@
     }
     return tested > 0;
   }
+  // Which of the laid-out seats count as covered. Pure: `entries` are
+  // {key, isSelf, seat, rect}, `isCovered(entry)` is the hit test.
+  //
+  // Hero's seat is NOT decided by its own hit test. It is laid out apart from
+  // the ring, below the felt beside your cards, and Torn draws its own pieces
+  // over that strip — so it read as covered at a live table with the table in
+  // plain view, and your tag vanished (v1.85.1, reported by screenshot).
+  // It follows the TABLE instead: hidden only while no opponent's seat is
+  // showing, which is what the table-selection screen does (opponents are not
+  // laid out at all while it is open — confirmed by scan in v1.84.0).
+  function coveredSeatKeys(entries, isCovered) {
+    const out = [];
+    let opponentShowing = false;
+    let selfEntry = null;
+    entries.forEach((e) => {
+      if (e.isSelf) { selfEntry = e; return; }
+      if (isCovered(e)) out.push(e.key); else opponentShowing = true;
+    });
+    if (selfEntry && !opponentShowing && isCovered(selfEntry)) out.push(selfEntry.key);
+    return out.sort();
+  }
+
   function seatHitTester() {
     return typeof document.elementsFromPoint === 'function'
       ? (x, y) => document.elementsFromPoint(x, y) : null;
@@ -12154,13 +12158,19 @@
   function seatCoverSignature() {
     const hit = seatHitTester();
     if (!hit) return '';
-    const out = [];
+    const entries = [];
     seatEls().forEach((seat) => {
       const rect = seat.getBoundingClientRect();
       if (!rect.width && !rect.height) return;
-      if (seatCovered(seat, rect, hit, window.innerWidth, window.innerHeight)) out.push(resolveSeatKey(seat) || '?');
+      const key = resolveSeatKey(seat) || '?';
+      const isSelf = isHeroRecord(key);
+      // Same set renderBadges measures, or the two never agree and the 1s
+      // watcher redraws every tick.
+      if (isSelf && !STORE.settings.showSelfBadge) return;
+      entries.push({ key, isSelf, seat, rect });
     });
-    return out.sort().join(',');
+    return coveredSeatKeys(entries,
+      (e) => seatCovered(e.seat, e.rect, hit, window.innerWidth, window.innerHeight)).join(',');
   }
 
   // --- Table-list filter (v1.85.0) --------------------------------------------
@@ -12272,7 +12282,7 @@
     // table moved. That made it the worst scroll-jank offender in the file.
     const measured = [];
     const hit = seatHitTester();
-    const covered = [];
+    const candidates = [];
     seatEls().forEach((seat) => {
       const xid = resolveSeatKey(seat);
       if (!xid) return;
@@ -12285,11 +12295,13 @@
       if (isSelf && !STORE.settings.showSelfBadge) return;
       const rect = seat.getBoundingClientRect();
       if (!rect.width && !rect.height) return; // seat not laid out (empty/hidden)
-      // Something of Torn's is on top of this seat — see seatCovered.
-      if (seatCovered(seat, rect, hit, window.innerWidth, window.innerHeight)) { covered.push(xid); return; }
-      measured.push({ xid, isSelf, rect });
+      candidates.push({ key: xid, xid, isSelf, seat, rect });
     });
-    lastCoverSig = covered.sort().join(',');
+    // Something of Torn's is on top of these seats — see coveredSeatKeys.
+    const covered = coveredSeatKeys(candidates,
+      (e) => seatCovered(e.seat, e.rect, hit, window.innerWidth, window.innerHeight));
+    lastCoverSig = covered.join(',');
+    candidates.forEach((e) => { if (!covered.includes(e.key)) measured.push({ xid: e.xid, isSelf: e.isSelf, rect: e.rect }); });
 
     // Built into a fragment and attached in ONE write, so the badges cost a
     // single layout between them rather than one apiece.
@@ -15594,6 +15606,7 @@
       renderPlayerPanelBody,
       tableSoftnessHtml,
       seatCovered,
+      coveredSeatKeys,
       isHudElement,
       moneyAmounts,
       tableRowStake,
