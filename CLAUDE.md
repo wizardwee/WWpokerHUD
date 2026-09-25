@@ -1337,6 +1337,10 @@ text glues the timer onto the big blind), and the stake compared is the BIG
 blind. Tournament rows (one buy-in, no pair) are never hidden, by request.
 `seatCovered` now needs a MAJORITY of its points covered, because the list
 leaves a sliver of the edge seats showing.
+**Confirmed working on the device (v1.86.0):** reported "It works!" with the
+filter at `hide BB below $1M`. The accompanying scan was taken with the list
+closed, so its `cash table rows found: 0` is expected, not a failure — the
+scan's row read only means something with the Cash Games list open.
 
 **The table-list filter (v1.85.0) finds rows by TEXT, not class.** From the
 screenshot a row reads `name | $amount | speed | seated/max`. The list's table
