@@ -9,6 +9,26 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.90.0
+A sitting follows Torn's 2-hour same-table rule
+
+Asked: "I refresh the table a lot, or I lose connection for 15 mins and come
+back to the same sitting, since Torn poker rules are 2 hours for the same
+table, same buy-in limit."
+
+Refreshes and short disconnects were already the same sitting: a reload is
+judged against the roster persisted in `STORE.session.roster`, not treated as
+a new table, and that roster is rewritten at every 'changed'/'new'
+announcement, so drift during a sitting never exceeds half the seats. Only
+turnover of more than three quarters of the table during an absence reads as a
+move. That is now pinned by a test: a reload after 15 minutes with three of
+eight seats changed keeps the sitting.
+
+What did not match was the gap. `SESSION_GAP_MS` was 4h; it is now
+`STACK_SESSION_GAP_MS` (2h10m), the constant the per-player stack sitting
+already used for this same Torn rule. Returning after more than two hours
+starts a new sitting, as Torn does.
+
 ## 1.89.0
 "Session" is now this sitting
 

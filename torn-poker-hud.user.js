@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.89.0
+// @version      1.90.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,13 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.90.0 - A sitting follows Torn's 2-hour same-table rule.
+ *            - A break that ends "This sitting" was 4 hours; it is now Torn's
+ *              own 2 hours (same table, same buy-in limit). Coming back
+ *              later starts a new sitting.
+ *            - Refreshing the page, or dropping for 15 minutes and coming
+ *              back to the same table, keeps the sitting — now pinned by a
+ *              test, including some players having changed meanwhile.
  * 1.89.0 - "Session" is now this sitting.
  *            - It used to end only after a 4-hour break, so it added up every
  *              table since then: +$5.1B over 617 hands, reported straight
@@ -27,14 +34,6 @@
  *              same table keeps it. Renamed "This sitting", with a start time.
  *            - The old, table-spanning session closes once on update and is
  *              kept in the Trends tab.
- * 1.88.0 - The coach now reads how often a player c-bets and 3-bets.
- *            - Heavy c-bettor: "float or raise their flop bet", when their bet
- *              is in front of you. Rare c-bettor: "their bet is a hand; stab
- *              when they check".
- *            - Heavy 3-bettor: "don't fold good opens to them". No 3-bet in
- *              120+ hands: "their 3-bet is premiums".
- *            - A player folding 60%+ of a street now also gets the dashed red
- *              box, like the other folds-to-aggression reads.
  */
 
 /*
@@ -76,7 +75,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.89.0';
+  const HUD_VERSION = '1.90.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -3967,9 +3966,9 @@
   // low/high would be meaningless — it would just record the smallest and
   // largest table they have ever sat at.
   //
-  // Own constant, deliberately NOT the hero-session SESSION_GAP_MS (4h,
-  // touchSession) — that one governs hero's own lifetime P/L session
-  // boundary and changing it would be a second, unrelated behaviour change.
+  // Torn's 2-hour same-table rule (plus a margin). Since v1.90.0 hero's own
+  // sitting (SESSION_GAP_MS) uses this same constant, so "this sitting" and
+  // the stack sitting cannot disagree about when a break starts a new one.
   // A gap this short exists because leaving and coming back within it — a
   // stake unchanged, so the bb check below never fires — otherwise carries a
   // stale `high` into a fresh buy-in, which can then read as impossibly
@@ -9301,8 +9300,13 @@
     return 'UTG';
   }
 
-  // A "session" is just play separated by a gap; no explicit start/stop to forget.
-  const SESSION_GAP_MS = 4 * 60 * 60 * 1000;
+  // A "session" is one SITTING: it ends when you move tables (sittingChanged)
+  // or after this gap with no hands. The gap is Torn's own rule, not a guess:
+  // back at the same table within 2 hours is the same sitting, with the same
+  // buy-in limit (no ratholing). It was 4h, so a 3-hour break came back as the
+  // same sitting when Torn itself treats it as a fresh one. Same constant the
+  // per-player stack sitting already used for exactly this rule.
+  const SESSION_GAP_MS = STACK_SESSION_GAP_MS;
 
   // How many completed sessions to keep for the Trends chart. Bounded for the
   // same reason recentTables/betSizes are — this is written every time a

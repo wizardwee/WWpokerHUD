@@ -1387,6 +1387,10 @@ new-table message. **Judge 'new' against the roster persisted in
 `STORE.session.roster`, never against "a roster existed this page"** — the
 first roster after every reload reads 'new', and trusting it would end the
 session on each reload.
+The gap is Torn's own 2-hour same-table rule since v1.90.0: `SESSION_GAP_MS`
+IS `STACK_SESSION_GAP_MS`, so hero's sitting and the stack sitting cannot
+disagree. A reload or short drop at the same table stays one sitting unless
+more than three quarters of the seats turned over while away.
 
 **Considered and not built**: two-pair as its own hand tier (low value, reshapes
 stored data), per-table stats keyed by a table-texture class (needs a scan

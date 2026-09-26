@@ -66,6 +66,37 @@ const t = runner('sitting-session');
   t.eq('a reload at the same table keeps the session', T.STORE.session.hands, 12);
 }
 
+// v1.90.0: refreshes and short disconnects are the same sitting; the break
+// that ends one is Torn's own 2-hour same-table rule.
+{
+  const T = load();
+  t.ok('the gap is Torn\'s 2-hour rule (with a small margin)',
+    T.SESSION_GAP_MS >= 2 * 3600000 && T.SESSION_GAP_MS <= 2.5 * 3600000);
+
+  // A reload after a 15-minute drop, three of eight seats changed meanwhile.
+  const before = ['1', '2', '3', '4', '5', '6', '7', '8'];
+  const after = ['1', '2', '3', '4', '5', '9', '10', '11'];
+  T.STORE = T.emptyStore();
+  Object.assign(T.STORE.session, {
+    startedAt: Date.now() - 3600000, lastHandAt: Date.now() - 15 * 60000, hands: 80, net: 1, roster: before,
+  });
+  T.noteTableForAnnounce(after); T.noteTableForAnnounce(after);
+  t.eq('back after 15 minutes with some new faces: same sitting', T.STORE.session.hands, 80);
+  t.eq('...and nothing archived', (T.STORE.sessionHistory || []).length, 0);
+
+  // Idle past the gap: the next check closes it.
+  Object.assign(T.STORE.session, { lastHandAt: Date.now() - T.SESSION_GAP_MS - 60000 });
+  t.ok('a break longer than the gap ends the sitting', T.maybeRollSession());
+  t.eq('...and archives it', T.STORE.sessionHistory.length, 1);
+
+  // Just inside the gap it does not.
+  T.STORE = T.emptyStore();
+  Object.assign(T.STORE.session, {
+    startedAt: Date.now() - 3600000, lastHandAt: Date.now() - (T.SESSION_GAP_MS - 60000), hands: 5, net: 1,
+  });
+  t.eq('a break just inside the gap keeps it', T.maybeRollSession(), false);
+}
+
 const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'torn-poker-hud.user.js'), 'utf8');
 t.ok('the panel calls it this sitting', /tph-stat-l">This sitting</.test(src));
 
