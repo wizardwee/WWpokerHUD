@@ -9,6 +9,31 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.92.1
+Torn's call and all-in wording confirmed; the settlement fuzz joins the suite
+
+No behaviour change. The user confirmed the two things 1.91.1 left open:
+`called $X` is the amount ADDED (how the parser already read it), and Torn
+writes no all-in line — a shove is `raised $X to $Y` and an all-in call is
+`called $X`. That closes open finding #3 ("an all-in call counts as a raise"):
+the case it described cannot arise from Torn's own log. The `allin` pattern
+stays as a fallback for wording nobody has seen. Five code comments and
+CLAUDE.md said otherwise and are corrected.
+
+`test/settlement-fuzz.test.js` is the fuzz that found the 1.91.1 bugs, ported
+onto the node harness so it runs with the suite: seeded random hands (3–9
+handed, raises, shoves as raises, split pots, replayed markers) in the
+confirmed wording, with the log pot, hero's net and hand count, the
+per-opponent P/L sum and every stat's numerator-vs-opportunity checked against
+each hand's own arithmetic. ~0.7s. Reverting the 1.91.1 raise fix fails seven
+of its assertions. It cannot see the phantom-hand case (the harness has no
+seats), which `test/contributions.test.js` still pins.
+
+`tools/profile-ticks.js` is the profiler behind 1.91.1's performance numbers:
+it captures every interval job before the script loads and times each in real
+Chromium against a Torn-shaped table and a 900-player store. It needs
+Playwright, so it is a tool rather than a test.
+
 ## 1.92.0
 The HUD counts which of its features you use
 

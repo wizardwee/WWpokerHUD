@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.92.0
+// @version      1.92.1
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,10 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.92.1 - No behaviour change: Torn's call and all-in wording, confirmed.
+ *            - "called $X" is the amount added, which is how it was read.
+ *            - A shove is just "raised to $X", so an all-in call is never
+ *              taken for a raise. Comments saying otherwise are corrected.
  * 1.92.0 - The HUD counts which of its features you use, on this device only.
  *            - Panel opens, tabs, taps on its own buttons and toggles, and a
  *              few events (turn cue, fold guard, departures, new table).
@@ -32,12 +36,6 @@
  *              longer double-counts board texture and barrels.
  *            - Reloading the page no longer adds a phantom folded hand for
  *              everyone seated.
- * 1.91.0 - Time decides a sitting, not who is at the table.
- *            - Back within 2 hours — a refresh, a dropped connection — is
- *              the same sitting, even if every seat changed meanwhile.
- *            - New faces end it only straight after play (a hand in the last
- *              10 minutes), which is what a real table move looks like. A
- *              change of blinds still always ends it.
  */
 
 /*
@@ -79,7 +77,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.92.0';
+  const HUD_VERSION = '1.92.1';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -4832,10 +4830,6 @@
   // The big blind is excluded: with no raise to face they have nothing to call,
   // so a "call" line from the BB in an unraised pot is a completing action, not
   // a limp. Counting it would make every BB look like a habitual limper.
-  //
-  // Known imprecision, shared with the coach: preflopRaiseEvents counts an
-  // all-in as a raise, so a short-stack all-in that is really a call can make a
-  // genuine limp behind look like a call of a raise, and go uncounted.
   function maybeCountLimp(xid, hand) {
     if (hand.street !== 'preflop') return;
     if (hand.preflopRaiseEvents > 0) return;
@@ -4872,11 +4866,12 @@
 
   // The bookkeeping a preflop RAISE and an ALL-IN share: both count as a raise
   // event for VPIP/PFR/3-bet purposes and both take the aggressor lead. Shared
-  // by both dispatchLogEvent branches rather than duplicated, because they were
-  // an exact copy of each other and the codebase's own open finding #3 is that
-  // this equivalence is imprecise (a short-stack all-in CALL still counts as a
-  // raise here) — one call site for that behaviour beats two that could drift
-  // out of sync if it's ever fixed in only one of them.
+  // by both dispatchLogEvent branches rather than duplicated.
+  //
+  // Torn writes no all-in line at all (confirmed by the user, v1.92.1): a shove
+  // is "raised $X to $Y" and an all-in call is "called $X", so the raise branch
+  // is the one that runs and an all-in CALL is correctly a call. The `allin`
+  // branch is a fallback for wording that has never been seen.
   function markAsPreflopRaiseAction(xid, hand) {
     maybeCountVpip(xid, hand);
     if (hand.street === 'preflop') {
@@ -4934,9 +4929,6 @@
   // 4-bets reads 4B rather than staying on PFR. `pfr`/`tag` still name the last
   // raiser — the seat everyone else is playing against, and the one c-bet
   // tracking already treats as the aggressor — for callers that want just that.
-  //
-  // Inherits the known imprecision noted in the header: an all-in is counted as
-  // a raise, so a short-stack all-in CALL can inflate the tag by one level.
   function raiseTierTag(n) {
     return n <= 1 ? 'PFR' : (n + 1) + 'B';
   }
@@ -5642,8 +5634,8 @@
     // Preflop raise TIER, counted by walking the street in order: the first
     // raise is an open, the second a 3-bet, the third a 4-bet. Same counting
     // maybeCountThreeBet uses, so a tier shown here can't disagree with the
-    // 3-bet stat. Inherits open finding #3 — an all-in counts as a raise, so
-    // a short-stack all-in CALL can read one tier high.
+    // 3-bet stat. An all-in call is logged as a call, so it cannot raise
+    // the tier (open finding #3, closed v1.92.1).
     let raisesSoFar = 0;
     let tier = 0;
     (h.actions || []).forEach((a) => {
@@ -6771,7 +6763,7 @@
     const on = (street) => acts.filter((a) => a && a.s === street && a.x);
     const same = (a, b) => String(a) === String(b);
     // The preflop raiser is the LAST raiser — the same player c-bet tracking
-    // treats as the aggressor. An all-in counts as a raise (open finding #3).
+    // treats as the aggressor. A shove is logged as a raise, so it counts.
     let pfr = null;
     on('preflop').forEach((a) => { if (a.a === 'raise' || a.a === 'all-in') pfr = a.x; });
     if (!pfr) return null;

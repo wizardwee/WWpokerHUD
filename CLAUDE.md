@@ -243,10 +243,9 @@ Both the widths and the situation routing were validated with throwaway node
 scripts driving the real functions out of the file.
 
 Still approximate on purpose, and the UI should keep saying so: heuristic charts
-rather than solver output, no ante/straddle modelling, ~100bb assumed. One known
-routing hazard is noted in the code — `preflopRaiseEvents` counts an all-in as a
-raise, so a short-stack all-in *call* can make the coach read the spot as facing
-a 3-bet.
+rather than solver output, no ante/straddle modelling, ~100bb assumed. (The
+all-in-call routing hazard once noted here does not occur: Torn logs an all-in
+call as `called $X` — open finding #3, closed v1.92.1.)
 
 ## Equity: random hands, or a range proxy once the pot is raised (v1.0.0)
 
@@ -442,10 +441,11 @@ the script header and several code comments cite these by number. One residue
 of #1 is still true and worth knowing: `hand.pot` (log-summed, not the DOM
 figure) is what P/L falls back to when a winner line carries no amount.
 
-3. **All-in is counted as a raise** (`preflopRaiseEvents`), so a short-stack
-   all-in *call* can make the coach read the spot as facing a 3-bet. Needs the
-   all-in amount compared against the current bet, which the log doesn't always
-   print.
+3. ~~All-in is counted as a raise~~ — **closed v1.92.1, by the user's word
+   rather than a fix.** Torn writes no all-in line: a shove is `raised $X to
+   $Y` and an all-in call is `called $X`. So a call is never counted as a raise,
+   and the hazard this described does not occur. The `allin` pattern stays as a
+   fallback for wording nobody has seen.
 5. **`tableMax` (default 9) only drives the equity quote**, not the preflop
    charts, which read the per-hand seat count. At a 6-max table with the default
    left alone, equity reads pessimistically (quoted vs 8 opponents).
@@ -816,6 +816,11 @@ only because the second pass finds nothing to drop and returns false.
 `test/prune.test.js` asserts exactly two `setItem` attempts for that reason.
 
 ## Should this be refactored?
+
+**`tools/` holds measurement scripts that need a browser** —
+`tools/profile-ticks.js` times every interval job in Chromium (v1.92.1
+baseline: ~3.7ms of main thread per second, all jobs together). Like `test/`,
+it never ships. Run it before and after anything that touches a timer path.
 
 **Not into modules.** There is no build step and the install model is "fetch one
 file whole" — splitting it would mean adding a bundler, which breaks the thing
@@ -1612,20 +1617,20 @@ figure charged a blind, a limp, or the open under a 4-bet twice, and moved
 hero's P/L on every such hand. `a.amt` in `hand.actions` still stores `$Y`
 (History prints "raise $Y"); only the money added to the pot is the delta.
 
-**Still unconfirmed: `called $X` and `all in for $X`.** Both are added as
-written, i.e. read as the amount ADDED. If Torn prints the street total there
-too, a blind calling a raise is overcharged by the blind. `test/bb-display`'s
-fixture (the BB "called $22,500,000" into a raise to $22.5M) reads like a total
-if it was copied from a real hand. The deep scan's log-pot vs DOM-pot mismatch
-on such hands is the way to settle it — don't change it on inference.
+**`called $X` is the amount ADDED — confirmed by the user (v1.92.1)**, so calls
+are added as written. There is no all-in line: a shove is a raise to the
+stack. `test/bb-display`'s fixture (the BB "called $22,500,000" into a raise to
+$22.5M) is therefore not real wording and says nothing about semantics.
 
 **How these were found: an end-to-end fuzz, not review.** Random legal hands
-through `handleLogLine` in Chromium against Torn-shaped seats, with hero's P/L,
-the ledger sum, the per-opponent split and every numerator/denominator pair
-checked against the hand's own arithmetic. Every hand-written test fed hands
-where nobody raised twice on a street — the only shape this bug shows in. When
-a change touches settlement, re-run that kind of check rather than adding one
-more worked hand.
+through `handleLogLine`, with hero's P/L, the log pot, the per-opponent split
+and every numerator/denominator pair checked against the hand's own
+arithmetic. Every hand-written test fed hands where nobody raised twice on a
+street — the only shape this bug shows in. **`test/settlement-fuzz.test.js` is
+that fuzz, in the suite** (seeded, ~0.7s). It generates Torn's confirmed
+wording, so if the wording changes, change the generator first. It cannot see
+the phantom-hand case (no seats in the harness); `test/contributions.test.js`
+pins that one.
 
 ### A hand is settled only if something was SEEN in it (v1.91.1)
 
@@ -1809,8 +1814,8 @@ Three choices worth preserving:
   pot AND a non-last raiser taking the lead — so the width is almost never
   paid. The filter runs AFTER the action walk, because which player is the last
   raiser is only known once preflop has been walked.
-- Inherits open finding #3 — an all-in counts as a raise, so an all-in *call*
-  can inflate the tag one level.
+- An all-in call is logged as `called $X`, so it cannot inflate the tag (open
+  finding #3, closed v1.92.1).
 
 ## Bluff tracking (v1.29.0)
 
