@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.88.0
+// @version      1.89.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,15 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.89.0 - "Session" is now this sitting.
+ *            - It used to end only after a 4-hour break, so it added up every
+ *              table since then: +$5.1B over 617 hands, reported straight
+ *              after sitting down.
+ *            - It now also ends when you move tables — the same check as the
+ *              "New table" message, or a change of blinds. Reloading at the
+ *              same table keeps it. Renamed "This sitting", with a start time.
+ *            - The old, table-spanning session closes once on update and is
+ *              kept in the Trends tab.
  * 1.88.0 - The coach now reads how often a player c-bets and 3-bets.
  *            - Heavy c-bettor: "float or raise their flop bet", when their bet
  *              is in front of you. Rare c-bettor: "their bet is a hand; stab
@@ -26,14 +35,6 @@
  *              120+ hands: "their 3-bet is premiums".
  *            - A player folding 60%+ of a street now also gets the dashed red
  *              box, like the other folds-to-aggression reads.
- * 1.87.0 - Red boxes round players worth exploiting.
- *            - Solid red: calls too much (Fish/Station, or your 📞 tag).
- *              Value bet them; don't bluff.
- *            - Dashed red: folds to aggression (folds to c-bets, 3-bets or
- *              turn barrels past the Exploit tab's own thresholds, or your 🚪
- *              tag). Bet and bluff at them.
- *            - Your tag wins; 🤥 and 🐍 mean no box. Rated players only, never
- *              you. The box never takes a tap. Settings > Seat labels.
  */
 
 /*
@@ -75,7 +76,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.88.0';
+  const HUD_VERSION = '1.89.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -7275,8 +7276,8 @@
 
     const hist = Array.isArray(STORE.sessionHistory) ? STORE.sessionHistory : [];
     if (!hist.length) {
-      return `<i>No completed sessions yet. A session ends after a `
-        + `${(SESSION_GAP_MS / 3600000).toFixed(0)}h gap in play, and the just-finished one lands here.</i>`;
+      return `<i>No completed sessions yet. A session is one sitting: it ends when you move tables or `
+        + `after a ${(SESSION_GAP_MS / 3600000).toFixed(0)}h gap, and the finished one lands here.</i>`;
     }
 
     // hist is oldest-first already (see archiveSession); charts want the same
@@ -7337,8 +7338,8 @@
       + `<table class="tph-stats tph-trend-table"><thead><tr>`
       + `<th>Date</th><th>Hands</th><th>Stake</th><th>P/L</th><th>bb</th><th>V/P</th></tr></thead>`
       + `<tbody>${rows}</tbody></table>`
-      + `<div class="tph-stat-legend">One row per completed session — a session ends after a `
-      + `${(SESSION_GAP_MS / 3600000).toFixed(0)}h gap in play. Charts plot the most recent `
+      + `<div class="tph-stat-legend">One row per completed session — one sitting, ended by moving tables `
+      + `or a ${(SESSION_GAP_MS / 3600000).toFixed(0)}h gap. Charts plot the most recent `
       + `${Math.min(SESSION_TREND_POINTS, hist.length)} of ${hist.length} sessions, oldest to newest, left to right. `
       + (bbSkipped ? `${bbSkipped} session${bbSkipped === 1 ? '' : 's'} had no readable blind, so `
         + `${bbSkipped === 1 ? 'it is' : 'they are'} left out of the two bb charts and show "—" in the bb `
@@ -9461,10 +9462,46 @@
     const s = STORE.session;
     if (!s.startedAt || !s.lastHandAt) return false;
     if (Date.now() - s.lastHandAt <= SESSION_GAP_MS) return false;
+    return rollSessionNow();
+  }
+
+  // Archive and clear the live session regardless of the gap. The gap alone
+  // made "session" mean everything since your last 4-hour break — reported
+  // as "+$5.1B over 617 hands" straight after sitting down at a new table.
+  // A session is now a SITTING: it also ends when you move tables (see
+  // sittingChanged). The roster survives the reset: it describes the table
+  // you are sitting at, which is exactly what the next session starts from.
+  function rollSessionNow() {
+    const s = STORE.session;
+    if (!s.startedAt) return false;
     archiveSession(s);
     s.startedAt = 0; s.lastHandAt = 0; s.hands = 0; s.net = 0;
     s.vpip = 0; s.pfr = 0; s.aggActions = 0; s.passActions = 0; s.bb = 0;
     return true;
+  }
+
+  // Did you move to another table? Pure. Called with the result of the
+  // new-table check (tableAnnounceKind), so the session boundary and the
+  // "New table" message are the same decision, not two that can disagree.
+  //
+  // - Only 'new' counts. 'changed' (half the seats turned over) is still
+  //   the table you were sitting at.
+  // - A blind change (forced) is always a different table.
+  // - Otherwise 'new' is judged against the roster PERSISTED with the
+  //   session, never against "was there a roster this page". The first
+  //   settled roster after every page load reads as 'new', so trusting that
+  //   would end the session on each reload; the stored roster keeps a reload
+  //   at the same table in the same sitting, and ends it after a move. It is
+  //   rewritten at every announcement, so it tracks drift the same way the
+  //   message's own base does.
+  function sittingChanged(kind, forced, storedRoster, roster) {
+    if (kind !== 'new') return false;
+    if (forced) return true;
+    if (!Array.isArray(storedRoster) || !storedRoster.length) return false;
+    const cur = (roster || []).map(String);
+    if (!cur.length) return false;
+    const shared = cur.filter((x) => storedRoster.indexOf(x) >= 0).length / cur.length;
+    return shared < 0.25;
   }
 
   function touchSession(deltaChips, countHand) {
@@ -12846,11 +12883,21 @@
 
   function noteTableForAnnounce(opponents) {
     const now = (opponents || []).map(String);
-    const kind = tableAnnounceKind(tableAnnounceBase, tableAnnouncePrev, now, tableAnnounceForced);
+    const forced = tableAnnounceForced;
+    const kind = tableAnnounceKind(tableAnnounceBase, tableAnnouncePrev, now, forced);
     tableAnnouncePrev = now;
     if (!kind) return null;
     tableAnnounceBase = now;
     tableAnnounceForced = false;
+    // Your session is this sitting (v1.89.0) — see sittingChanged.
+    // A session opened before v1.89.0 carries no roster, and by construction
+    // it spans every table since the last 4h gap — the "+$5.1B, 617 hands"
+    // that was reported. It is closed once, on the first settled roster;
+    // after that every session carries one and this never fires again.
+    const legacySpan = !Array.isArray(STORE.session.roster) && STORE.session.hands > 0;
+    if (legacySpan || sittingChanged(kind, forced, STORE.session.roster, now)) rollSessionNow();
+    STORE.session.roster = now;
+    saveStore();
     if (STORE.settings.tableAnnounce !== false) showTableToast(kind, now);
     return kind;
   }
@@ -13322,10 +13369,11 @@
             <td class="tph-stat-v" colspan="2"><b>${fmtBB100(STORE.hero.netBB, STORE.hero.bbHands)}</b></td>
           </tr>
           <tr>
-            <td class="tph-stat-l">Session</td>
+            <td class="tph-stat-l">This sitting</td>
             <td class="tph-stat-v" style="color:${STORE.session.net >= 0 ? '#7ed957' : '#ff6b6b'} !important">
               <b>${fmtSignedMoney(STORE.session.net)}</b></td>
-            <td class="tph-stat-n"><span class="tph-stat-norm">${STORE.session.hands} hands</span></td>
+            <td class="tph-stat-n"><span class="tph-stat-norm">${STORE.session.hands} hands${STORE.session.startedAt
+              ? ' · since ' + new Date(STORE.session.startedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}</span></td>
           </tr>
           ${(() => {
             const rows = plByStake();
@@ -13912,7 +13960,7 @@
         ${rows}
       </table>
       <div style="opacity:.75;margin-top:10px;border-top:1px solid #444;padding-top:8px">
-        <b>Session:</b> ${STORE.session.hands} hands, ${fmtSignedMoney(STORE.session.net)}
+        <b>This sitting:</b> ${STORE.session.hands} hands, ${fmtSignedMoney(STORE.session.net)}
         ${STORE.session.startedAt ? ' (since ' + new Date(STORE.session.startedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + ')' : ''}<br>
         <b>Lifetime:</b> ${STORE.hero.hands} hands, ${fmtSignedMoney(STORE.hero.netChips)}
         &nbsp;|&nbsp; <b>${fmtBB(STORE.hero.netBB)}</b> ${fmtBB100(STORE.hero.netBB, STORE.hero.bbHands)}
@@ -15752,6 +15800,8 @@
       tableRowFor,
       tableRowsToHide,
       tableAnnounceKind,
+      sittingChanged,
+      rollSessionNow,
       noteTableForAnnounce,
       noteTableChange,
       TABLE_ANNOUNCE_MIN,

@@ -9,6 +9,35 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.89.0
+"Session" is now this sitting
+
+Reported: "This session doesn't seem to show only this past session I sat
+down. I just took a seat so my profit can't be 5.1b." The hero session ended
+only after `SESSION_GAP_MS` (4h) with no hands, so it spanned every table
+played since the last long break — 617 hands across High Rollers and Cat's
+Chance.
+
+A session now also ends when you move tables. `sittingChanged(kind, forced,
+storedRoster, roster)` is pure and runs off the same `tableAnnounceKind` result
+as the "New table" message, so the two cannot disagree: only 'new' counts
+('changed' is still your table), a blind change always counts, and otherwise
+the settled roster is compared with the one persisted in
+`STORE.session.roster` (rewritten at every announcement). Comparing against
+the persisted roster, not "was there a roster this page", is what keeps a page
+reload at the same table in the same sitting — the first roster after every
+load reads as 'new'.
+
+`rollSessionNow()` is the archive-and-clear `maybeRollSession` used, split out
+so both the gap and a table move reach it. A session opened before this version
+has no roster and spans tables by construction; it is closed once on the first
+settled roster and archived to Trends.
+
+The Stats row is "This sitting" with its start time; the Trends wording says a
+session ends on a table move or the gap.
+
+`test/sitting-session.test.js`, mutation-checked.
+
 ## 1.88.0
 The coach reads how often a player c-bets and 3-bets
 

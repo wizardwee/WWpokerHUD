@@ -1380,6 +1380,14 @@ shown and read by no rule. The 3-bet pool figure (1.5) equals its spread, so a
 "below the pool" branch can never fire; the low read is instead "no 3-bet in
 `THREE_BET_NIT_HANDS` (120) hands", on the raw count.
 
+**A session is a SITTING (v1.89.0).** It used to end only on the 4h gap, so
+it summed every table since the last long break. `sittingChanged` now also
+ends it on a table move, off the same `tableAnnounceKind` result as the
+new-table message. **Judge 'new' against the roster persisted in
+`STORE.session.roster`, never against "a roster existed this page"** — the
+first roster after every reload reads 'new', and trusting it would end the
+session on each reload.
+
 **Considered and not built**: two-pair as its own hand tier (low value, reshapes
 stored data), per-table stats keyed by a table-texture class (needs a scan
 nobody has taken; the user declined the probe), HopesG's IndexedDB backup and
