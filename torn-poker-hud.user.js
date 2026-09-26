@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.87.0
+// @version      1.88.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,14 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.88.0 - The coach now reads how often a player c-bets and 3-bets.
+ *            - Heavy c-bettor: "float or raise their flop bet", when their bet
+ *              is in front of you. Rare c-bettor: "their bet is a hand; stab
+ *              when they check".
+ *            - Heavy 3-bettor: "don't fold good opens to them". No 3-bet in
+ *              120+ hands: "their 3-bet is premiums".
+ *            - A player folding 60%+ of a street now also gets the dashed red
+ *              box, like the other folds-to-aggression reads.
  * 1.87.0 - Red boxes round players worth exploiting.
  *            - Solid red: calls too much (Fish/Station, or your 📞 tag).
  *              Value bet them; don't bluff.
@@ -26,16 +34,6 @@
  *              tag). Bet and bluff at them.
  *            - Your tag wins; 🤥 and 🐍 mean no box. Rated players only, never
  *              you. The box never takes a tap. Settings > Seat labels.
- * 1.86.0 - The table-list filter works on cash games, by big blind.
- *            - v1.85.0 was built from the Tournaments tab, where each row
- *              shows one buy-in. Cash rows show the blinds as a pair
- *              ("$12.5k / $25k", "$1.25m / $2.5m"), so it matched nothing.
- *            - It now finds cash rows by their blinds and compares the BIG
- *              blind. Tournaments are never hidden.
- *            - The setting takes 500k, 1m, 2.5m... instead of a long number.
- *            - Seat tags drawn over the table list: a seat now counts as
- *              covered when most of it is, not all of it, so edge seats with
- *              a sliver showing no longer keep their tag over the list.
  */
 
 /*
@@ -77,7 +75,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.87.0';
+  const HUD_VERSION = '1.88.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -6718,6 +6716,11 @@
   // thresholds, the same as bluff and slowplay rates.
   const BARREL_MIN = 10;
   const FOLD_BARREL_MIN = 8;
+  // A 3-bet is ~1.5% of hands in this pool, so its absence means something
+  // only over a long stretch: at 1.5% the chance of none in 80 hands is ~30%,
+  // in 150 about 10%. The read says "their 3-bet is premium", which is safe
+  // to be early on, so the bar sits between.
+  const THREE_BET_NIT_HANDS = 120;
 
   // Returns null when the hand holds no barrel spot at all, otherwise
   // { xid, made, facers: [{ xid, folded }] }.
@@ -9987,6 +9990,32 @@
       }
     }
 
+    // How often THEY c-bet (v1.88.0). Collected since c-bets were added and
+    // shown in the Stats tab, but no rule read it, so the coach never said a
+    // word about the player firing at you. Tagged 'facing': the read matters
+    // when their bet is in front of you. The stat also counts later-street
+    // bets by the last aggressor (see the v1.82.0 barrel note), so it runs a
+    // little above a flop-only figure — the wording says "c-bets", not "flop".
+    if (r.cbet != null && p.cbetOpp >= 8) {
+      if (s.cbet > PA.cbet + POOL_SPREAD.cbet) {
+        add(82, 'C-bettor',
+          `C-bets ${fmtPct(r.cbet)} vs a ${PA.cbet}% pool (${p.cbetOpp} spots) — much of it is air. `
+            + 'Float in position, and raise their flop bet with pairs and draws.',
+          `You c-bet ${fmtPct(r.cbet)} vs a ${PA.cbet}% pool (${p.cbetOpp} spots) — often enough that `
+            + 'good players will float and raise you light. Check back more boards that miss you.',
+          'float or raise it', 'check back more', ['facing'],
+          spreadEdge(s.cbet, PA.cbet, POOL_SPREAD.cbet));
+      } else if (s.cbet < PA.cbet - POOL_SPREAD.cbet) {
+        add(62, 'C-bettor',
+          `Rarely c-bets (${fmtPct(r.cbet)}, ${p.cbetOpp} spots). When they do bet, it is a hand — `
+            + 'fold your weak pairs. When they check, stab: they have given up.',
+          `You rarely c-bet (${fmtPct(r.cbet)}, ${p.cbetOpp} spots) — your bets are easy to read and your `
+            + 'checks give up the pot. Bet more flops you took the lead on.',
+          'their bet = a hand', 'c-bet more', ['postflop'],
+          spreadEdge(s.cbet, PA.cbet, POOL_SPREAD.cbet));
+      }
+    }
+
     // Firing flops then surrendering is the most exploitable postflop pattern
     // there is, and it needs the per-street split to be visible at all.
     const f = r.byStreet.flop;
@@ -10080,6 +10109,30 @@
           '3-bet value only', 'tighten vs 3-bets', ['preflop'],
           spreadEdge(s.foldTo3Bet, PA.foldTo3Bet, POOL_SPREAD.foldTo3Bet));
       }
+    }
+
+    // How often THEY 3-bet (v1.88.0) — shown in Stats, read by no rule until
+    // now. Per hand, not per opportunity (that is how threeBet is stored).
+    // The pool figure is 1.5% with a 1.5 spread, so "below the pool" is not
+    // reachable through the spread; the low read is instead "has not 3-bet in
+    // a long stretch", on the raw count, where a 3-bet from them means a
+    // premium hand. Gated on volume because a 1.5% event needs many hands to
+    // be absent meaningfully.
+    if (r.threeBet != null && n >= 30 && s.threeBet > PA.threeBet + POOL_SPREAD.threeBet) {
+      add(72, '3-bettor',
+        `3-bets ${fmtPct(r.threeBet)} of hands vs a ${PA.threeBet}% pool — wider than value. `
+          + "Don't fold your good opens to them; 4-bet your strongest hands and call more in position.",
+        `You 3-bet ${fmtPct(r.threeBet)} of hands vs a ${PA.threeBet}% pool — wide enough that observant `
+          + 'players will start 4-betting you light. Make sure your 3-bets can stand a 4-bet.',
+        "don't fold to their 3-bet", 'watch your 3-bet width', ['preflop', 'facing'],
+        spreadEdge(s.threeBet, PA.threeBet, POOL_SPREAD.threeBet));
+    } else if (n >= THREE_BET_NIT_HANDS && (p.threeBetMade || 0) === 0) {
+      add(66, '3-bettor',
+        `Has not 3-bet once in ${n} hands. If they 3-bet you now, it is the top of their range — `
+          + 'fold everything but premium hands.',
+        `You have not 3-bet once in ${n} hands — when you finally do, everyone knows what you hold. `
+          + 'Mix in some 3-bets with strong suited hands.',
+        'their 3-bet = premiums', '3-bet sometimes', ['preflop', 'facing']);
     }
     if (r.limpShareOfVpip != null && p.limpMade >= 5
         && s.limpShareOfVpip > PA.limpShareOfVpip + POOL_SPREAD.limpShareOfVpip) {
@@ -10413,6 +10466,7 @@
             + `the ${st} more than you should. Bluff-catch or barrel through it more instead of folding on autopilot.`,
           `barrel the ${st}`, `stop over-folding the ${st}`, [st],
           thresholdEdge(b.foldPct, 60, 90));
+        markFolds();
       } else if (b.foldPct < 20) {
         add(74, 'Fold',
           `Almost never folds the ${st} — ${fmtPct(b.foldPct)} of ${b.actions} decisions. `

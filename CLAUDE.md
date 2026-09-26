@@ -1372,6 +1372,13 @@ come from a `folds: true` mark set on the three folding branches inside
 `buildTendencyEntries`, never a second copy of the thresholds; add the mark to
 any new "folds too much" rule or the box will not know about it. Manual tag
 wins; 🤥/🐍 suppress. Rated only, never hero, `pointer-events: none`.
+Since v1.88.0 the per-street "folds 60%+ of the {street}" read carries the
+mark too, so four rules feed the dashed box.
+
+**C-bet and 3-bet frequency reads (v1.88.0)** — both stats were collected and
+shown and read by no rule. The 3-bet pool figure (1.5) equals its spread, so a
+"below the pool" branch can never fire; the low read is instead "no 3-bet in
+`THREE_BET_NIT_HANDS` (120) hands", on the raw count.
 
 **Considered and not built**: two-pair as its own hand tier (low value, reshapes
 stored data), per-table stats keyed by a table-texture class (needs a scan

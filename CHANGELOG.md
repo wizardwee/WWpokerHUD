@@ -9,6 +9,28 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.88.0
+The coach reads how often a player c-bets and 3-bets
+
+Asked for: the coach should pick up c-bet tendencies. Both c-bet and 3-bet
+frequency were collected and shown in the Stats tab, and no rule in
+`buildTendencyEntries` read either, so the coach never mentioned them.
+
+- **C-bettor**, gated at 8 spots, judged against the pool figure ± one
+  `POOL_SPREAD` like every other pool-anchored read. High (82): float in
+  position, raise their flop bet with pairs and draws, tagged `facing`. Low
+  (62): their bet is a hand; stab when they check, tagged `postflop`.
+- **3-bettor**. High (72): past the pool figure plus one spread, 30+ hands —
+  don't fold good opens, 4-bet the strongest. The pool figure (1.5) equals its
+  spread, so "below the pool" is unreachable; the low read is instead no 3-bet
+  in `THREE_BET_NIT_HANDS` (120) hands (66), where their 3-bet is premiums.
+  At 1.5% per hand, 120 hands without one happens ~16% of the time by chance;
+  the read is safe to be early on.
+- The per-street "folds 60%+ of the {street}" read now carries the `folds`
+  mark, so it draws the dashed box (v1.87.0) too.
+
+`test/cbet-3bet-reads.test.js`, mutation-checked.
+
 ## 1.87.0
 Red boxes round players worth exploiting
 
