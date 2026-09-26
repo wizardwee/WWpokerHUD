@@ -2,6 +2,7 @@
 // it summed every table since the last long break — reported as +$5.1B over
 // 617 hands straight after sitting down. It now also ends when you move
 // tables, decided by the same roster check as the "New table" message.
+// v1.91.0: only straight after play. After any break, time decides.
 
 const { load, runner } = require('./harness');
 
@@ -12,12 +13,20 @@ const t = runner('sitting-session');
   const T = load();
   const A = ['1', '2', '3', '4'];
   const B = ['5', '6', '7', '8'];
-  t.eq('"changed" (half the seats turned over) is the same table', T.sittingChanged('changed', false, A, B), false);
-  t.eq('no announcement, no change', T.sittingChanged(null, false, A, B), false);
-  t.eq('a new roster against the stored one: moved', T.sittingChanged('new', false, A, B), true);
-  t.eq('a blind change: moved, whatever the roster', T.sittingChanged('new', true, A, A), true);
-  t.eq('same table (a reload): kept', T.sittingChanged('new', false, A, ['1', '2', '3', '9']), false);
-  t.eq('first roster ever (nothing stored): kept', T.sittingChanged('new', false, undefined, B), false);
+  const JUST = 30000; // last hand 30s ago
+  t.eq('"changed" (half the seats turned over) is the same table', T.sittingChanged('changed', false, A, B, JUST), false);
+  t.eq('no announcement, no change', T.sittingChanged(null, false, A, B, JUST), false);
+  t.eq('a new roster straight after play: moved', T.sittingChanged('new', false, A, B, JUST), true);
+  t.eq('a blind change: moved, whatever the roster', T.sittingChanged('new', true, A, A, JUST), true);
+  t.eq('...even after a break', T.sittingChanged('new', true, A, A, 3600000), true);
+  t.eq('same table (a reload): kept', T.sittingChanged('new', false, A, ['1', '2', '3', '9'], JUST), false);
+  t.eq('first roster ever (nothing stored): kept', T.sittingChanged('new', false, undefined, B, JUST), false);
+  // v1.91.0: after a break, time decides — turnover is not a move.
+  const W = T.TABLE_MOVE_WINDOW_MS;
+  t.eq('full turnover after a break past the window: kept', T.sittingChanged('new', false, A, B, W + 1000), false);
+  t.eq('full turnover just inside the window: moved', T.sittingChanged('new', false, A, B, W - 1000), true);
+  t.eq('no hand played this sitting (unknown recency): kept', T.sittingChanged('new', false, A, B, -1), false);
+  t.ok('the window is short next to the 2-hour gap', W > 0 && W * 6 <= T.SESSION_GAP_MS);
 }
 
 // --- the flow: a session rolls when you move, and survives a same-table read --
@@ -83,6 +92,14 @@ const t = runner('sitting-session');
   T.noteTableForAnnounce(after); T.noteTableForAnnounce(after);
   t.eq('back after 15 minutes with some new faces: same sitting', T.STORE.session.hands, 80);
   t.eq('...and nothing archived', (T.STORE.sessionHistory || []).length, 0);
+
+  // v1.91.0: back after 15 minutes to a table that turned over COMPLETELY.
+  // Still under Torn's 2 hours at that table, so still the same sitting.
+  const others = ['21', '22', '23', '24', '25', '26', '27', '28'];
+  T.STORE.session.lastHandAt = Date.now() - 15 * 60000;
+  T.noteTableForAnnounce(others); T.noteTableForAnnounce(others);
+  t.eq('back after 15 minutes to all new faces: same sitting', T.STORE.session.hands, 80);
+  t.eq('...still nothing archived', (T.STORE.sessionHistory || []).length, 0);
 
   // Idle past the gap: the next check closes it.
   Object.assign(T.STORE.session, { lastHandAt: Date.now() - T.SESSION_GAP_MS - 60000 });

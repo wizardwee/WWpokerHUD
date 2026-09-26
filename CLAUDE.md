@@ -1389,8 +1389,12 @@ first roster after every reload reads 'new', and trusting it would end the
 session on each reload.
 The gap is Torn's own 2-hour same-table rule since v1.90.0: `SESSION_GAP_MS`
 IS `STACK_SESSION_GAP_MS`, so hero's sitting and the stack sitting cannot
-disagree. A reload or short drop at the same table stays one sitting unless
-more than three quarters of the seats turned over while away.
+disagree. **Since v1.91.0 time decides after any break**: turnover counts as a
+move only within `TABLE_MOVE_WINDOW_MS` (10 min) of hero's last hand, so a
+refresh or a dropped connection inside 2h is one sitting whoever is seated when
+you return — the user's stated rule. A blind change always ends it. Known
+limit: a same-blind move after a >10 min break reads as the same sitting; there
+is no table identity to tell it apart.
 
 **Considered and not built**: two-pair as its own hand tier (low value, reshapes
 stored data), per-table stats keyed by a table-texture class (needs a scan

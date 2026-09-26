@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.90.0
+// @version      1.91.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,12 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.91.0 - Time decides a sitting, not who is at the table.
+ *            - Back within 2 hours — a refresh, a dropped connection — is
+ *              the same sitting, even if every seat changed meanwhile.
+ *            - New faces end it only straight after play (a hand in the last
+ *              10 minutes), which is what a real table move looks like. A
+ *              change of blinds still always ends it.
  * 1.90.0 - A sitting follows Torn's 2-hour same-table rule.
  *            - A break that ends "This sitting" was 4 hours; it is now Torn's
  *              own 2 hours (same table, same buy-in limit). Coming back
@@ -75,7 +81,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.90.0';
+  const HUD_VERSION = '1.91.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -7275,8 +7281,8 @@
 
     const hist = Array.isArray(STORE.sessionHistory) ? STORE.sessionHistory : [];
     if (!hist.length) {
-      return `<i>No completed sessions yet. A session is one sitting: it ends when you move tables or `
-        + `after a ${(SESSION_GAP_MS / 3600000).toFixed(0)}h gap, and the finished one lands here.</i>`;
+      return `<i>No completed sessions yet. A session is one sitting: it ends when you move tables right after playing, `
+        + `a change of blinds, or a break over ${(SESSION_GAP_MS / 3600000).toFixed(0)}h gap, and the finished one lands here.</i>`;
     }
 
     // hist is oldest-first already (see archiveSession); charts want the same
@@ -9307,6 +9313,11 @@
   // same sitting when Torn itself treats it as a fresh one. Same constant the
   // per-player stack sitting already used for exactly this rule.
   const SESSION_GAP_MS = STACK_SESSION_GAP_MS;
+  // A roster change reads as a table MOVE only this soon after your last
+  // hand (v1.91.0). Longer than that is a break — a refresh, a dropped
+  // connection — and a break inside SESSION_GAP_MS is the same sitting by
+  // Torn's own rule, whoever is at the table when you come back.
+  const TABLE_MOVE_WINDOW_MS = 10 * 60 * 1000;
 
   // How many completed sessions to keep for the Trends chart. Bounded for the
   // same reason recentTables/betSizes are — this is written every time a
@@ -9491,16 +9502,22 @@
   // - Only 'new' counts. 'changed' (half the seats turned over) is still
   //   the table you were sitting at.
   // - A blind change (forced) is always a different table.
-  // - Otherwise 'new' is judged against the roster PERSISTED with the
-  //   session, never against "was there a roster this page". The first
-  //   settled roster after every page load reads as 'new', so trusting that
-  //   would end the session on each reload; the stored roster keeps a reload
-  //   at the same table in the same sitting, and ends it after a move. It is
-  //   rewritten at every announcement, so it tracks drift the same way the
-  //   message's own base does.
-  function sittingChanged(kind, forced, storedRoster, roster) {
+  // - Otherwise TIME decides (v1.91.0). Torn holds your seat terms for 2
+  //   hours at the same table, and a refresh or a dropped connection brings
+  //   you back to the same sitting however many seats turned over while you
+  //   were gone — so after any break (sinceLastHandMs over
+  //   TABLE_MOVE_WINDOW_MS) turnover is not evidence of anything, and only
+  //   SESSION_GAP_MS (maybeRollSession) ends the sitting.
+  // - A roster change counts as a move only straight after play: you were
+  //   dealt in minutes ago and the table in front of you is a different
+  //   one. Judged against the roster PERSISTED with the session, never
+  //   against "was there a roster this page" (the first settled roster after
+  //   every load reads 'new'). It is rewritten at every announcement, so it
+  //   tracks drift the same way the message's own base does.
+  function sittingChanged(kind, forced, storedRoster, roster, sinceLastHandMs) {
     if (kind !== 'new') return false;
     if (forced) return true;
+    if (!(sinceLastHandMs >= 0) || sinceLastHandMs > TABLE_MOVE_WINDOW_MS) return false;
     if (!Array.isArray(storedRoster) || !storedRoster.length) return false;
     const cur = (roster || []).map(String);
     if (!cur.length) return false;
@@ -12899,7 +12916,8 @@
     // that was reported. It is closed once, on the first settled roster;
     // after that every session carries one and this never fires again.
     const legacySpan = !Array.isArray(STORE.session.roster) && STORE.session.hands > 0;
-    if (legacySpan || sittingChanged(kind, forced, STORE.session.roster, now)) rollSessionNow();
+    const sinceHand = STORE.session.lastHandAt ? Date.now() - STORE.session.lastHandAt : -1;
+    if (legacySpan || sittingChanged(kind, forced, STORE.session.roster, now, sinceHand)) rollSessionNow();
     STORE.session.roster = now;
     saveStore();
     if (STORE.settings.tableAnnounce !== false) showTableToast(kind, now);
@@ -15805,6 +15823,7 @@
       tableRowsToHide,
       tableAnnounceKind,
       sittingChanged,
+      TABLE_MOVE_WINDOW_MS,
       rollSessionNow,
       noteTableForAnnounce,
       noteTableChange,

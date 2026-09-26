@@ -9,6 +9,30 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.91.0
+Time decides a sitting, not who is at the table
+
+Asked: "the rule should not just be about people changing in the table, it
+should be about time (<2 hours since)."
+
+v1.90.0 kept a refresh in the same sitting only while at least a quarter of
+the seats were the same faces. A drop of fifteen minutes at a busy table can
+turn over more than that, and Torn's own rule does not care who is there: back
+at the same table inside two hours is the same seat terms.
+
+`sittingChanged` now takes how long ago hero's last hand was. A roster change
+(`tableAnnounceKind` 'new', under a quarter shared) counts as a table move only
+within `TABLE_MOVE_WINDOW_MS` (10 minutes) of that hand — sat down somewhere
+else straight after playing. After any longer break, turnover is not evidence
+of anything and only `SESSION_GAP_MS` (2h10m, via `maybeRollSession`) ends the
+sitting. A blind change is still always a different table, break or not. With
+no hand yet this sitting, recency is unknown and nothing is ended.
+
+Known limit, stated: a move to another table at the same blinds after a break
+longer than ten minutes but under two hours is read as the same sitting. The
+roster cannot tell that from a turned-over table, and a scan of a table
+identity marker has never been taken.
+
 ## 1.90.0
 A sitting follows Torn's 2-hour same-table rule
 
