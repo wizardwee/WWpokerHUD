@@ -2670,6 +2670,28 @@ cannot throw out of a fetch handler.
 the only one read today; `spouse_name`, `faction_tag` and the rest carry the
 same escaping.
 
+## Feature use is counted on the device (v1.92.0)
+
+`STORE.usage` counts panel opens, taps on the HUD's own controls, a few
+self-fired events and hands played with passive features showing. The deep
+scan's last block, `FEATURE USE`, is how "which features are used" gets
+answered — **ask for it before cutting or reworking a feature**, the same rule
+as a selector.
+
+- **Opens, not renders.** `renderPanel` counts only when no panel of that
+  marker was mounted; it re-renders on every keystroke.
+- **One delegated tap listener** (`usageTapHandler`, capture + passive), keyed
+  by the control's own `tph-` class. A new control is counted with no wiring,
+  and appears in the "never used" list because that list is read from
+  `settingsPanelHtml()`. Name new controls descriptively for that reason.
+- **Never a player id in a key**, and capped at `USAGE_KEYS_MAX`: a key per
+  player would fill the cap with nothing about features.
+- **Local only.** `mergeStores` keeps local (it starts from local). Settings in
+  the report are redacted to set/unset for credentials and the username.
+- `settingsControlKeys` renders the Settings markup, so nothing called from
+  `storageSettingsHtml` may call it — `usageSettingsLine` reads the counters
+  only, for that reason.
+
 ## Next task
 
 **Three things from v1.49.0-v1.51.0 need one report back from a live table,

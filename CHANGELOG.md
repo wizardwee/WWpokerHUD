@@ -9,6 +9,45 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.92.0
+The HUD counts which of its features you use
+
+Asked for: "can we also see which features are more commonly used?" Nothing
+working on this can see the phone, so the phone counts, and the deep scan
+reports it.
+
+What is counted, in `STORE.usage` (`{since, n: {key: count}}`, core shard,
+capped at `USAGE_KEYS_MAX` = 200 keys):
+
+- **Panel opens** (`open:settings`, `open:players`, `open:player`,
+  `open:depart`) — counted in `renderPanel` only when the panel was not already
+  mounted, because panels re-render through it on every keystroke.
+- **Taps on the HUD's own controls** (`tap:<class>[:<detail>]`) by one
+  delegated, passive, capture-phase listener rather than a call in ~50
+  handlers. The key is the control's own `tph-` class, plus the tab, chip or
+  sort key, a radio's value, or a settings section's name. Player ids are never
+  part of a key. Torn's own controls are never counted.
+- **Events the HUD fires itself**: `event:turn-cue`, `event:foldguard-caught` /
+  `-confirmed`, `event:departure-alert`, `event:table-message`, and
+  `coach:hide` / `coach:show`.
+- **Passive features**, which have no tap: `hand`, `hand:coach-open`,
+  `hand:badges-on` — hands hero played with each one showing.
+
+The scan's new last block, `FEATURE USE`, prints the counts most-used first,
+a **never used** list (every control the Settings markup offers — read from
+`settingsPanelHtml()`, so a new control is listed without registering it — plus
+the panels and tabs), and **settings changed from default**, with credentials
+and the username shown only as set/unset and positions left out. Settings ▸
+Storage has a one-line total pointing at the scan.
+
+Local only: exported inside a backup like the rest of the store, never merged
+from a gist (the merge keeps this device's counts). Counting cannot break what
+it counts — every path is wrapped, and the tap listener never cancels an event.
+
+`test/feature-use.test.js` (34 assertions): tap keys, the cap, open-vs-render,
+the never-used list including radio groups, redaction, passive-hand counts, and
+the reload and merge round trips. Also checked with real clicks in Chromium.
+
 ## 1.91.1
 Three data-correctness fixes, found by fuzzing rather than by report
 

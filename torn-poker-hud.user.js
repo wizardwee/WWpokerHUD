@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.91.1
+// @version      1.92.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,12 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.92.0 - The HUD counts which of its features you use, on this device only.
+ *            - Panel opens, tabs, taps on its own buttons and toggles, and a
+ *              few events (turn cue, fold guard, departures, new table).
+ *            - The deep scan lists the counts, what has never been touched,
+ *              and which settings differ from default (keys shown as set/unset).
+ *            - Nothing is sent anywhere; a gist sync keeps this device's counts.
  * 1.91.1 - Three P/L and stats fixes, found by feeding random hands through.
  *            - A raise now costs only what it adds. "raised to $Y" is the
  *              street total, and chips already in (a blind, a limp, your own
@@ -32,13 +38,6 @@
  *            - New faces end it only straight after play (a hand in the last
  *              10 minutes), which is what a real table move looks like. A
  *              change of blinds still always ends it.
- * 1.90.0 - A sitting follows Torn's 2-hour same-table rule.
- *            - A break that ends "This sitting" was 4 hours; it is now Torn's
- *              own 2 hours (same table, same buy-in limit). Coming back
- *              later starts a new sitting.
- *            - Refreshing the page, or dropping for 15 minutes and coming
- *              back to the same table, keeps the sitting — now pinned by a
- *              test, including some players having changed meanwhile.
  */
 
 /*
@@ -80,7 +79,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.91.1';
+  const HUD_VERSION = '1.92.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -2932,6 +2931,7 @@
       any = true;
     });
     if (!any) return;
+    noteUse('event:departure-alert');
     flashDepartureCue();
     if (STORE.settings.departureVibrate && navigator.vibrate) {
       try { navigator.vibrate([90, 60, 90]); } catch (e) { /* not supported here */ }
@@ -5087,7 +5087,14 @@
     const heroInHand = heroDealtIn || (!heroUnresolved()
       && ((wonByXid[heroXid] || 0) > 0 || (hand.contributions[heroXid] || 0) > 0));
 
-    if (heroInHand) STORE.hero.hands += 1;
+    if (heroInHand) {
+      STORE.hero.hands += 1;
+      // What was on screen while hero played — the passive features have no
+      // tap to count, so hands played with each one showing stand in for use.
+      noteUse('hand');
+      if (!STORE.settings.coachHidden) noteUse('hand:coach-open');
+      if (STORE.settings.showBadges) noteUse('hand:badges-on');
+    }
     // Session hands deliberately stay on the NARROW test, and so does the
     // block below. Session VPIP/PFR are s.vpip / s.hands, and their numerator
     // reads heroPlayCode — which is only set inside the dealtInXids loop. A
@@ -11844,13 +11851,126 @@
 
   // opts: { marker, open, html, onClose, wire, scrollKey }
   // Returns the panel element, or null when `open` is false.
+  // --- Feature use (v1.92.0) --------------------------------------------------
+  //
+  // Asked for: which features are actually used. Nothing here can see the
+  // phone, so the phone counts: panel opens, tab views, taps on the HUD's own
+  // controls, and a handful of events the HUD fires by itself (turn cue, fold
+  // guard, departure alert, new-table message). Read back through the deep
+  // scan, which also lists every control that has NOT been touched — the
+  // unused half is most of the answer.
+  //
+  // Local only. Counters never leave the device except inside a backup the
+  // user takes, and a gist merge keeps this device's (mergeStores starts from
+  // local). Stored in the core shard, capped at USAGE_KEYS_MAX keys so a
+  // generated key can never grow it without bound.
+  const USAGE_KEYS_MAX = 200;
+  function usageStore() {
+    let u = STORE.usage;
+    if (!u || typeof u !== 'object' || !u.n || typeof u.n !== 'object') {
+      u = STORE.usage = { since: Date.now(), n: {} };
+    }
+    return u;
+  }
+  function noteUse(key) {
+    try {
+      const u = usageStore();
+      const k = String(key).slice(0, 48);
+      if (!(k in u.n) && Object.keys(u.n).length >= USAGE_KEYS_MAX) return;
+      u.n[k] = (u.n[k] || 0) + 1;
+      saveStore();
+    } catch (e) { /* a counter must never break what it counts */ }
+  }
+
+  // Taps are counted by one delegated listener rather than a call in every
+  // handler: ~50 controls, and a hand-wired list is exactly the kind that
+  // drifts. The key is the control's own tph- class — they are already
+  // descriptive (tph-targetbox-toggle, tph-exp-gist) — plus its data key for
+  // tabs, chips and sort headers, or its value for a radio. Player ids are
+  // deliberately left out: a key per player would fill the cap with nothing
+  // about features.
+  const USAGE_CONTROL_SEL = 'button, input, select, a, [data-tab], [data-hf], [data-hft], [data-tag], [data-sort], [data-xid], .tph-set-h';
+  const USAGE_MODIFIER_RE = /-(on|off|active|open)$/;
+  function usageTapKey(target) {
+    const el = target && typeof target.closest === 'function' ? target.closest(USAGE_CONTROL_SEL) : null;
+    if (!el || !el.closest('[class*="tph-"]')) return null;
+    const cls = String(el.className || '').split(/\s+/)
+      .filter((c) => c.indexOf('tph-') === 0 && !USAGE_MODIFIER_RE.test(c))[0];
+    const ds = el.dataset || {};
+    let detail = ds.tab || ds.hf || ds.hft || ds.tag || ds.sort || '';
+    if (!detail && el.type === 'radio') detail = el.value || '';
+    if (!detail && String(el.className || '').indexOf('tph-set-h') >= 0) {
+      detail = (el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 24);
+    }
+    const base = cls || ('tph:' + String(el.tagName || '').toLowerCase());
+    return 'tap:' + base.replace(/^tph-/, '') + (detail ? ':' + detail : '');
+  }
+  function usageTapHandler(e) {
+    try {
+      const key = usageTapKey(e.target);
+      if (key) noteUse(key);
+    } catch (err) { /* never in the way of a tap */ }
+  }
+
+  // Every control the Settings panel offers, for the "never used" list. Read
+  // from the real markup so a control added later is listed without anyone
+  // remembering to register it.
+  function settingsControlKeys() {
+    const out = new Set();
+    const re = /<(?:button|input|select)\b[^>]*\bclass="(tph-[^"\s]+)/g;
+    let m;
+    const html = settingsPanelHtml();
+    while ((m = re.exec(html))) out.add('tap:' + m[1].replace(/^tph-/, ''));
+    return Array.from(out);
+  }
+  // Stats is the tab a player panel opens on, so it has no tap to count;
+  // open:player stands for it.
+  const USAGE_EXPECTED = ['open:settings', 'open:players', 'open:player', 'open:depart',
+    'tap:tab:range', 'tap:tab:plan', 'tap:tab:report', 'tap:tab:history', 'tap:tab:notes', 'tap:tab:trends',
+    'coach:hide', 'coach:show', 'tap:deep', 'tap:deep-copy'];
+
+  // The deep-scan block. Pure over STORE.usage apart from settingsControlKeys.
+  function usageReportLines() {
+    const u = usageStore();
+    const L = [];
+    const entries = Object.keys(u.n).map((k) => [k, u.n[k]]).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1));
+    const days = Math.max(0, (Date.now() - (u.since || Date.now())) / 86400000);
+    L.push(`counting since ${new Date(u.since || Date.now()).toISOString().slice(0, 10)} (${days.toFixed(1)} days), `
+      + `${entries.length} distinct keys${entries.length >= USAGE_KEYS_MAX ? ' — AT CAP, new keys dropped' : ''}`);
+    entries.forEach(([k, n]) => L.push(`  ${String(n).padStart(6)}  ${k}`));
+    let expected = USAGE_EXPECTED.slice();
+    try { expected = expected.concat(settingsControlKeys()); } catch (e) { /* list what we can */ }
+    // A radio group is listed once but counted per value (tap:bm:session), so
+    // any value of it counts as the group being used.
+    const counted = Object.keys(u.n);
+    const unused = expected.filter((k) => !counted.some((c) => c === k || c.indexOf(k + ':') === 0));
+    L.push('never used (of what the panels offer): ' + (unused.length ? unused.join(', ') : 'none'));
+    // A feature that is simply ON has no tap to count, so the settings that
+    // differ from their defaults say the rest. Credentials and anything
+    // identifying print only as set/unset; positions and sizes are noise.
+    const secret = LOCAL_ONLY_SETTINGS.concat(['heroName', 'gistId', 'githubClientId']);
+    const layout = /Pos$|Size$|^lastSync$/;
+    const changed = Object.keys(DEFAULT_SETTINGS).filter((k) => !layout.test(k)).map((k) => {
+      const v = STORE.settings[k];
+      if (secret.indexOf(k) >= 0) return (v ? 'set' : '') !== (DEFAULT_SETTINGS[k] ? 'set' : '') ? `${k}=${v ? 'set' : 'unset'}` : null;
+      return JSON.stringify(v) !== JSON.stringify(DEFAULT_SETTINGS[k]) ? `${k}=${JSON.stringify(v)}` : null;
+    }).filter(Boolean);
+    L.push('settings changed from default: ' + (changed.length ? changed.join(', ') : 'none'));
+    return L;
+  }
+
   function renderPanel(opts) {
+    let wasOpen = false;
     document.querySelectorAll('.' + opts.marker).forEach((el) => {
       if (el.dataset.scrollKey) panelScrollMemory[el.dataset.scrollKey] = el.scrollTop;
       el.remove();
+      wasOpen = true;
     });
     document.querySelectorAll('.tph-backdrop-' + opts.marker).forEach((el) => el.remove());
     if (!opts.open) return null;
+    // An OPEN, not a render: panels re-render through here on every keystroke
+    // and tab change, and only the first mount is somebody choosing to look.
+    if (!wasOpen) noteUse('open:' + String(opts.marker).replace(/^tph-/, '').replace(/-panel$|-list$/, ''));
 
     if (opts.onClose) {
       const backdrop = document.createElement('div');
@@ -12144,6 +12264,7 @@
       if (foldArmedAt && elapsed >= FOLD_MIN_GAP_MS && elapsed <= FOLD_ARM_MS) {
         foldArmedAt = 0;
         hideFoldPrompt();
+        noteUse('event:foldguard-confirmed');
         return;
       }
       // A second tap inside FOLD_MIN_GAP_MS is a fat-finger double-fire, not a
@@ -12159,6 +12280,7 @@
       e.stopPropagation();
       foldArmedAt = now;
       showFoldPrompt(btn);
+      noteUse('event:foldguard-caught');
       setTimeout(() => {
         if (Date.now() - foldArmedAt >= FOLD_ARM_MS) { foldArmedAt = 0; hideFoldPrompt(); }
       }, FOLD_ARM_MS + 50);
@@ -12237,6 +12359,7 @@
     const level = STORE.settings.turnVibrateLevel;
     const now = Date.now();
     if (on && !turnCueActive) {
+      noteUse('event:turn-cue');
       turnCueSince = now;
       turnCueEscalated = false;
       turnCueRebuzzes = 0;
@@ -12746,6 +12869,7 @@
       }
     }
     STORE.settings.coachHidden = hidden;
+    noteUse(hidden ? 'coach:hide' : 'coach:show');
     saveStore();
     renderCoachPanel();
   }
@@ -12949,7 +13073,7 @@
     if (legacySpan || sittingChanged(kind, forced, STORE.session.roster, now, sinceHand)) rollSessionNow();
     STORE.session.roster = now;
     saveStore();
-    if (STORE.settings.tableAnnounce !== false) showTableToast(kind, now);
+    if (STORE.settings.tableAnnounce !== false) { showTableToast(kind, now); noteUse('event:table-message'); }
     return kind;
   }
 
@@ -14358,8 +14482,20 @@
       // printing both left it flatly contradicting itself.
       + (s.estimated ? ' The limit is an estimate.' : '')
       + '</div>'
+      + usageSettingsLine()
       + reclaimReportHtml()
       + pruneReportHtml();
+  }
+
+  // One line, pointing at the scan. Reads the counters only — settingsControlKeys
+  // renders this very panel, so calling it from here would recurse.
+  function usageSettingsLine() {
+    const u = STORE.usage;
+    if (!u || !u.n) return '';
+    const taps = Object.keys(u.n).reduce((a, k) => a + (k.indexOf('hand') === 0 ? 0 : u.n[k]), 0);
+    return `<div class="tph-store-line">Feature use: ${taps} counted since `
+      + `${new Date(u.since || Date.now()).toLocaleDateString()} — the full list is in the deep scan. `
+      + 'Stays on this device.</div>';
   }
 
   // A recovery must not be silent. This one restores records the user could
@@ -15130,6 +15266,11 @@
 
     L.push('--- UNMATCHED LOG LINES (most recent first) ---');
     L.push(seenUnmatchedLines.length ? seenUnmatchedLines.slice(0, 20).join('\n') : '(none captured yet)');
+    L.push('');
+
+    // Last, and fenced: a throw here must not cost the diagnostic above it.
+    L.push('--- FEATURE USE (on this device only) ---');
+    try { usageReportLines().forEach((l) => L.push(l)); } catch (e) { L.push('unavailable: ' + (e && e.message)); }
 
     return L.join('\n');
   }
@@ -15938,6 +16079,13 @@
       set legacyBlobPending(v) { legacyBlobPending = v; },
       get shardBytesTotal() { return shardBytesTotal; },
 
+      noteUse,
+      usageTapKey,
+      usageReportLines,
+      settingsControlKeys,
+      USAGE_KEYS_MAX,
+      handWasObserved,
+
       // --- DOM-touching, exercised against the harness's minimal document ---
       renderPanel,
       renderDepartedPill,
@@ -16025,6 +16173,9 @@
     // does and can stop it reaching the game. Everything it does is gated on
     // the setting and wrapped in try/catch — see foldGuardHandler.
     document.addEventListener('click', foldGuardHandler, true);
+    // Counts taps on the HUD's own controls — see usageTapHandler. Capture and
+    // passive, after the fold guard, and it never cancels anything.
+    document.addEventListener('click', usageTapHandler, { capture: true, passive: true });
     // Any tap satisfies the browser's autoplay policy, so the first chime of a
     // session isn't silently dropped. Passive and non-capturing: this must
     // never influence a click.
