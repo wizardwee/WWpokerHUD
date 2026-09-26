@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.91.0
+// @version      1.91.1
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,14 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.91.1 - Three P/L and stats fixes, found by feeding random hands through.
+ *            - A raise now costs only what it adds. "raised to $Y" is the
+ *              street total, and chips already in (a blind, a limp, your own
+ *              open before a 4-bet) were charged a second time.
+ *            - A gist sync no longer wipes P/L on the next reload, and no
+ *              longer double-counts board texture and barrels.
+ *            - Reloading the page no longer adds a phantom folded hand for
+ *              everyone seated.
  * 1.91.0 - Time decides a sitting, not who is at the table.
  *            - Back within 2 hours — a refresh, a dropped connection — is
  *              the same sitting, even if every seat changed meanwhile.
@@ -31,15 +39,6 @@
  *            - Refreshing the page, or dropping for 15 minutes and coming
  *              back to the same table, keeps the sitting — now pinned by a
  *              test, including some players having changed meanwhile.
- * 1.89.0 - "Session" is now this sitting.
- *            - It used to end only after a 4-hour break, so it added up every
- *              table since then: +$5.1B over 617 hands, reported straight
- *              after sitting down.
- *            - It now also ends when you move tables — the same check as the
- *              "New table" message, or a change of blinds. Reloading at the
- *              same table keeps it. Renamed "This sitting", with a start time.
- *            - The old, table-spanning session closes once on update and is
- *              kept in the Trends tab.
  */
 
 /*
@@ -81,7 +80,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.91.0';
+  const HUD_VERSION = '1.91.1';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -1980,8 +1979,19 @@
 
   // Merge remote + local: per player, keep whichever record has more observed hands.
   function mergeStores(local, remote) {
+    // Starts from LOCAL, so every top-level field this merge has no opinion
+    // on survives it. It used to build a fresh object holding only the keys
+    // below, stamped `version: 1` — and a gist pull replaces STORE with the
+    // result. On the next load migrateStore read version 1 as a pre-v0.20.0
+    // store and ran the schema-2 repair: every opponent's P/L, hero.netChips
+    // and the session net zeroed, silently, after any sync. The same rebuild
+    // dropped boardTexBackfilled and barrelBackfilled, whose backfills ADD —
+    // so the next init() counted every stored hand into them a second time.
+    // Anything new at the top level of STORE is kept by default now; a field
+    // that should come from the remote has to say so here.
     const merged = {
-      version: 1,
+      ...local,
+      version: local.version,
       players: { ...local.players },
       hands: mergeHands(local.hands || [], remote.hands || [], local.settings.historyLimit),
       hero: local.hero,
@@ -4435,7 +4445,13 @@
       const amt = logAmount(m[2], hand);
       const potBefore = hand.pot;
       noteBetSizing(xid, amt, potBefore);
-      addContribution(hand, xid, amt);
+      // `amt` is the "to $Y" figure: the raiser's TOTAL for this street, not
+      // what this line added. Chips they already had in on the street — a
+      // blind, a limp, the open they are now 4-betting over — were counted
+      // when they went in, so only the difference is new money. Adding the
+      // whole figure charged those chips twice: a big-blind raise to 7.5M
+      // read as 10M, and hero's P/L and every opponent's net moved with it.
+      addContribution(hand, xid, Math.max(0, amt - ((hand.streetContributions || {})[xid] || 0)));
       recordStreetAction(xid, 'raise', hand);
       logAction(hand, xid, 'raise', amt, { p: betSizePctOf(amt, potBefore) });
       markAsPreflopRaiseAction(xid, hand);
@@ -4984,8 +5000,21 @@
     // that check throttles.
     harvestShownCards(true);
     repairBoardFromDom();
-    if (currentHand) applyHandResults(currentHand);
+    // Only a hand something was SEEN in. The first "Game <hex> started" after
+    // a page load settles the placeholder ensureHand() made for it — no
+    // actions, no winner, but dealtInXids seeded from the seats — and that
+    // used to count a hand, recorded as a fold, for everyone sitting there,
+    // hero included. One phantom hand per reload, diluting VPIP/PFR and
+    // lifting hero.hands above bbHands. Same test recordHandHistory already
+    // applies ("nothing happened"), plus a harvested reveal, which is a real
+    // observation of the hand even when its log lines were missed.
+    if (currentHand && handWasObserved(currentHand)) applyHandResults(currentHand);
     currentHand = freshHandState();
+  }
+
+  function handWasObserved(hand) {
+    return !!((hand.actions && hand.actions.length) || (hand.winners && hand.winners.length)
+      || (hand.shownCards && Object.keys(hand.shownCards).length));
   }
 
   function applyHandResults(hand) {
@@ -7282,7 +7311,7 @@
     const hist = Array.isArray(STORE.sessionHistory) ? STORE.sessionHistory : [];
     if (!hist.length) {
       return `<i>No completed sessions yet. A session is one sitting: it ends when you move tables right after playing, `
-        + `a change of blinds, or a break over ${(SESSION_GAP_MS / 3600000).toFixed(0)}h gap, and the finished one lands here.</i>`;
+        + `a change of blinds, or a break over ${(SESSION_GAP_MS / 3600000).toFixed(0)}h, and the finished one lands here.</i>`;
     }
 
     // hist is oldest-first already (see archiveSession); charts want the same

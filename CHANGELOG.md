@@ -9,6 +9,56 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.91.1
+Three data-correctness fixes, found by fuzzing rather than by report
+
+A throwaway harness fed a few thousand random, legal hands (3–9 handed, raises,
+re-raises, split pots, re-read log markers) through the real parser in
+Chromium, against Torn-shaped seats, and checked the store against each hand's
+own arithmetic: hero's P/L, the ledger, the per-opponent split, every stat's
+numerator against its denominator. Three things failed.
+
+**A raise was charged its whole "to" figure.** Torn writes `raised $X to $Y`,
+and `$Y` is the raiser's total for the street — the parser already took the
+second figure for that reason. But it added all of it to what they had put in,
+so anything already in on that street was counted twice: a big blind raising
+to 7.5M was charged 10M, an opener 4-betting to 60M over a 7.5M open was
+charged 67.5M. That moved hero's P/L on every such hand (the fuzz read −$25M
+for a hand lost for $22.5M), every opponent's net with it, the log-summed pot,
+and the coach's "bet facing" figure, which reads street contributions. The
+raise now adds `to − already in this street`. Hands already settled are not
+repaired: the per-hand figures are gone.
+
+**A gist sync wiped P/L on the next reload.** `mergeStores` built its result
+from scratch — the keys it merges plus a hard-coded `version: 1` — and a pull
+replaces the store with it. On the next load `migrateStore` read version 1 as a
+pre-v0.20.0 store and ran the schema-2 repair: every opponent's P/L,
+`hero.netChips` and the session net zeroed. The rebuild also dropped
+`boardTexBackfilled` and `barrelBackfilled`, whose backfills add, so the next
+start counted every stored hand into board texture and barrels again. The merge
+now starts from the local store and overrides only what it merges.
+`test/gist-merge-state.test.js` goes through the real merge → save → reload,
+because the loss happened on the reload.
+
+**A reload counted a phantom hand.** The first `Game <hex> started` after a page
+load settles the placeholder hand made for it — no actions, no winner, but
+seated players snapshotted as dealt in. That counted a hand, as a fold, for
+everyone at the table and for hero: VPIP/PFR diluted a little per reload, and
+`hero.hands` one above `bbHands`. A hand is now settled only if something was
+seen in it (an action, a winner, or a harvested reveal) — the same test history
+filing already used.
+
+**Not changed, and worth one look at a live table:** whether Torn's `called $X`
+is the amount added or the street total. The parser treats it as the amount
+added. The fuzz can't settle that (it generates the lines itself), and the
+fixture in `test/bb-display.test.js` — the big blind "called $22,500,000" into
+a raise to $22.5M — would read as a total if it was copied from a real hand.
+If the deep scan's two pot figures disagree on hands where a blind calls a
+raise, this is why. The same question applies to `all in for $X`.
+
+`test/contributions.test.js` pins the first and third, and fails 7 of 12 on the
+old code.
+
 ## 1.91.0
 Time decides a sitting, not who is at the table
 

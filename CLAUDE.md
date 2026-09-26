@@ -1604,6 +1604,47 @@ one unset or misspelled username. `heroProblem()` returns the reason, surfaced i
 Settings (with a green confirmation when it resolves) and at the top of the
 players list. Don't let this fail silently again.
 
+### Contributions are per-street DELTAS, and a raise states a TOTAL (v1.91.1)
+
+`raised $X to $Y`: `$Y` is the raiser's total for the street. The raise handler
+adds `$Y − streetContributions[xid]`, never `$Y` itself — adding the whole
+figure charged a blind, a limp, or the open under a 4-bet twice, and moved
+hero's P/L on every such hand. `a.amt` in `hand.actions` still stores `$Y`
+(History prints "raise $Y"); only the money added to the pot is the delta.
+
+**Still unconfirmed: `called $X` and `all in for $X`.** Both are added as
+written, i.e. read as the amount ADDED. If Torn prints the street total there
+too, a blind calling a raise is overcharged by the blind. `test/bb-display`'s
+fixture (the BB "called $22,500,000" into a raise to $22.5M) reads like a total
+if it was copied from a real hand. The deep scan's log-pot vs DOM-pot mismatch
+on such hands is the way to settle it — don't change it on inference.
+
+**How these were found: an end-to-end fuzz, not review.** Random legal hands
+through `handleLogLine` in Chromium against Torn-shaped seats, with hero's P/L,
+the ledger sum, the per-opponent split and every numerator/denominator pair
+checked against the hand's own arithmetic. Every hand-written test fed hands
+where nobody raised twice on a street — the only shape this bug shows in. When
+a change touches settlement, re-run that kind of check rather than adding one
+more worked hand.
+
+### A hand is settled only if something was SEEN in it (v1.91.1)
+
+`handWasObserved(hand)` — an action, a winner, or a harvested reveal. The first
+marker after a page load settles the placeholder `ensureHand()` built, whose
+`dealtInXids` is a seat snapshot; settling it counted a hand, as a fold, for
+everyone seated and for hero, once per reload.
+
+### mergeStores starts from LOCAL (v1.91.1)
+
+It used to build a fresh object with a hard-coded `version: 1`. A gist pull
+replaces STORE with the result, so the next load's `migrateStore` ran the
+schema-2 repair and **zeroed all P/L**, and the one-shot backfill flags
+(`boardTexBackfilled`, `barrelBackfilled`) vanished and their additive
+backfills ran again. Now `{ ...local, version: local.version, … }`: a new
+top-level STORE field survives a merge by default, and one that should come
+from the remote has to be named. `test/gist-merge-state.test.js` does the real
+merge → save → reload, because the loss only showed on the reload.
+
 ### The pseudo-id is not a resolution (v0.20.0)
 
 `findHeroXid` → `nameToXidGuess` returns **`'name:' + username`** when no seat
