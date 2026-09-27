@@ -259,6 +259,36 @@ const tags = (plan) => plan.map((e) => e.tag + ':' + e.short);
   t.eq('an empty ledger gives no rows', T.plByStake().length, 0);
 }
 
+// v1.95.0: rows carry the room, so a blind shared by several rooms splits.
+{
+  const T = load();
+  T.STORE = T.emptyStore();
+  T.STORE.plLedger = [
+    { t: 1, d: 5000000, b: 2500000, g: 'a', n: "Cat's Chance" },
+    { t: 2, d: -2500000, b: 2500000, g: 'b', n: "Cat's Chance II" },
+    { t: 3, d: 2500000, b: 2500000, g: 'c', n: "Cat's Chance II" },
+    { t: 4, d: 7500000, b: 2500000, g: 'd' }, // before rooms were recorded
+  ];
+  const rows = T.plByStake();
+  const at = (room) => rows.find((r) => r.room === room);
+  t.eq('one group per room plus the unrecorded remainder', rows.length, 3);
+  t.eq("Cat's Chance II on its own", at("Cat's Chance II").chips, 0);
+  t.eq("Cat's Chance on its own", at("Cat's Chance").bbNet, 2);
+  t.eq('rows with no room stay grouped by blind', at(null).chips, 7500000);
+  t.eq('the groups still sum to the ledger', rows.reduce((a, r) => a + r.chips, 0), 12500000);
+
+  // What gets written: the room only when the tapped record names this blind.
+  T.STORE.plLedger = [];
+  T.STORE.joinedTable = { name: 'Slow Cooker', bb: 5000000, at: Date.now() };
+  T.pushLedgerEntry(1, 5000000, 'x');
+  T.pushLedgerEntry(1, 2500000, 'y');
+  t.eq('a hand at the tapped table records its room', T.STORE.plLedger[0].n, 'Slow Cooker');
+  t.eq('a hand at another blind records none', T.STORE.plLedger[1].n, undefined);
+  T.STORE.joinedTable.at = Date.now() - 3 * 3600000;
+  T.pushLedgerEntry(1, 5000000, 'z');
+  t.eq('a lapsed record names nothing', T.STORE.plLedger[2].n, undefined);
+}
+
 // --- The Stats tab actually renders all of it ----------------------------------
 //
 // "A panel that renders no test's DOM is untested" (CLAUDE.md, v1.72.0). The
@@ -285,8 +315,17 @@ const tags = (plan) => plan.map((e) => e.tag + ':' + e.short);
   T.STORE.plLedger = [{ t: 1, d: 5000000, b: 1000000 }, { t: 2, d: -1000000, b: 0 }];
   const self = render('H', true);
   t.eq('your own Stats tab renders without throwing', self.threw, null);
-  t.ok('with the by-stake breakdown', /By stake/.test(self.html) && /River Wizard|\$1M BB/.test(self.html));
+  t.ok('with the by-stake breakdown', /By table/.test(self.html) && /River Wizard|\$1M BB/.test(self.html));
   t.ok('including the unreadable-blind group', /Blind unknown/.test(self.html));
+
+  // v1.95.0: a room is shown by name, and its stake's older unlabelled hands say why.
+  T.STORE.plLedger = [
+    { t: 1, d: 1, b: 2500000, n: "Cat's Chance II" },
+    { t: 2, d: 1, b: 2500000 },
+  ];
+  const rooms = render('H', true);
+  t.ok('a room row shows the room name', /Cat&#39;s Chance II|Cat's Chance II/.test(rooms.html));
+  t.ok('the older hands at that stake say the room was not recorded', /\$2\.5M BB, room not recorded/.test(rooms.html));
 
   const opp = T.getPlayer('V');
   opp.hands = 40;
@@ -296,7 +335,7 @@ const tags = (plan) => plan.map((e) => e.tag + ':' + e.short);
   t.eq("an opponent's Stats tab renders without throwing", other.threw, null);
   t.ok('with the turn-barrel rows', /Turn barrel/.test(other.html) && /Fold v barrel/.test(other.html));
   t.ok('and won at showdown', /Won SD/.test(other.html) && /2 seen, low/.test(other.html));
-  t.ok('and no by-stake block on an opponent', !/By stake/.test(other.html));
+  t.ok('and no by-stake block on an opponent', !/By table/.test(other.html));
 }
 
 process.exit(t.report());

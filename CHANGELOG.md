@@ -9,6 +9,27 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.95.0
+P/L by table, not just by stake
+
+Asked for after v1.94.0: split P/L by room, since several rooms share a blind.
+
+- `pushLedgerEntry` adds `n` (the room) to a ledger row when
+  `joinedTableName(bb)` names that blind's table — the tapped-row record,
+  valid for that blind inside the 2-hour window. Never guessed from the blind:
+  that is the Slow Cooker / Juan on Juan mistake. Sparse, ~20 bytes when set.
+- `plByStake` groups by blind AND room. Rows without a room — every row before
+  this version — stay grouped by blind. The groups still sum to the ledger.
+- The Stats tab section is renamed "By table". A room line shows the room's
+  name; a stake's room-less remainder, where the same stake also has room
+  lines, reads "$2.5M BB, room not recorded" so the two are not read as one.
+- `plLedgerExportCsv` appends a `table` column (quoted if a name holds a comma
+  or quote). Existing columns keep their positions.
+
+Not changed: "usually plays", the pool anchor and past sittings stay grouped by
+blind, by the user's choice. No backfill — the room was never recorded for
+earlier hands.
+
 ## 1.94.0
 Tapping a different table ends the sitting
 

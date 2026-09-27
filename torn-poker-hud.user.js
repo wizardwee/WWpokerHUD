@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.94.0
+// @version      1.95.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,12 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.95.0 - P/L by table, not just by stake.
+ *            - Each hand's P/L row now records the room you tapped, so Cat's
+ *              Chance and Cat's Chance II get their own lines ("By table").
+ *            - From now on only: earlier hands stay grouped by blind, shown
+ *              as "$2.5M BB, room not recorded" beside the room lines.
+ *            - The P/L CSV gains a table column.
  * 1.94.0 - Tapping a different table ends the sitting.
  *            - Tapping a row is the only way to join, so a different room
  *              is a certain move — even Cat's Chance to Cat's Chance II,
@@ -30,10 +36,6 @@
  *              kept while you play that stake (lapses 2 hours after).
  *            - Otherwise a shared stake shows "$5M BB" rather than a guess,
  *              and so do P/L by stake, "usually plays" and past sittings.
- * 1.92.1 - No behaviour change: Torn's call and all-in wording, confirmed.
- *            - "called $X" is the amount added, which is how it was read.
- *            - A shove is just "raised to $X", so an all-in call is never
- *              taken for a raise. Comments saying otherwise are corrected.
  */
 
 /*
@@ -75,7 +77,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.94.0';
+  const HUD_VERSION = '1.95.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -9433,7 +9435,14 @@
   //      be cross-referenced while it lasts; not required once that ages out
   function pushLedgerEntry(delta, bb, gameId) {
     if (!Array.isArray(STORE.plLedger)) STORE.plLedger = [];
-    STORE.plLedger.push({ t: Date.now(), d: delta, b: bb || 0, g: gameId || null });
+    const row = { t: Date.now(), d: delta, b: bb || 0, g: gameId || null };
+    // The room, when the tapped-row record names this blind's table
+    // (v1.95.0). Only then: a room guessed from a shared blind is exactly
+    // the Slow Cooker / Juan on Juan mistake. Sparse — absent when unknown,
+    // and every row before v1.95.0 has none.
+    const room = plausibleBB(bb) ? joinedTableName(bb) : null;
+    if (room) row.n = room;
+    STORE.plLedger.push(row);
     if (STORE.plLedger.length > PL_LEDGER_CAP) {
       STORE.plLedger.splice(0, STORE.plLedger.length - PL_LEDGER_CAP);
     }
@@ -9449,13 +9458,17 @@
   // history, never a restatement of the exact lifetime total, and the panel
   // says which. A row with no readable blind (b = 0) is kept as its own group
   // in chips only: it cannot be converted to big blinds after the fact.
-  // Returns [{ bb, hands, chips, bbNet }], most-played first.
+  // Since v1.95.0 rows carry the room (`n`), so a blind shared by several
+  // rooms splits by room; rows with no room stay grouped by blind alone.
+  // Returns [{ bb, room, hands, chips, bbNet }], most-played first.
   function plByStake() {
     const groups = {};
     (STORE.plLedger || []).forEach((row) => {
       if (!row || typeof row.d !== 'number') return;
       const bb = plausibleBB(row.b) ? row.b : 0;
-      const g = groups[bb] || (groups[bb] = { bb, hands: 0, chips: 0, bbNet: 0 });
+      const room = bb && typeof row.n === 'string' && row.n ? row.n : null;
+      const key = bb + '|' + (room || '');
+      const g = groups[key] || (groups[key] = { bb, room, hands: 0, chips: 0, bbNet: 0 });
       g.hands += 1;
       g.chips += row.d;
       if (bb) g.bbNet += row.d / bb;
@@ -9480,7 +9493,9 @@
     const rows = Array.isArray(STORE.plLedger) ? STORE.plLedger : [];
     const sumPresent = rows.reduce((a, r) => a + (r.d || 0), 0);
     let running = STORE.hero.netChips - sumPresent;
-    const lines = ['date,chips_delta,bb_delta,running_total,blind_level,game_id'];
+    const lines = ['date,chips_delta,bb_delta,running_total,blind_level,game_id,table'];
+    // A room name is free text off Torn's page; quote it if it could split a cell.
+    const cell = (v) => (/[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v);
     rows.forEach((r) => {
       running += r.d || 0;
       const bbDelta = r.b > 0 ? (r.d / r.b).toFixed(2) : '';
@@ -9491,6 +9506,7 @@
         running.toFixed(0),
         r.b || '',
         r.g || '',
+        r.n ? cell(String(r.n)) : '',
       ].join(','));
     });
     return lines.join('\n') + '\n';
@@ -13628,9 +13644,15 @@
             if (!rows.length) return '';
             const logged = rows.reduce((a, g) => a + g.hands, 0);
             const col = (v) => `color:${v >= 0 ? '#7ed957' : '#ff6b6b'} !important`;
-            return `<tr class="tph-stat-head"><td colspan="3"><b>By stake</b> — last ${logged} hand${logged === 1 ? '' : 's'}</td></tr>`
+            return `<tr class="tph-stat-head"><td colspan="3"><b>By table</b> — last ${logged} hand${logged === 1 ? '' : 's'}</td></tr>`
               + rows.map((g) => {
-                const name = g.bb ? (stakeName(g.bb) || fmtMoney(g.bb) + ' BB') : 'Blind unknown';
+                // A room when the row recorded one; otherwise the stake. Where a
+                // stake also has room rows, its unlabelled remainder is the
+                // hands from before rooms were recorded, and says so.
+                const split = !g.room && g.bb && rows.some((o) => o.bb === g.bb && o.room);
+                const name = g.room || (g.bb
+                  ? (stakeName(g.bb) || fmtMoney(g.bb) + ' BB') + (split ? ', room not recorded' : '')
+                  : 'Blind unknown');
                 const rate = g.bb ? fmtBB100(g.bbNet, g.hands) : '';
                 return `<tr><td class="tph-stat-l">${escapeHtml(name)}</td>`
                   + `<td class="tph-stat-v" style="${col(g.chips)}"><b>${g.bb ? fmtBB(g.bbNet) : fmtSignedMoney(g.chips)}</b></td>`
@@ -13639,7 +13661,7 @@
               }).join('');
           })()}
           <tr><td colspan="3" class="tph-stat-legend">The P/L column elsewhere means "your result against
-            that player", so it has no meaning here — these are your own totals. By stake comes from the
+            that player", so it has no meaning here — these are your own totals. By table comes from the
             P/L log (up to ${PL_LEDGER_CAP} most recent hands); Lifetime above is the exact total.</td></tr>
           ` : `
           <tr class="tph-stat-head"><td colspan="3"><b>Your P/L vs them</b></td></tr>

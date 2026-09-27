@@ -1277,7 +1277,11 @@ swingiest seat, and "soft" would read as an invitation. `tableSoftnessHtml`
 takes the xid list from its caller so a test can drive the formatting: it runs
 on every coach render, and a throw there takes the whole panel down.
 
-**P/L by stake** (`plByStake`) groups the ledger by its per-row blind `b`. It
+**P/L by stake** (`plByStake`) groups the ledger by its per-row blind `b`,
+and since v1.95.0 by room too: a row carries `n` only when `joinedTableName`
+named that blind's table at settlement (never guessed from a shared blind).
+Earlier rows have no room and stay grouped by blind, labelled "room not
+recorded" when the same stake also has room lines. It
 is bounded by what the ledger holds (since v1.55.0, up to `PL_LEDGER_CAP`), so
 the panel labels it "last N hands" and keeps Lifetime as the exact total. A row
 with no plausible blind is its own chips-only group: it cannot be converted to
@@ -1466,7 +1470,7 @@ presentation; the content of the three renderings must stay identical.
 `STORE.plLedger` exists because `STORE.hands` cannot be uncapped for this
 purpose — it carries full per-hand detail (actions, board, players) at
 ~1.3KB/hand, priced for History's needs. A ledger row carries almost nothing —
-`{t, d, b, g}`, ~35-45 bytes — buying roughly two orders of magnitude more
+`{t, d, b, g}` (plus `n`, the room, since v1.95.0), ~35-45 bytes — buying roughly two orders of magnitude more
 retention at the same storage cost. That trade is the whole design: this
 answers "how did I get here", `STORE.hands` answers "what actually happened."
 

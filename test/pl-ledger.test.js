@@ -205,6 +205,18 @@ function hand(o) {
   t.eq('bb delta is derived from delta/blind', rows[0][2], '1.00');
   t.eq('a null game id renders as an empty field, not the string "null"', rows[2][5], '');
 }
+{
+  const T = fresh('HERO');
+  T.STORE.hero.netChips = 3;
+  T.STORE.plLedger = [
+    { t: 1000, d: 1, b: 1000000, g: 'g1', n: 'Tripod' },
+    { t: 2000, d: 2, b: 1000000, g: 'g2', n: 'Odd, "Name"' },
+  ];
+  const lines = T.plLedgerExportCsv().trim().split('\n');
+  t.ok('the header names the table column', /,game_id,table$/.test(lines[0]));
+  t.ok('a row carries its room last', /,g1,Tripod$/.test(lines[1]));
+  t.ok('a room with a comma or quote is quoted', /,g2,"Odd, ""Name"""$/.test(lines[2]));
+}
 
 {
   // Some entries aged out of the ledger (evicted by the cap) but their chips
