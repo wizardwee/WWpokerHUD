@@ -9,6 +9,23 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.94.0
+Tapping a different table ends the sitting
+
+Confirmed by the user: tapping a row in the Cash Games list is the only way to
+join a table. So `rememberTappedRow` now ends the sitting (`rollSessionNow`)
+when the tapped room differs from the one on record, by name or blind. That
+closes the known limit v1.91.0 stated: a same-blind move after a break over
+`TABLE_MOVE_WINDOW_MS` read as the same sitting, because neither the roster
+nor the clock could see it. Re-tapping the room you are at keeps the sitting,
+and with nothing on record (first tap after this update) nothing is ended.
+
+No double end: the roll zeroes `lastHandAt`, so the roster check that follows
+the move sees no recent hand and leaves the fresh sitting alone.
+
+Not done: splitting P/L and "usually plays" by room. Those store only the
+blind today, and the split is a separate decision about storage.
+
 ## 1.93.0
 The table is named from the row you tap, not guessed from the blind
 

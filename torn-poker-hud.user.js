@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.93.0
+// @version      1.94.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,11 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.94.0 - Tapping a different table ends the sitting.
+ *            - Tapping a row is the only way to join, so a different room
+ *              is a certain move — even Cat's Chance to Cat's Chance II,
+ *              same blinds, after a break the clock alone would have kept.
+ *            - Re-tapping the table you are at keeps the sitting.
  * 1.93.0 - The table is named from the row you tap, not guessed from the blind.
  *            - Reported: sitting at Slow Cooker, announced as "Juan on Juan".
  *              Both are $2.5m / $5m, and the name was looked up by blind.
@@ -29,12 +34,6 @@
  *            - "called $X" is the amount added, which is how it was read.
  *            - A shove is just "raised to $X", so an all-in call is never
  *              taken for a raise. Comments saying otherwise are corrected.
- * 1.92.0 - The HUD counts which of its features you use, on this device only.
- *            - Panel opens, tabs, taps on its own buttons and toggles, and a
- *              few events (turn cue, fold guard, departures, new table).
- *            - The deep scan lists the counts, what has never been touched,
- *              and which settings differ from default (keys shown as set/unset).
- *            - Nothing is sent anywhere; a gist sync keeps this device's counts.
  */
 
 /*
@@ -76,7 +75,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.93.0';
+  const HUD_VERSION = '1.94.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -12638,6 +12637,14 @@
     const hit = tableRowAt(target, entries);
     const name = hit && tableRowName(hit.row);
     if (!name || !(hit.bb > 0)) return null;
+    // Tapping a row is the ONLY way to join a table (confirmed by the user),
+    // so a tap on a different room than the one on record is a certain move
+    // — the one thing the roster and the clock cannot see: Cat's Chance to
+    // Cat's Chance II after a break, same blinds, some of the same faces.
+    // It ends the sitting (v1.94.0). Re-tapping the room you are at does not,
+    // and with no room on record there is nothing to compare against.
+    const prev = STORE.joinedTable;
+    if (prev && prev.name && (prev.name !== name || prev.bb !== hit.bb)) rollSessionNow();
     STORE.joinedTable = { name, bb: hit.bb, at: now };
     return STORE.joinedTable;
   }

@@ -1397,9 +1397,11 @@ IS `STACK_SESSION_GAP_MS`, so hero's sitting and the stack sitting cannot
 disagree. **Since v1.91.0 time decides after any break**: turnover counts as a
 move only within `TABLE_MOVE_WINDOW_MS` (10 min) of hero's last hand, so a
 refresh or a dropped connection inside 2h is one sitting whoever is seated when
-you return — the user's stated rule. A blind change always ends it. Known
-limit: a same-blind move after a >10 min break reads as the same sitting; there
-is no table identity to tell it apart.
+you return — the user's stated rule. A blind change always ends it.
+**Since v1.94.0 a tap on a different room ends it too** — tapping a Cash Games
+row is the ONLY way to join (confirmed by the user), so `rememberTappedRow`
+comparing against `STORE.joinedTable` is a certain move signal. That closed the
+old limit (a same-blind move after a >10 min break read as one sitting).
 
 **Considered and not built**: two-pair as its own hand tier (low value, reshapes
 stored data), per-table stats keyed by a table-texture class (needs a scan
@@ -1706,7 +1708,9 @@ the table.** $1M runs four tables, $2.5M two, $5M two (Slow Cooker was
 announced as Juan on Juan). `TORN_STAKES` holds every name on record per
 level. The table you are at comes from the row you TAPPED in the list
 (`noteTableRowTap` → `STORE.joinedTable`), valid while its blind is the one
-read and inside the 2-hour window. Groupings across a stake use `stakeName`,
+read and inside the 2-hour window. Tapping is the only way to join a table
+(confirmed by the user), so the record is present whenever the HUD was loaded
+at the tap. Groupings across a stake use `stakeName`,
 which names a level only when it has a single table — never the tapped one,
 because a stake group spans every table at that blind.
 

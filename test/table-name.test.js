@@ -54,6 +54,39 @@ T.STORE.joinedTable.at = now - 2 * 3600000;
 T.noteBlindLevel({}, 5000000);
 t.ok('a blind read at that stake refreshes it', Date.now() - T.STORE.joinedTable.at < 5000);
 
+// v1.94.0: tapping a DIFFERENT room ends the sitting — tapping is the only way
+// to join, so it is a certain move even at the same blinds after a break.
+{
+  const U = load();
+  U.STORE = U.emptyStore();
+  const mk = (name, blinds) => {
+    const nameCell = node({ text: name });
+    const el = node({}, [nameCell, node({ text: blinds }), node({ text: '15' }), node({ text: '4/9' })]);
+    return { el, nameCell, bb: U.tableBlindsBB(blinds) };
+  };
+  const a = mk("Cat's Chance", '$1.25m / $2.5m');
+  const b = mk("Cat's Chance II", '$1.25m / $2.5m');
+  node({}, [a.el, b.el, mk('Tripod', '$500k / $1m').el]);
+  const es = [a, b].map((r) => ({ row: r.el, bb: r.bb }));
+  const sit = () => Object.assign(U.STORE.session, {
+    startedAt: Date.now() - 3600000, lastHandAt: Date.now() - 20 * 60000, hands: 40, net: 7,
+  });
+  const t0 = Date.now() - 10000;
+
+  sit();
+  U.rememberTappedRow(a.nameCell, es, t0);
+  t.eq('the first tap (nothing on record) ends nothing', U.STORE.session.hands, 40);
+  U.rememberTappedRow(a.nameCell, es, t0 + 1000);
+  t.eq('re-tapping the same room keeps the sitting', U.STORE.session.hands, 40);
+  t.eq('...and archives nothing', (U.STORE.sessionHistory || []).length, 0);
+
+  U.rememberTappedRow(b.nameCell, es, t0 + 2000);
+  t.eq("Cat's Chance -> Cat's Chance II ends the sitting, same blinds", U.STORE.session.hands, 0);
+  t.eq('...and archives it', U.STORE.sessionHistory.length, 1);
+  t.eq('...with its result', U.STORE.sessionHistory[0].netChips, 7);
+  t.eq('the new room is on record', U.tableNameForBB(2500000), "Cat's Chance II");
+}
+
 const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'torn-poker-hud.user.js'), 'utf8');
 t.ok('the tap listener is passive capture', /addEventListener\('click', noteTableRowTap, \{ capture: true, passive: true \}\)/.test(src));
 t.ok('the deep scan reports the tapped row', /tapped row: /.test(src));
