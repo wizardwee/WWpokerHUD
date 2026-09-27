@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.92.1
+// @version      1.93.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,13 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.93.0 - The table is named from the row you tap, not guessed from the blind.
+ *            - Reported: sitting at Slow Cooker, announced as "Juan on Juan".
+ *              Both are $2.5m / $5m, and the name was looked up by blind.
+ *            - Tapping a table in the Cash Games list now remembers its name,
+ *              kept while you play that stake (lapses 2 hours after).
+ *            - Otherwise a shared stake shows "$5M BB" rather than a guess,
+ *              and so do P/L by stake, "usually plays" and past sittings.
  * 1.92.1 - No behaviour change: Torn's call and all-in wording, confirmed.
  *            - "called $X" is the amount added, which is how it was read.
  *            - A shove is just "raised to $X", so an all-in call is never
@@ -28,14 +35,6 @@
  *            - The deep scan lists the counts, what has never been touched,
  *              and which settings differ from default (keys shown as set/unset).
  *            - Nothing is sent anywhere; a gist sync keeps this device's counts.
- * 1.91.1 - Three P/L and stats fixes, found by feeding random hands through.
- *            - A raise now costs only what it adds. "raised to $Y" is the
- *              street total, and chips already in (a blind, a limp, your own
- *              open before a 4-bet) were charged a second time.
- *            - A gist sync no longer wipes P/L on the next reload, and no
- *              longer double-counts board texture and barrels.
- *            - Reloading the page no longer adds a phantom folded hand for
- *              everyone seated.
  */
 
 /*
@@ -77,7 +76,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.92.1';
+  const HUD_VERSION = '1.93.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -3501,7 +3500,7 @@
   // An unknown level is reported rather than treated as an error — Torn adds
   // tables, and this list will go stale before the code does.
   //
-  // SETTLED by the Cash Games list itself (v1.92.0): several levels DO run
+  // SETTLED by the Cash Games list itself (v1.93.0): several levels DO run
   // more than one table. Seen on the device: $1M River Wizard, River Wizard
   // II, Tripod, Comatose Cove; $2.5M Cat's Chance, Cat's Chance II; $5M Slow
   // Cooker, Juan on Juan. A level holding one name here may still have more —
@@ -12623,7 +12622,7 @@
     }
     return null;
   }
-  // Remember the row you tap in the Cash Games list (v1.92.0). The blind
+  // Remember the row you tap in the Cash Games list (v1.93.0). The blind
   // alone cannot name the table — $5M is both Slow Cooker and Juan on Juan —
   // but the row you chose can. Kept while its blind is the one being read.
   // Capture and passive: it reads the tap and never touches it.

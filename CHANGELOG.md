@@ -9,6 +9,38 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.93.0
+The table is named from the row you tap, not guessed from the blind
+
+Reported with a screenshot: sitting at Slow Cooker, the new-table message
+read "New table — Juan on Juan · $5M BB". The Cash Games list in the same
+screenshot settles what CLAUDE.md had carried as a suspicion since v1.0.0:
+several blind levels run more than one table — $1M River Wizard, River Wizard
+II, Tripod, Comatose Cove; $2.5M Cat's Chance, Cat's Chance II; $5M Slow
+Cooker, Juan on Juan. `TORN_STAKES` held one name per level, so the blind
+named a table it could not know.
+
+- `TORN_STAKES` now holds every name on record per level (`stakeTableNames`).
+- `noteTableRowTap` (passive capture click) remembers the row you tap in the
+  list as `STORE.joinedTable = {name, bb, at}` — the name is the row text
+  before its first "$", since textContent glues the cells together.
+- `tableNameForBB(bb)` uses that record while its blind is the one being
+  read and within Torn's 2-hour same-table window (refreshed by each blind
+  read at that stake), else a level's single name, else nothing. A shared
+  level's label is just "$5M BB · High".
+- Groupings that span every table at a stake — P/L by stake, "usually
+  plays", stack tables, past sittings — use `stakeName`, which never takes the
+  tapped name and names a stake only when it has one table on record. The
+  $1M and $2.5M groups therefore read "$1M BB" / "$2.5M BB" now.
+- The deep scan prints the tables on record at the current blind and the
+  tapped-row record.
+
+Known limit: reaching a shared-stake table without tapping its row leaves it
+unnamed until you tap one. A reload keeps the record.
+
+The code landed in the commit before this one without its version bump; this
+commit carries the bump and the notes.
+
 ## 1.92.1
 Torn's call and all-in wording confirmed; the settlement fuzz joins the suite
 

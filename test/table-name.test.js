@@ -1,4 +1,4 @@
-// v1.92.0: the blind names the STAKE, not the table. Reported sitting at Slow
+// v1.93.0: the blind names the STAKE, not the table. Reported sitting at Slow
 // Cooker and announced as "Juan on Juan" — both are $2.5m / $5m. The table is
 // named from the Cash Games row you tapped, while its blind is the one read.
 

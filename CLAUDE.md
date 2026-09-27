@@ -1701,6 +1701,15 @@ that name is a best guess at three specific levels, not a fact — worth
 knowing before trusting "Usually plays" at exactly $100k, $1M or $5M. A scan
 that lands at a $1M table that ISN'T River Wizard is this, not a bug.
 
+**Settled by the Cash Games list (v1.93.0): the blind names the STAKE, never
+the table.** $1M runs four tables, $2.5M two, $5M two (Slow Cooker was
+announced as Juan on Juan). `TORN_STAKES` holds every name on record per
+level. The table you are at comes from the row you TAPPED in the list
+(`noteTableRowTap` → `STORE.joinedTable`), valid while its blind is the one
+read and inside the 2-hour window. Groupings across a stake use `stakeName`,
+which names a level only when it has a single table — never the tapped one,
+because a stake group spans every table at that blind.
+
 **The hazard the ladder exists to catch:** Torn can render amounts as
 `181.00 BB` instead of `$181,000,000`. In that mode every parsed figure is six
 or more orders of magnitude too small and **nothing looks broken** — the numbers

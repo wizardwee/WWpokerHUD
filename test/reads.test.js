@@ -8,7 +8,7 @@ T.STORE = T.emptyStore();
 
 // --- Stakes ladder ----------------------------------------------------------
 
-// v1.92.0: several levels run more than one table (seen on the Cash Games
+// v1.93.0: several levels run more than one table (seen on the Cash Games
 // list), so the blind names a table only when it has one name on record.
 t.eq('a single-table level names its table', T.tableNameForBB(10000000), 'High Rollers');
 t.eq('a shared level names no table', T.tableNameForBB(5000000), null);
