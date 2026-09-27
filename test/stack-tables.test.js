@@ -150,9 +150,9 @@ function withSeats(seats) {
   p.tables = { 2500000: 180, 1000000: 20 };
 
   const tabs = T.tablesPlayed(p);
-  t.eq('busiest table first', tabs[0].name, "Cat's Chance");
+  t.eq('busiest table first', tabs[0].name, '$2.5M BB');
   t.eq('with its share', Math.round(tabs[0].share), 90);
-  t.eq('and the second', tabs[1].name, 'River Wizard');
+  t.eq('and the second', tabs[1].name, '$1M BB');
   t.eq('hands are carried through', tabs[0].hands, 180);
 
   // Keyed by blind level, so an unknown stake still reports rather than
@@ -232,8 +232,8 @@ function withSeats(seats) {
   T.noteRecentTable(p, 2500000);
 
   const r = T.recentTablesOf(p);
-  t.eq('resolved to names, newest first', r[0].name, "Cat's Chance");
-  t.eq('with where they came from', r[1].name, 'River Wizard');
+  t.eq('resolved to names, newest first', r[0].name, '$2.5M BB');
+  t.eq('with where they came from', r[1].name, '$1M BB');
   t.eq('and a relative time', r[0].ago, 'now');
 
   // An implausible blind cannot become a table — see the BB display-mode guard.
@@ -270,8 +270,8 @@ function withSeats(seats) {
 
   const r = T.recentTablesOf(T.STORE.players.V);
   t.eq('settlement records the move', r.length, 2);
-  t.eq('newest table first', r[0].name, 'River Wizard');
-  t.eq('previous table behind it', r[1].name, "Cat's Chance");
+  t.eq('newest table first', r[0].name, '$1M BB');
+  t.eq('previous table behind it', r[1].name, '$2.5M BB');
 }
 
 // --- The stack bar ----------------------------------------------------------

@@ -8,11 +8,14 @@ T.STORE = T.emptyStore();
 
 // --- Stakes ladder ----------------------------------------------------------
 
-t.eq('a known level names its table', T.tableNameForBB(2500000), "Cat's Chance");
-t.eq('another known level', T.tableNameForBB(1000000), 'River Wizard');
+// v1.92.0: several levels run more than one table (seen on the Cash Games
+// list), so the blind names a table only when it has one name on record.
+t.eq('a single-table level names its table', T.tableNameForBB(10000000), 'High Rollers');
+t.eq('a shared level names no table', T.tableNameForBB(5000000), null);
+t.eq('...its tables are all on record', T.stakeTableNames(5000000).join('|'), 'Slow Cooker|Juan on Juan');
+t.eq("$2.5M is shared too", T.tableNameForBB(2500000), null);
+t.eq('$1M is shared too', T.stakeTableNames(1000000).indexOf('River Wizard') >= 0 && T.tableNameForBB(1000000), null);
 t.eq('an unknown level names nothing', T.tableNameForBB(1234), null);
-// $5,000,000 was missing from the ladder entirely until v1.0.0.
-t.eq('the $5M level is now on the ladder', T.tableNameForBB(5000000), 'Juan on Juan');
 
 t.eq('tiny stakes are Nano', T.stakeTierForBB(100), 'Nano');
 t.eq('mid stakes top out below 1M', T.stakeTierForBB(500000), 'Mid');
@@ -28,7 +31,8 @@ Object.keys(T.TORN_STAKES).forEach((k) => {
   t.ok(`${k} is a plausible blind`, T.plausibleBB(Number(k)));
 });
 
-t.ok('a known table reads well', T.tableLabel(2500000).includes("Cat's Chance"));
+t.ok('a single-table level reads with its name', T.tableLabel(10000000).includes('High Rollers'));
+t.eq('a shared level shows the stake, not a guessed name', T.tableLabel(5000000), '$5M BB · High');
 t.ok('an unknown level says so rather than guessing', T.tableLabel(1234).includes('Unknown table'));
 
 // --- The BB display-mode guard ---------------------------------------------

@@ -215,10 +215,10 @@ function mk(T, xid, o) {
   const sb = T.poolStakesBreakdown();
   t.eq('total is the sum of every qualifying player\'s tables entries', sb.total, 70 + 30 + 30);
   t.eq('two distinct stakes reported', sb.stakes.length, 2);
-  t.eq('busiest stake first', sb.stakes[0].name, 'River Wizard');
+  t.eq('busiest stake first', sb.stakes[0].name, '$1M BB');
   t.eq('River Wizard hands are summed across both players', sb.stakes[0].hands, 100);
   t.near('River Wizard share', sb.stakes[0].share, 100 / 130 * 100);
-  t.eq('second stake is Cat\'s Chance', sb.stakes[1].name, "Cat's Chance");
+  t.eq('second stake is $2.5M', sb.stakes[1].name, '$2.5M BB');
 
   // Below POOL_OBS_MIN_HANDS — excluded from the qualifying set, so an
   // enormous tables entry here must not appear in the breakdown.
@@ -269,7 +269,7 @@ function mk(T, xid, o) {
     && text.indexOf('AFq (aggression, folds excluded): not enough data') !== -1);
   t.ok('WTSD says no published figure exists, not a fabricated one',
     text.indexOf('WTSD') !== -1 && !/WTSD: [\d.]+% \(assumed/.test(text));
-  t.ok('names the stake', text.indexOf('River Wizard') !== -1);
+  t.ok('names the stake', text.indexOf('$1M BB') !== -1);
   t.ok('reports the stakes hand count and share', text.indexOf('500 hand(s), 100%') !== -1);
 }
 

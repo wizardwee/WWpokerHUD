@@ -3500,13 +3500,24 @@
   // "Comatose Cove" are the other two names on record for that level.
   // An unknown level is reported rather than treated as an error — Torn adds
   // tables, and this list will go stale before the code does.
+  //
+  // SETTLED by the Cash Games list itself (v1.92.0): several levels DO run
+  // more than one table. Seen on the device: $1M River Wizard, River Wizard
+  // II, Tripod, Comatose Cove; $2.5M Cat's Chance, Cat's Chance II; $5M Slow
+  // Cooker, Juan on Juan. A level holding one name here may still have more —
+  // the list scrolls past what was seen. So the blind names the STAKE, and
+  // names the TABLE only when you tapped its row (joinedTableName) or the
+  // level has a single name on record. Reported: sitting at Slow Cooker,
+  // announced as Juan on Juan.
   const TORN_STAKES = {
     10: 'Newbie Corner', 25: 'Hobo Holdem', 50: 'Broke Jokes', 100: '8-bit',
     250: 'Sprinkles', 500: 'E-asy Street', 1000: 'Gatling Gun', 2500: 'Quickdraw',
     5000: 'Tight Knit', 10000: 'Six of the Best', 25000: 'Ballsy',
-    50000: 'Boom or Bust', 100000: "Old 'n Slow", 250000: 'Pound It',
-    500000: 'Old Folks Home', 1000000: 'River Wizard', 2500000: "Cat's Chance",
-    5000000: 'Juan on Juan', 10000000: 'High Rollers', 25000000: 'Fire Pit',
+    50000: 'Boom or Bust', 100000: ["Old 'n Slow", 'Periodic', 'Fourplay', 'Duel at Dawn'],
+    250000: 'Pound It', 500000: 'Old Folks Home',
+    1000000: ['River Wizard', 'River Wizard II', 'Tripod', 'Comatose Cove'],
+    2500000: ["Cat's Chance", "Cat's Chance II"],
+    5000000: ['Slow Cooker', 'Juan on Juan'], 10000000: 'High Rollers', 25000000: 'Fire Pit',
     100000000: 'Oligarch',
   };
 
@@ -3545,6 +3556,10 @@
     hand.bbAmount = amt;
     lastSeenBB = amt;
     currentTableBB = amt;
+    // Still at the table whose row you tapped: keep its name alive, so it
+    // lapses only after Torn's own 2-hour same-table window away from it.
+    const j = STORE.joinedTable;
+    if (j && j.bb === amt && joinedTableName(amt)) j.at = Date.now();
   }
 
   // Read a blind level out of log lines that are already on screen, WITHOUT
@@ -3575,15 +3590,38 @@
 
   let currentTableBB = null;
 
-  function tableNameForBB(bb) { return TORN_STAKES[bb] || null; }
+  // Every table name on record at a blind level.
+  function stakeTableNames(bb) {
+    const v = TORN_STAKES[bb];
+    return v == null ? [] : [].concat(v);
+  }
+  // A name for the STAKE: the table's, only when the level has just one.
+  // Used for groupings (P/L by stake, "usually plays", past sittings), which
+  // span every table at that blind — naming one of them would be wrong.
+  function stakeName(bb) {
+    const names = stakeTableNames(bb);
+    return names.length === 1 ? names[0] : null;
+  }
+  // The table you are AT: the row you tapped in the Cash Games list, while
+  // its blind is the one being read (see noteTableRowTap), else the stake's
+  // single name, else nothing.
+  function tableNameForBB(bb) {
+    return joinedTableName(bb) || stakeName(bb);
+  }
+  function joinedTableName(bb, now) {
+    const j = STORE.joinedTable;
+    if (!j || !j.name || j.bb !== bb) return null;
+    const age = (now || Date.now()) - (Number(j.at) || 0);
+    return age >= 0 && age <= STACK_SESSION_GAP_MS ? j.name : null;
+  }
 
   // "Cat's Chance ($2.5M/hand · Mid)" — or an honest label for a level that
   // isn't in the ladder, since Torn adds tables.
   function tableLabel(bb) {
     if (!plausibleBB(bb)) return null;
-    const name = tableNameForBB(bb);
+    const name = tableNameForBB(bb) || (stakeTableNames(bb).length ? null : 'Unknown table');
     const tier = stakeTierForBB(bb);
-    return `${name || 'Unknown table'} · ${fmtMoney(bb)} BB${tier ? ' · ' + tier : ''}`;
+    return `${name ? name + ' · ' : ''}${fmtMoney(bb)} BB${tier ? ' · ' + tier : ''}`;
   }
 
   function stakeTierForBB(bb) {
@@ -7359,10 +7397,10 @@
 
     const rows = hist.slice().reverse().slice(0, SESSION_TABLE_ROWS).map((se) => {
       const when = new Date(se.startedAt).toLocaleDateString([], { month: 'short', day: 'numeric' });
-      const stakeName = se.bb ? (tableNameForBB(se.bb) || fmtMoney(se.bb) + ' BB') : '—';
+      const stakeLbl = se.bb ? (stakeName(se.bb) || fmtMoney(se.bb) + ' BB') : '—';
       const vpipPct = se.hands ? fmtPct((100 * se.vpip) / se.hands) : '—';
       const pfrPct = se.hands ? fmtPct((100 * se.pfr) / se.hands) : '—';
-      return `<tr><td>${escapeHtml(when)}</td><td>${se.hands}</td><td>${escapeHtml(stakeName)}</td>`
+      return `<tr><td>${escapeHtml(when)}</td><td>${se.hands}</td><td>${escapeHtml(stakeLbl)}</td>`
         + `<td style="color:${se.netChips >= 0 ? '#7ed957' : '#ff6b6b'} !important">${fmtSignedMoney(se.netChips)}</td>`
         + `<td>${fmtBB(sessionNetBB(se))}</td><td>${vpipPct}/${pfrPct}</td></tr>`;
     }).join('');
@@ -7919,7 +7957,7 @@
     const stakes = Object.keys(byBB)
       .map((k) => ({
         bb: Number(k),
-        name: tableNameForBB(Number(k)) || fmtMoney(Number(k)) + ' BB',
+        name: stakeName(Number(k)) || fmtMoney(Number(k)) + ' BB',
         hands: byBB[k],
         share: (100 * byBB[k]) / total,
       }))
@@ -9960,7 +9998,7 @@
         bb: e.bb,
         at: e.at,
         ago: shortAgo(e.at),
-        name: tableNameForBB(e.bb) || fmtMoney(e.bb) + ' BB',
+        name: stakeName(e.bb) || fmtMoney(e.bb) + ' BB',
       }));
   }
 
@@ -9973,7 +10011,7 @@
     return Object.keys(src)
       .map((k) => ({
         bb: Number(k),
-        name: tableNameForBB(Number(k)) || fmtMoney(Number(k)) + ' BB',
+        name: stakeName(Number(k)) || fmtMoney(Number(k)) + ' BB',
         hands: src[k],
         share: (100 * src[k]) / total,
       }))
@@ -12567,6 +12605,43 @@
     if (!(min > 0)) return [];
     return entries.filter((e) => e.bb < min).map((e) => e.row);
   }
+  // The table's name, read off its row: everything before the first "$".
+  // textContent glues cells ("Slow Cooker$2.5m / $5m309/9"), and a name holds
+  // no "$", so the cut is exact. Null for anything that doesn't look like one.
+  function tableRowName(row) {
+    const text = String((row && row.textContent) || '');
+    const cut = text.indexOf('$');
+    if (cut <= 0) return null;
+    const name = text.slice(0, cut).replace(/\s+/g, ' ').trim();
+    return name && name.length <= 40 && /[A-Za-z]/.test(name) ? name : null;
+  }
+  // Which table row, if any, a tap landed in.
+  function tableRowAt(target, entries) {
+    for (let el = target, i = 0; el && i < 12; el = el.parentElement, i++) {
+      const hit = (entries || []).find((e) => e.row === el);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  // Remember the row you tap in the Cash Games list (v1.92.0). The blind
+  // alone cannot name the table — $5M is both Slow Cooker and Juan on Juan —
+  // but the row you chose can. Kept while its blind is the one being read.
+  // Capture and passive: it reads the tap and never touches it.
+  function noteTableRowTap(e) {
+    try {
+      const target = e && e.target;
+      if (!target || typeof target.closest !== 'function') return;
+      if (target.closest(TABLE_ROW_EXCLUDE)) return;
+      if (rememberTappedRow(target, findTableRows(), Date.now())) saveStore();
+    } catch (err) { /* never in the way of a tap */ }
+  }
+  function rememberTappedRow(target, entries, now) {
+    const hit = tableRowAt(target, entries);
+    const name = hit && tableRowName(hit.row);
+    if (!name || !(hit.bb > 0)) return null;
+    STORE.joinedTable = { name, bb: hit.bb, at: now };
+    return STORE.joinedTable;
+  }
   function applyTableFilter() {
     const min = Number(STORE.settings.minTableStake) || 0;
     const hide = min > 0 ? tableRowsToHide(findTableRows(), min) : [];
@@ -13549,7 +13624,7 @@
             const col = (v) => `color:${v >= 0 ? '#7ed957' : '#ff6b6b'} !important`;
             return `<tr class="tph-stat-head"><td colspan="3"><b>By stake</b> — last ${logged} hand${logged === 1 ? '' : 's'}</td></tr>`
               + rows.map((g) => {
-                const name = g.bb ? (tableNameForBB(g.bb) || fmtMoney(g.bb) + ' BB') : 'Blind unknown';
+                const name = g.bb ? (stakeName(g.bb) || fmtMoney(g.bb) + ' BB') : 'Blind unknown';
                 const rate = g.bb ? fmtBB100(g.bbNet, g.hands) : '';
                 return `<tr><td class="tph-stat-l">${escapeHtml(name)}</td>`
                   + `<td class="tph-stat-v" style="${col(g.chips)}"><b>${g.bb ? fmtBB(g.bbNet) : fmtSignedMoney(g.chips)}</b></td>`
@@ -15148,6 +15223,13 @@
         : '  (not called this session — press Save / share once, then re-scan)'));
     L.push('table: ' + (tableLabel(lastSeenBB) || 'blind level not read yet')
       + (bbDisplayModeSuspected ? '  <-- BB DISPLAY MODE SUSPECTED, P/L is being withheld' : ''));
+    (() => {
+      const j = STORE.joinedTable;
+      const names = plausibleBB(lastSeenBB) ? stakeTableNames(lastSeenBB) : [];
+      L.push('  tables at this blind: ' + (names.length ? names.join(', ') : 'none on record')
+        + '   tapped row: ' + (j ? `${j.name} @ ${fmtMoney(j.bb)} BB, ${shortAgo(j.at)}`
+          + (joinedTableName(lastSeenBB) ? ' (in use)' : ' (not this table)') : 'none'));
+    })();
     const withShowdowns = Object.keys(STORE.players)
       .filter((x) => STORE.players[x] && Object.keys(STORE.players[x].shownHands || {}).length).length;
     L.push('showdown ranges: ' + withShowdowns + ' player(s) with at least one shown hand');
@@ -15777,6 +15859,12 @@
       MIN_PLAUSIBLE_BB,
       plausibleBB,
       tableNameForBB,
+      stakeName,
+      stakeTableNames,
+      joinedTableName,
+      rememberTappedRow,
+      noteBlindLevel,
+      tableRowName,
       stakeTierForBB,
       tableLabel,
       pushRecent,
@@ -16168,6 +16256,9 @@
     // Counts taps on the HUD's own controls — see usageTapHandler. Capture and
     // passive, after the fold guard, and it never cancels anything.
     document.addEventListener('click', usageTapHandler, { capture: true, passive: true });
+    // Remembers which cash table you tapped, so the table can be named when
+    // its blind is shared with another — see noteTableRowTap.
+    document.addEventListener('click', noteTableRowTap, { capture: true, passive: true });
     // Any tap satisfies the browser's autoplay policy, so the first chime of a
     // session isn't silently dropped. Passive and non-capturing: this must
     // never influence a click.
