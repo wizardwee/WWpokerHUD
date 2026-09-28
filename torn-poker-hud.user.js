@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.95.1
+// @version      1.96.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,15 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.96.0 - Faster departure alerts, and a one-tap attack button.
+ *            - Reported: the pill was too slow to notify and hit someone.
+ *              The HUD now reads Torn's own "X left the table" log line
+ *              (about 1s) instead of waiting for two seat checks (3-6s).
+ *            - A leaver who is attackable, level 80 or under and left with
+ *              $500M+ gets a red "Attack" button at the top of the screen:
+ *              one tap opens their attack page. Limits are in Settings.
+ *            - It ignores taps for its first 0.35s, drags by its grip, and
+ *              goes after 60s, on ✕ or once used.
  * 1.95.1 - Deep scan: the identity/ring markers block no longer says
  *            "unconfirmed". Every marker in it was confirmed on the device in
  *            v1.37.0; the heading now says so, and that a NO MATCH there
@@ -29,11 +38,6 @@
  *            - From now on only: earlier hands stay grouped by blind, shown
  *              as "$2.5M BB, room not recorded" beside the room lines.
  *            - The P/L CSV gains a table column.
- * 1.94.0 - Tapping a different table ends the sitting.
- *            - Tapping a row is the only way to join, so a different room
- *              is a certain move — even Cat's Chance to Cat's Chance II,
- *              same blinds, after a break the clock alone would have kept.
- *            - Re-tapping the table you are at keeps the sitting.
  */
 
 /*
@@ -75,7 +79,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.95.1';
+  const HUD_VERSION = '1.96.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -530,6 +534,12 @@
     departPillPos: null,
     departureVibrate: false, // opt-in, same as the turn cue's
     departureSound: false,   // opt-in
+    // One-tap attack button for a leaver worth the trip — see
+    // renderStrikeButton. 0 in either figure means "no limit on this one".
+    strikeButton: true,
+    strikeMinStack: 500000000, // left with at least this much (their last stack)
+    strikeMaxLevel: 80,        // and at or below this level
+    strikePos: null,           // {left, top} once the button has been dragged
     turnVibrate: false, // opt-in: a buzz on the rising edge, and again at escalation
     // 'strong' (v1.80.0) or 'light' (the original single 120ms tap). Strong is
     // the default because light was reported as missable — see
@@ -2831,30 +2841,76 @@
       pendingDepartures.set(key, misses);
       if (misses < 2) return;
       pendingDepartures.delete(key);
-      if (departedWatch.has(key)) return;
-
-      const xid = key;
-      const status = targetStatusFor(xid);
-      const readiness = attackReadiness(status);
-      departedWatch.set(key, {
-        xid: key,
-        name: playerDisplayName(xid),
-        leftAt: Date.now(),
-        // Snapshot of what we knew AS THEY LEFT. The live status keeps being
-        // refreshed afterwards (see refreshDepartedTargetStatus), so the panel
-        // shows current truth — this only decides whether to raise the alarm.
-        wasReady: readiness.ready,
-        alerted: false,
-        dismissed: false,
-      });
-      fired.push(key);
+      if (recordDeparture(key, 'seat')) fired.push(key);
     });
+    return fired;
+  }
 
+  // One place that turns "this player left" into a watched entry, shared by
+  // the seat diff above and the log line below so the two cannot describe a
+  // departure differently. False when they are already being watched — a
+  // player the log caught a second ago must not fire again when the seat
+  // sweep catches up with them.
+  function recordDeparture(xid, via) {
+    const key = String(xid);
+    if (departedWatch.has(key) || isHeroRecord(key)) return false;
+    pendingDepartures.delete(key);
+    const readiness = attackReadiness(targetStatusFor(key));
+    departedWatch.set(key, {
+      xid: key,
+      name: playerDisplayName(key),
+      leftAt: Date.now(),
+      via,
+      // Snapshot of what we knew AS THEY LEFT. The live status keeps being
+      // refreshed afterwards (see refreshDepartedTargetStatus), so the panel
+      // shows current truth — this only decides whether to raise the alarm.
+      wasReady: readiness.ready,
+      alerted: false,
+      dismissed: false,
+      struck: false, // the attack button was used or dismissed for them
+    });
     // Oldest first, so a busy table cannot grow this without bound.
     while (departedWatch.size > DEPARTED_MAX) {
       departedWatch.delete(departedWatch.keys().next().value);
     }
-    return fired;
+    return true;
+  }
+
+  // --- The log's own "left the table" line (v1.96.0) ------------------------
+  //
+  // Reported: the pill is "not rapid enough to notify and hit someone". The
+  // seat diff above needs two sweeps 3s apart, so it fires 3-6s after the
+  // seat empties. Torn writes "<name> left the table" to the log, which is
+  // read within a second, and it is a statement rather than an inference: no
+  // re-render or table swap writes one. It was being thrown away as noise.
+  //
+  // The seat may already be gone by the time the line is read, so the name is
+  // matched against who was seated a sweep ago (lastSeatedSnapshot) as well as
+  // who is seated now. A name matching nobody is dropped — the seat diff is
+  // still running underneath as the backstop, so a miss here costs speed, not
+  // the alert. No lookaround in the pattern (iOS JSC; see Conventions).
+  const LEFT_TABLE_RE = /^(.+?)\s+left\s+the\s+table\b/i;
+
+  function noteLogDeparture(line) {
+    if (!STORE.settings.departureWatch) return null;
+    const m = LEFT_TABLE_RE.exec(line);
+    if (!m) return null;
+    const name = cleanName(m[1]).toLowerCase();
+    if (!name) return null;
+    let candidates = (lastSeatedSnapshot || []).map(String);
+    try { candidates = candidates.concat(Array.from(seatedXids({ includeSittingOut: true })).map(String)); } catch (e) { /* snapshot alone */ }
+    const xid = candidates.find((x) => !isHeroRecord(x) && playerDisplayName(x).toLowerCase() === name);
+    if (!xid || !recordDeparture(xid, 'log')) return null;
+    alertDepartures([xid]);
+    // The alarm went off on the cached status (at most TARGET_REFRESH_MS
+    // old). Ask again now, and redraw the button on the answer, so someone
+    // hospitalised in the last half minute loses it within a round trip
+    // rather than on the next 3s tick.
+    try {
+      const p = fetchTargetStatus(xid);
+      if (p && p.then) p.then(renderStrikeButton, () => {});
+    } catch (e) { /* the 3s tick re-checks anyway */ }
+    return xid;
   }
 
   // Live entries: not expired, not dismissed. Expiry is by wall clock rather
@@ -2933,6 +2989,7 @@
       try { navigator.vibrate([90, 60, 90]); } catch (e) { /* not supported here */ }
     }
     if (STORE.settings.departureSound) playDepartureChime();
+    renderStrikeButton();
     renderDepartedPill();
     renderDepartedPanel();
   }
@@ -2940,14 +2997,125 @@
   function dismissDeparture(xid) {
     const e = departedWatch.get(String(xid));
     if (e) e.dismissed = true;
+    renderStrikeButton();
     renderDepartedPanel();
     renderDepartedPill();
   }
 
   function clearDepartures() {
     departedWatch.forEach((e) => { e.dismissed = true; });
+    renderStrikeButton();
     renderDepartedPanel();
     renderDepartedPill();
+  }
+
+  // --- The attack button (v1.96.0) ------------------------------------------
+  //
+  // Asked for: when a leaver is worth hitting ("e.g. >500m, below level 80"),
+  // put the attack in front of you instead of behind pill -> panel -> link.
+  // One tap, and it is still only a LINK to Torn's attack page — the attack
+  // itself happens there, by you. Nothing here clicks anything.
+  //
+  // It is the one HUD element that takes taps while sitting over the table,
+  // so it is held to the fold guard's standard:
+  //   - it only appears for a player who positively qualifies: attackable on a
+  //     known status, a known level at or under the cap, a known stack at or
+  //     over the floor. Unknown is never "go", same as attackReadiness;
+  //   - it ignores taps for STRIKE_ARM_MS after appearing, so a tap already on
+  //     its way to Call cannot land on it;
+  //   - it goes away on its own after STRIKE_SHOW_MS, on ✕, or once used;
+  //   - it sits at the top of the screen, away from the action buttons, and
+  //     moves by its own grip — the link half never starts a drag.
+  const STRIKE_SHOW_MS = 60 * 1000;
+  const STRIKE_ARM_MS = 350;
+  let strikeShownXid = null;
+  let strikeShownAt = 0;
+
+  // Why an entry does or does not get the button — '' when it does. A reason
+  // rather than a boolean so a test can tell the gates apart.
+  function strikeBlockReason(e) {
+    if (!e.readiness.ready) return 'status';
+    const maxLvl = Number(STORE.settings.strikeMaxLevel) || 0;
+    if (maxLvl > 0 && !(e.level > 0 && e.level <= maxLvl)) return 'level';
+    const minStack = Number(STORE.settings.strikeMinStack) || 0;
+    if (minStack > 0 && !(e.stack >= minStack)) return 'stack';
+    return '';
+  }
+
+  // Newest qualifying leaver still inside the window. departedList() is
+  // already newest-first, so a second leaver replaces the first on the button
+  // (the first stays in the pill's list).
+  function strikeCandidate() {
+    if (!STORE.settings.departureWatch || !STORE.settings.strikeButton) return null;
+    return departedList().find((e) => !e.struck && e.agoMs <= STRIKE_SHOW_MS && !strikeBlockReason(e)) || null;
+  }
+
+  function strikeDone(xid) {
+    const e = departedWatch.get(String(xid));
+    if (e) e.struck = true;
+    // Deferred: removing the link inside its own click handler could cancel
+    // the navigation the tap was for.
+    setTimeout(renderStrikeButton, 0);
+  }
+
+  function renderStrikeButton() {
+    const existing = document.querySelector('.tph-strike');
+    const e = strikeCandidate();
+    if (!e) {
+      if (existing) existing.remove();
+      strikeShownXid = null;
+      return;
+    }
+    const meta = `${fmtMoney(e.stack)} · lvl ${e.level}`;
+    if (existing && strikeShownXid === e.xid) {
+      if (existing._meta && existing._meta.textContent !== meta) existing._meta.textContent = meta;
+      return;
+    }
+    if (existing) existing.remove();
+
+    const el = document.createElement('div');
+    el.className = 'tph-strike';
+    const grip = document.createElement('span');
+    grip.className = 'tph-strike-grip';
+    grip.textContent = '⠿';
+    grip.title = 'Drag to move';
+    const go = document.createElement('a');
+    go.className = 'tph-strike-go';
+    go.href = attackUrl(e.xid);
+    go.target = '_blank';
+    go.rel = 'noopener';
+    const who = document.createElement('b');
+    who.className = 'tph-strike-who';
+    who.textContent = `⚔ Attack ${e.name}`;
+    const metaEl = document.createElement('span');
+    metaEl.className = 'tph-strike-meta';
+    metaEl.textContent = meta;
+    go.appendChild(who);
+    go.appendChild(metaEl);
+    const x = document.createElement('span');
+    x.className = 'tph-strike-x';
+    x.textContent = '✕';
+    x.title = 'Dismiss';
+    el.appendChild(grip);
+    el.appendChild(go);
+    el.appendChild(x);
+    el._meta = metaEl;
+
+    strikeShownXid = e.xid;
+    strikeShownAt = Date.now();
+    const xid = e.xid;
+    go.addEventListener('click', (ev) => {
+      if (Date.now() - strikeShownAt < STRIKE_ARM_MS) {
+        if (ev && ev.preventDefault) ev.preventDefault();
+        return;
+      }
+      noteUse('event:strike-attack');
+      strikeDone(xid); // the link itself navigates; nothing is prevented
+    });
+    x.addEventListener('click', () => strikeDone(xid));
+    document.body.appendChild(el);
+    applyStoredPos(el, 'strikePos', PILL_KEEP_VISIBLE_PX);
+    makeDraggable(grip, { moveEl: el, posKey: 'strikePos', keepVisiblePx: PILL_KEEP_VISIBLE_PX });
   }
 
   // Keep checking the ones we are watching. A player who left attackable and
@@ -4358,6 +4526,9 @@
   function handleLogLine(line) {
     const trimmed = cleanLogLine(line);
     if (!trimmed) return;
+    // Before the noise filter, which drops this line for the parser — it is
+    // no poker action, but it is the fastest departure signal there is.
+    try { noteLogDeparture(trimmed); } catch (e) { /* the seat diff backs it up */ }
     if (LOG_NOISE_RE.test(trimmed)) return;
 
     for (const pattern of LOG_PATTERNS) {
@@ -6520,6 +6691,7 @@
         if (!STORE.settings.departureWatch) return;
         alertDepartures(noteSeatDepartures(Array.from(seatedXids({ includeSittingOut: true }))));
         refreshDepartedTargetStatus();
+        renderStrikeButton();
         renderDepartedPill();
         if (departedPanelOpen) renderDepartedPanel();
       });
@@ -11299,6 +11471,24 @@
       border-radius: 13px; cursor: grab; touch-action: none; user-select: none;
       box-shadow: 0 2px 8px rgba(0,0,0,.45); }
     .tph-depart-pill.tph-dragging { cursor: grabbing; opacity: 0.85; }
+    /* The attack button. Top of the screen, away from Fold/Call. Only the
+       grip drags (touch-action:none there alone), so the link stays a plain
+       link and a drag can never become an attack. */
+    .tph-strike { position: fixed; z-index: 99999; top: 56px; left: 16px; right: 16px;
+      margin: 0 auto; width: max-content; display: flex; align-items: stretch;
+      background: #c0392b !important; color: #fff !important; border-radius: 10px;
+      box-shadow: 0 3px 12px rgba(0,0,0,.55); max-width: calc(100vw - 32px);
+      font: 13px/1.2 -apple-system, sans-serif !important; }
+    .tph-strike.tph-dragging { opacity: 0.85; }
+    .tph-strike-grip { color: #ffd9d3 !important; padding: 10px 6px 10px 9px; cursor: grab;
+      touch-action: none; user-select: none; display: flex; align-items: center; }
+    .tph-strike-go { color: #fff !important; text-decoration: none !important; padding: 9px 8px;
+      display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+    .tph-strike-who { color: #fff !important; font-weight: 800; font-size: 14px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .tph-strike-meta { color: #ffd9d3 !important; font-size: 11px; }
+    .tph-strike-x { color: #ffd9d3 !important; padding: 10px 11px; display: flex; align-items: center;
+      border-left: 1px solid rgba(255,255,255,.25); cursor: pointer; }
     .tph-depart-note { color: #8d959c !important; font-size: 10.5px; margin: 0 0 8px; }
     .tph-depart-row { display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
       padding: 6px; margin-bottom: 6px; border-radius: 4px;
@@ -14451,9 +14641,14 @@
       <label><input type="checkbox" class="tph-departcue-toggle" ${STORE.settings.departureCue ? 'checked' : ''}> Flash the screen edge</label><br>
       <label><input type="checkbox" class="tph-departvib-toggle" ${STORE.settings.departureVibrate ? 'checked' : ''}> Also buzz</label><br>
       <label><input type="checkbox" class="tph-departsound-toggle" ${STORE.settings.departureSound ? 'checked' : ''}> Also play a chime</label>
-      <div style="opacity:.7;margin:2px 0 10px">Keeps a leaver's name and attack link for
+      <div style="opacity:.7;margin:2px 0 8px">Keeps a leaver's name and attack link for
         ${DEPARTED_WATCH_MS / 60000} min and keeps checking their status. Alerts only for players attackable when
         they left. Needs a Torn API key.</div>
+      <label><input type="checkbox" class="tph-strike-toggle" ${STORE.settings.strikeButton ? 'checked' : ''}> One-tap attack button for a worthwhile leaver</label><br>
+      <label>Left with at least $ <input type="text" inputmode="decimal" class="tph-strike-min-stack" value="${minStakeInputText(STORE.settings.strikeMinStack)}" placeholder="e.g. 500m" style="width:80px"></label><br>
+      <label>Level at most <input type="number" min="0" max="100" class="tph-strike-max-level" value="${Number(STORE.settings.strikeMaxLevel) || ''}" placeholder="any" style="width:60px"></label>
+      <div style="opacity:.7;margin:2px 0 10px">Shows for ${STRIKE_SHOW_MS / 1000}s at the top of the screen; drag it by ⠿.
+        Only when their status, level and last stack are all known. Blank = no limit.</div>
       <h4>Torn API features</h4>
       <label>Torn API key: <input type="text" class="tph-torn-api-key" value="${escapeHtml(STORE.settings.tornApiKey)}" placeholder="optional, public access is enough" style="width:60%"></label>
       <div class="tph-target-diag ${targetDiagnostic() ? 'tph-target-diag-bad' : 'tph-target-diag-ok'}">${
@@ -14783,6 +14978,7 @@
     // a corner that the other screen orientation doesn't have.
     panel.querySelector('.tph-coach-reset').addEventListener('click', () => {
       STORE.settings.coachPos = null; // the panel and its pill share this
+      STORE.settings.strikePos = null;
       STORE.settings.departPillPos = null; // and so is the departure pill — one
                                            // button has to recover every floating
                                            // element, or the escape hatch has a gap
@@ -14791,13 +14987,14 @@
       saveStore();
       const coach = document.querySelector('.tph-coach');
       if (coach) coach.remove(); // rebuilt at the default anchor on the next tick
-      ['.tph-coach-pill', '.tph-depart-pill'].forEach((sel) => {
+      ['.tph-coach-pill', '.tph-depart-pill', '.tph-strike'].forEach((sel) => {
         const pill = document.querySelector(sel);
         if (pill) pill.remove(); // rebuilt at its CSS anchor on the next tick
       });
     });
     [['.tph-depart-toggle', 'departureWatch'], ['.tph-departcue-toggle', 'departureCue'],
       ['.tph-departvib-toggle', 'departureVibrate'], ['.tph-departsound-toggle', 'departureSound'],
+      ['.tph-strike-toggle', 'strikeButton'],
     ].forEach(([sel, key]) => {
       const el = panel.querySelector(sel);
       if (!el) return;
@@ -14810,8 +15007,23 @@
           departedPanelOpen = false;
           renderDepartedPanel();
         }
+        renderStrikeButton();
         renderDepartedPill();
       });
+    });
+    panel.querySelector('.tph-strike-min-stack').addEventListener('change', (e) => {
+      const v = Math.max(0, parseAmount(e.target.value || '0'));
+      STORE.settings.strikeMinStack = v;
+      e.target.value = minStakeInputText(v);
+      saveStore();
+      renderStrikeButton();
+    });
+    panel.querySelector('.tph-strike-max-level').addEventListener('change', (e) => {
+      const v = Math.max(0, Math.min(100, Math.round(Number(e.target.value) || 0)));
+      STORE.settings.strikeMaxLevel = v;
+      e.target.value = v || '';
+      saveStore();
+      renderStrikeButton();
     });
     panel.querySelector('.tph-calib-toggle').addEventListener('change', (e) => {
       STORE.settings.calibrationMode = e.target.checked;
@@ -15174,6 +15386,20 @@
           : r.unknown ? 'UNKNOWN(' + r.label + ')' : 'ATTACKABLE')
         + (st.description ? '  desc=' + JSON.stringify(squish(st.description, 40)) : ''));
     });
+    // Which path caught each recent leaver. 'log' is the fast one (v1.96.0);
+    // if leavers keep reading 'seat' only, the "left the table" line is not
+    // being matched to a seat and the button arrives 3-6s late.
+    const deps = [];
+    departedWatch.forEach((e) => {
+      const d = departedList().find((x) => x.xid === e.xid);
+      deps.push(e.xid + '(' + (e.via || '?') + ', ' + Math.round((Date.now() - e.leftAt) / 1000) + 's ago'
+        + (d ? ', button: ' + (strikeBlockReason(d) ? 'no — ' + strikeBlockReason(d) : e.struck ? 'used/dismissed' : 'yes') : '')
+        + ')');
+    });
+    L.push('departures: ' + (deps.length ? deps.join(' ') : 'none this session')
+      + '   attack button: ' + (STORE.settings.strikeButton
+        ? '>= ' + fmtMoney(Number(STORE.settings.strikeMinStack) || 0) + ', lvl <= ' + (Number(STORE.settings.strikeMaxLevel) || 'any')
+        : 'off'));
     L.push('seatedXids: ' + Array.from(seatedXids()).join(',')
       + '  (incl. sitting out: ' + Array.from(seatedXids({ includeSittingOut: true })).join(',') + ')');
     const btns = findActionButtons();
@@ -15669,7 +15895,7 @@
       // Both pills, not just the coach's. A rotate that narrows the viewport
       // can leave either of them off screen, and the departure pill is the one
       // carrying a time-limited alert — it is the worse one to lose.
-      [['.tph-coach-pill', 'coachPos'], ['.tph-depart-pill', 'departPillPos']].forEach(([sel, key]) => {
+      [['.tph-coach-pill', 'coachPos'], ['.tph-depart-pill', 'departPillPos'], ['.tph-strike', 'strikePos']].forEach(([sel, key]) => {
         const pill = document.querySelector(sel);
         if (!pill || !STORE.settings[key]) return;
         const pr = pill.getBoundingClientRect();
@@ -15810,6 +16036,15 @@
       departedWatch,
       DEPARTED_WATCH_MS,
       DEPARTED_MAX,
+      recordDeparture,
+      noteLogDeparture,
+      strikeBlockReason,
+      strikeCandidate,
+      renderStrikeButton,
+      STRIKE_SHOW_MS,
+      STRIKE_ARM_MS,
+      get strikeShownAt() { return strikeShownAt; },
+      set strikeShownAt(v) { strikeShownAt = v; },
       get lastSeatedSnapshot() { return lastSeatedSnapshot; },
       set lastSeatedSnapshot(v) { lastSeatedSnapshot = v; },
       pdaCall,

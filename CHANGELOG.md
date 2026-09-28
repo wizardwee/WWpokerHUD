@@ -9,6 +9,44 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.96.0
+Faster departure alerts, and a one-tap attack button
+
+Reported: the departure pill "is not rapid enough to notify and hit someone".
+Leaving to attacking took a 3-6s detection (two seat sweeps 3s apart, the
+guard against a redraw reading as a departure) and then three taps: pill,
+panel, Attack link.
+
+- **Detection from the log.** Torn writes `<name> left the table`, which the
+  snapshot scanner reads within about a second. It was being filtered as
+  noise. `noteLogDeparture` now runs before the noise filter and matches the
+  name against who was seated a sweep ago as well as who is seated now (the
+  seat may already be gone). Both paths share `recordDeparture`, so the seat
+  diff catching up later does not fire twice; it stays as the backstop.
+  A departure caught from the log also re-asks Torn for their status at once,
+  so someone hospitalised in the last 30s loses the button within one round
+  trip.
+- **The attack button.** Asked for: "if it fulfils a criteria (e.g >500m,
+  below level 80), bring up an attack button". The newest leaver who is
+  attackable on a known status, at a known level at or under
+  `strikeMaxLevel` (80), with a known last stack at or over `strikeMinStack`
+  ($500M) gets a red button at the top of the screen linking to their attack
+  page. Unknown fails every gate. It is a link: the attack happens on Torn's
+  page, by you.
+- **Held to the fold guard's standard**, being the one HUD element taking taps
+  over the table: taps in its first 350ms are swallowed, a real tap is never
+  prevented, only the ⠿ grip drags, and it goes after 60s, on ✕ or once used.
+  Settings → Departure watch has the toggle and both limits (blank = none);
+  the panel-reset button recovers its position.
+- The deep scan gains a `departures:` line: which path caught each leaver and
+  whether they got the button (or which gate stopped it).
+
+Unconfirmed on the device: the exact wording of the leave line at that moment,
+and whether the last stack read is what the player walks away with.
+
+`test/strike-button.test.js` covers the log path and every gate, checked by
+mutation.
+
 ## 1.95.1
 Deep scan: the identity/ring markers are labelled confirmed
 

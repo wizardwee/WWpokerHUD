@@ -1012,6 +1012,30 @@ Guard 3 is asymmetric on purpose, same principle as `attackReadiness`: being
 wrong costs one missed alert on a table that genuinely broke up, and not having
 it costs eight false targets every time you sit down somewhere else.
 
+### The log line is the fast path; the attack button is a link (v1.96.0)
+
+Reported: the pill was "not rapid enough to notify and hit someone" — the seat
+diff needs two sweeps 3s apart, then pill → panel → link. `noteLogDeparture`
+now reads Torn's own `<name> left the table` line (previously dropped as noise)
+**before** `LOG_NOISE_RE` in `handleLogLine`, resolving the name against
+`lastSeatedSnapshot` as well as the live seats, because the seat may already be
+gone. Both paths go through `recordDeparture`, so the seat diff catching up
+never double-fires. The seat diff stays as the backstop; the deep scan's
+`departures:` line shows which path (`log`/`seat`) caught each leaver — if it
+keeps reading `seat`, the log wording or name match is off on the device.
+
+`renderStrikeButton` puts one **link** to Torn's attack page at the top of the
+screen for the newest leaver who **positively** qualifies: attackable on a
+known status, known level ≤ `strikeMaxLevel` (80), known last stack ≥
+`strikeMinStack` ($500M); 0 = no limit. Unknown fails every gate, same as
+`attackReadiness`. It is the one HUD element taking taps over the table, so:
+taps inside `STRIKE_ARM_MS` (350) of appearing are swallowed, a real tap is
+never `preventDefault`ed (the link navigates; nothing is clicked for you), only
+the ⠿ grip drags, and it expires after `STRIKE_SHOW_MS` (60s), on ✕, or once
+used. `test/strike-button.test.js` pins each gate by mutation. **Unconfirmed on
+the device:** the exact log wording at the moment of leaving, and whether the
+last stack read is what they walk away with.
+
 Both pills (`.tph-coach-pill`, `.tph-depart-pill`) are draggable through
 `makeDraggable`, each with its own `posKey` — they can be on screen at once, so
 a shared position would stack them. Both need `touch-action: none`, or the drag
