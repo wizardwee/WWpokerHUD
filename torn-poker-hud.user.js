@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.95.0
+// @version      1.95.1
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,11 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.95.1 - Deep scan: the identity/ring markers block no longer says
+ *            "unconfirmed". Every marker in it was confirmed on the device in
+ *            v1.37.0; the heading now says so, and that a NO MATCH there
+ *            means Torn changed its layout. $10M High Rollers is confirmed
+ *            by a v1.94.0 scan. No behaviour change.
  * 1.95.0 - P/L by table, not just by stake.
  *            - Each hand's P/L row now records the room you tapped, so Cat's
  *              Chance and Cat's Chance II get their own lines ("By table").
@@ -29,13 +34,6 @@
  *              is a certain move — even Cat's Chance to Cat's Chance II,
  *              same blinds, after a break the clock alone would have kept.
  *            - Re-tapping the table you are at keeps the sitting.
- * 1.93.0 - The table is named from the row you tap, not guessed from the blind.
- *            - Reported: sitting at Slow Cooker, announced as "Juan on Juan".
- *              Both are $2.5m / $5m, and the name was looked up by blind.
- *            - Tapping a table in the Cash Games list now remembers its name,
- *              kept while you play that stake (lapses 2 hours after).
- *            - Otherwise a shared stake shows "$5M BB" rather than a guess,
- *              and so do P/L by stake, "usually plays" and past sittings.
  */
 
 /*
@@ -77,7 +75,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.95.0';
+  const HUD_VERSION = '1.95.1';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -3508,7 +3506,8 @@
   // the list scrolls past what was seen. So the blind names the STAKE, and
   // names the TABLE only when you tapped its row (joinedTableName) or the
   // level has a single name on record. Reported: sitting at Slow Cooker,
-  // announced as Juan on Juan.
+  // announced as Juan on Juan. $10M High Rollers confirmed by a v1.94.0 scan
+  // (tapped row and blind agreed, 9-handed).
   const TORN_STAKES = {
     10: 'Newbie Corner', 25: 'Hobo Holdem', 50: 'Broke Jokes', 100: '8-bit',
     250: 'Sprinkles', 500: 'E-asy Street', 1000: 'Gatling Gun', 2500: 'Quickdraw',
@@ -15091,11 +15090,12 @@
     L.push(classVocab(45).join(' '));
     L.push('');
 
-    // Everything below was derived by reading a public reference script rather
-    // than from a scan of THIS device. Each line either confirms it holds on
-    // Torn PDA's layout or shows what to use instead. Rare markers are listed
-    // in full because the frequency-sorted vocabulary above truncates them away.
-    L.push('--- IDENTITY / RING MARKERS (unconfirmed on this layout) ---');
+    // Everything below was first read out of a public reference script, and
+    // every marker has since been CONFIRMED on Torn PDA's layout (scan,
+    // v1.37.0). Kept so a Torn redeploy that breaks one shows up here. Rare
+    // markers are listed in full because the frequency-sorted vocabulary above
+    // truncates them away.
+    L.push('--- IDENTITY / RING MARKERS (confirmed v1.37.0; a NO MATCH here means Torn changed) ---');
     L.push('self/opponent/dealer/position/positioner bases:');
     L.push('  ' + (classVocabMatching(/^(self|opponent|dealer|position|playerPositioner|state|sit)/i).join(' ') || '(none)'));
     const hSeat = heroSeatEl();

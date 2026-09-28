@@ -9,6 +9,24 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.95.1
+Deep scan: the identity/ring markers are labelled confirmed
+
+A v1.94.0 scan from a live $10M table came back clean, but its
+`IDENTITY / RING MARKERS` block was still headed "(unconfirmed on this
+layout)". Every marker in it — hero's `self_` seat, the dealer button and
+`position-<N>`, `playerPositioner` indices, the sitting-out `state_` text —
+was confirmed on the device in v1.37.0, and this scan matched all of them
+again. A heading that disagrees with CLAUDE.md invites re-diagnosing settled
+questions from the next paste. It now reads "confirmed v1.37.0; a NO MATCH
+here means Torn changed", which is what the block is still for: catching a
+redeploy.
+
+Also recorded in the `TORN_STAKES` comment: $10M High Rollers is confirmed by
+the same scan (tapped row and blind agreed, 9-handed).
+
+Scan text and comments only; no behaviour change.
+
 ## 1.95.0
 P/L by table, not just by stake
 
