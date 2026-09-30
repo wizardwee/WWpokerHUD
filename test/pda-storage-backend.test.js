@@ -122,10 +122,10 @@ const flushAsync = (T) => T.flushShardsAsync();
       + 'value would be encoded twice by the bridge and roughly double what '
       + 'each record costs', typeof pda._map.get(KEY + ':p:555'), 'object');
     // Bounded chunks, not one call per key and NOT one call for everything.
-    // core, hands and the ledger each take a call of their own (they are large
-    // single values), and every player in this pass shares one chunk — so a
-    // one-player pass is four calls, not one and not five.
-    t.eq('sections write separately, players share a chunk', pda._calls.setMany, 4);
+    // Since v1.98.0 no section is a big single value any more (a hand is its
+    // own key, the ledger is 25 KB chunks), so a small pass is one call.
+    t.eq('a small pass is one call', pda._calls.setMany, 1);
+    t.ok('the hand lands under its own key', !!pda._map.get(KEY + ':h:gg1'));
 
     // Read it back through the real loader.
     const T2 = load({ pdaStorage: pda });
@@ -172,29 +172,29 @@ const flushAsync = (T) => T.flushShardsAsync();
     t.ok('the constant agrees with the ceiling this pins',
       T.PDA_WRITE_CHUNK <= HARD_CAP);
     t.eq('with nothing dropped — every key still written',
-      sizes.reduce((a, b) => a + b, 0), 603); // 600 players + core + hands + pl
+      sizes.reduce((a, b) => a + b, 0), 651); // 600 players + core + 50 hands (empty ledger)
     t.ok('all 600 players landed', !!pda._map.get(KEY + ':p:p599'));
-    t.ok('and so did the section shards',
-      !!pda._map.get(KEY + ':hands') && !!pda._map.get(KEY + ':core'));
+    t.ok('and so did core and every hand',
+      !!pda._map.get(KEY + ':h:gh49') && !!pda._map.get(KEY + ':core'));
     t.ok('no marks left over', T.dirtyPlayers.size === 0);
   }
 
   {
-    // The section shards are single values of their own (hundreds of KB each)
-    // and cannot be split, so each takes a call rather than tripling a chunk
-    // it rides along in.
+    // Calls are bounded by SIZE as well as by key count (v1.98.0). Ledger
+    // chunks are ~25 KB each, so 48 of them in one call would be the 1.2 MB
+    // payload the chunking exists to prevent. Pinned against a literal, for
+    // the same reason as the key ceiling above.
     const T = load({ pdaStorage: fakeStorage() });
     await T.storeReady;
-    const writes = [
-      { key: KEY + ':core', value: {}, mark: { kind: 'core' } },
-      { key: KEY + ':hands', value: [], mark: { kind: 'hands' } },
-      { key: KEY + ':pl', value: [], mark: { kind: 'pl' } },
-    ].concat(Array.from({ length: 5 }, (_, i) => (
-      { key: KEY + ':p:x' + i, value: {}, mark: { kind: 'dirty', xid: 'x' + i } }
-    )));
+    const big = 'x'.repeat(25 * 1024);
+    const writes = Array.from({ length: 10 }, (_, i) => ({ key: KEY + ':L:' + i, value: big, str: big }));
     const chunks = T.chunkWrites(writes);
-    t.eq('core, hands and ledger each get their own call, players share one',
-      chunks.map((c) => c.length).join(','), '1,1,1,5');
+    const most = Math.max.apply(null, chunks.map((c) => c.reduce((a, w) => a + w.str.length, 0)));
+    t.ok('no call carries more than ~64 KB of ledger', most <= 80 * 1024);
+    t.eq('and none is dropped', [].concat(...chunks).length, 10);
+    const huge = 'y'.repeat(200 * 1024);
+    t.eq('one entry over the budget still goes, alone',
+      T.chunkWrites([{ key: 'a', value: huge, str: huge }, { key: 'b', value: 1, str: '1' }]).map((c) => c.length).join(','), '1,1');
   }
 
   {

@@ -71,6 +71,34 @@ boots('sharded store', { seedKeys: shards() }, (T) => {
   t.ok('with no reclaim claimed', !T.STORE.lastReclaim);
 });
 
+// --- 3b. The v1.98.0 layout: a key per hand, ledger in chunks --------------
+//
+// hydrateSections, handShardEntries and the section constants all run at
+// module evaluation through bootStore — exactly where a const declared too
+// low in the file is a ReferenceError that takes the whole HUD down.
+
+const v198 = {
+  [KEY + ':core']: JSON.stringify({ version: 3, settings: {}, hero: { hands: 5, netChips: 0, netBB: 0, bbHands: 0 } }),
+  [KEY + ':h:gs2']: JSON.stringify({ g: 's2', t: 10, actions: [] }),
+  [KEY + ':h:gs1']: JSON.stringify({ g: 's1', t: 9, actions: [] }),
+  [KEY + ':L:0']: JSON.stringify({ s: 0, r: [{ t: 9, d: 1, b: 1, g: 's1' }] }),
+};
+
+boots('v1.98.0 layout', { seedKeys: v198 }, (T) => {
+  t.eq('hands come back newest first', T.STORE.hands.map((h) => h.g).join(','), 's2,s1');
+  t.eq('the ledger comes back', T.STORE.plLedger.length, 1);
+  t.ok('with no old keys pending', !T.legacySectionsPending);
+});
+
+boots('both section layouts at once', { seedKeys: Object.assign({}, shards(), v198) }, (T) => {
+  t.eq('the hands are unioned', T.STORE.hands.map((h) => h.g).join(','), 's2,s1');
+  t.ok('and the old keys await removal', T.legacySectionsPending);
+});
+
+boots('a corrupt hand key', { seedKeys: Object.assign({}, v198, { [KEY + ':h:gbad']: '{not json' }) }, (T) => {
+  t.eq('costs that hand only', T.STORE.hands.length, 2);
+});
+
 // --- 4. Shards AND blob: the path that broke ---------------------------------
 //
 // The state v1.70.0's deadlock left on a real phone. This is the one that

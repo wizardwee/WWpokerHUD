@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.97.0
+// @version      1.98.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,14 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.98.0 - Saving writes only what changed.
+ *            - The once-a-minute safety save used to rewrite the whole store
+ *              (~3 MB across the PDA bridge). It now checks every piece and
+ *              writes only what differs: usually nothing.
+ *            - Each hand is its own key and the P/L log is stored in chunks,
+ *              so a settled hand writes ~40 KB instead of ~1.4 MB.
+ *            - "Reset all data" no longer brings players back on the next
+ *              reload when the app's own storage is in use.
  * 1.97.0 - Tap Leave twice to confirm, same as Fold.
  *            - Asked for: a guard on leaving the seat. It shares the fold
  *              guard's handler, so it never acts for you, lets the second tap
@@ -37,11 +45,6 @@
  *              one tap opens their attack page. Limits are in Settings.
  *            - It ignores taps for its first 0.35s, drags by its grip, and
  *              goes after 60s, on ✕ or once used.
- * 1.95.1 - Deep scan: the identity/ring markers block no longer says
- *            "unconfirmed". Every marker in it was confirmed on the device in
- *            v1.37.0; the heading now says so, and that a NO MATCH there
- *            means Torn changed its layout. $10M High Rollers is confirmed
- *            by a v1.94.0 scan. No behaviour change.
  */
 
 /*
@@ -83,7 +86,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.97.0';
+  const HUD_VERSION = '1.98.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -781,9 +784,14 @@
   // Now each piece has its own key and only the changed ones are written:
   //
   //   <key>:core     everything small — settings, hero, session, flags (~2 KB)
-  //   <key>:hands    STORE.hands            (~412 KB, changes once per hand)
-  //   <key>:pl       STORE.plLedger        (~1259 KB, changes once per hand)
+  //   <key>:h:<id>   one stored hand         (~1.5 KB, one new key per hand)
+  //   <key>:L:<n>    500 ledger rows          (~25 KB, only the newest changes)
   //   <key>:p:<xid>  one player record       (~1.4 KB, changes individually)
+  //
+  // (Until v1.98.0 the hands and the ledger were one key each, `<key>:hands`
+  // and `<key>:pl`, rewritten whole after every hand — ~0.5 MB and ~1.3 MB.
+  // Both are still read on load and removed once their replacement has been
+  // written; see legacySectionsPending.)
   //
   // A single action now writes ~1.4 KB instead of 2.9 MB. Hand settlement is
   // the expensive tick (hands + ledger + everyone dealt in), and it happens
@@ -795,13 +803,23 @@
   //    getPlayer(), which is where almost all mutation goes through, plus the
   //    handful of sites that reach STORE.players[xid] directly. Proving that
   //    list is exhaustive forever is exactly the kind of claim this file has
-  //    been burned by, so it is not relied on: a FULL reconcile writes every
+  //    been burned by, so it is not relied on: a FULL reconcile checks every
   //    shard every STORE_RECONCILE_MS regardless of marks. STORE is in memory,
   //    so a missed mark costs at most one reconcile interval of durability,
   //    not the data. Over-marking is free; under-marking is bounded.
-  // 2. A mark is cleared only by its OWN successful write. A refused write
-  //    (quota) leaves that shard dirty so the next save retries it, rather
-  //    than clearing the flag and losing the record permanently.
+  //
+  //    Since v1.98.0 the reconcile CHECKS rather than rewrites: every write
+  //    records a fingerprint of what it put on disk (`persisted`), and a
+  //    shard whose serialised content still matches is skipped. The safety is
+  //    unchanged — a missed mark means changed content, which does not match —
+  //    but a quiet minute costs a hash of the store in JS instead of ~3 MB
+  //    marshalled across the PDA bridge, which is what froze scrolling in the
+  //    v1.76.0 report and was still happening every minute in smaller pieces.
+  // 2. A mark is never LOST to a failed write. Marks are taken when the plan
+  //    is built and put back if that write is refused, so the next save
+  //    retries it. (Taken at plan time, not cleared on success, so a mark set
+  //    WHILE an async write is in flight survives it — clearing on success
+  //    used to wipe it, leaving that change to the next reconcile.)
   // 3. Deletions are tracked, not inferred. A pruned player whose key is left
   //    behind is a record that comes back from the dead on the next load AND
   //    keeps occupying the quota the prune was run to free.
@@ -812,9 +830,31 @@
 
   const SHARD_PREFIX = STORAGE_KEY + ':';
   const SHARD_CORE = SHARD_PREFIX + 'core';
+  // Pre-v1.98.0 single-key sections. Read on load, never written.
   const SHARD_HANDS = SHARD_PREFIX + 'hands';
   const SHARD_PL = SHARD_PREFIX + 'pl';
   const SHARD_PLAYER = SHARD_PREFIX + 'p:';
+  const SHARD_HAND = SHARD_PREFIX + 'h:';
+  const SHARD_LEDGER = SHARD_PREFIX + 'L:';
+
+  // Rows per ledger chunk. At ~50 bytes a row a chunk is ~25 KB, so the one
+  // that changes each hand is a small write, and a full store (PL_LEDGER_CAP
+  // rows) is 40 keys rather than 20,000.
+  //
+  // Chunks are numbered by ABSOLUTE row — row i of STORE.plLedger is row
+  // ledgerBase + i of every row ever recorded — so evicting from the front
+  // changes only the oldest chunk. Numbered by position instead, every
+  // eviction would shift every chunk and they would all be rewritten each
+  // hand, which is the cost this exists to remove. Each chunk also carries its
+  // own start (`s`), so the layout on disk describes itself: a wrong
+  // ledgerBase costs a rewrite, never a row.
+  const LEDGER_CHUNK_ROWS = 500;
+  let ledgerBase = 0;
+
+  // Set when the pre-v1.98.0 section keys are on disk. Removed only after
+  // their replacements have been written — the same rule as the legacy blob:
+  // until then they are the only copy.
+  let legacySectionsPending = false;
 
   // Held in their own shards, so they are stripped out of `core` on write and
   // put back on read. Listed once so the two directions cannot disagree.
@@ -876,7 +916,11 @@
   // and a record that never reached disk has nothing to clean up.
   function replaceStore(next) {
     const keep = (next && next.players) || {};
-    shardKeys().forEach((k) => {
+    // persistedKeys, not shardKeys: shardKeys only ever reads localStorage,
+    // so on the native backend it listed nothing and "Reset all data" or an
+    // import cleared the screen and then brought every old player back on the
+    // next reload (v1.98.0).
+    persistedKeys().forEach((k) => {
       if (k.indexOf(SHARD_PLAYER) !== 0) return;
       const xid = k.slice(SHARD_PLAYER.length);
       if (!Object.prototype.hasOwnProperty.call(keep, xid)) markPlayerRemoved(xid);
@@ -905,6 +949,104 @@
     if (shardBytesTotal < 0) shardBytesTotal = 0;
   }
 
+  // What is on disk under each shard key, as a fingerprint of its serialised
+  // content — seeded from what the loader read, updated by every write and
+  // removal that lands, on either backend. Two jobs:
+  //
+  //   - A flush skips a shard whose content still matches, so the reconcile
+  //     can check everything without rewriting everything (see the header).
+  //   - It is the list of what is PERSISTED, which replaceStore and the
+  //     section orphan sweep need, and which shardKeys() cannot give on the
+  //     native backend because it only reads the localStorage backend.
+  //
+  // In memory only, rebuilt from the real keys at every load — so it is a
+  // cache of the enumeration, not an index key that can drift on disk.
+  const persisted = new Map();
+
+  // cyrb53 over the serialised text, with the length alongside so a collision
+  // would also have to match in length. Math.imul is ES2015, safe on old JSC.
+  //
+  // Bound once, not looked up per character: a global `Math` lookup inside
+  // the loop measured 130x slower under the test harness's vm sandbox (397ms
+  // against 3ms for 1.1 MB), which turned the reconcile into a 900ms stall
+  // there. Whatever an engine does with global lookups, a local costs nothing.
+  const imul = Math.imul;
+  function contentHash(str) {
+    let h1 = 0xdeadbeef;
+    let h2 = 0x41c6ce57;
+    for (let i = 0; i < str.length; i += 1) {
+      const ch = str.charCodeAt(i);
+      h1 = imul(h1 ^ ch, 2654435761);
+      h2 = imul(h2 ^ ch, 1597334677);
+    }
+    h1 = imul(h1 ^ (h1 >>> 16), 2246822507) ^ imul(h2 ^ (h2 >>> 13), 3266489909);
+    h2 = imul(h2 ^ (h2 >>> 16), 2246822507) ^ imul(h1 ^ (h1 >>> 13), 3266489909);
+    return str.length + ':' + (4294967296 * (2097151 & h2) + (h1 >>> 0));
+  }
+
+  function persistedKeys() {
+    const out = new Set(persisted.keys());
+    // On localStorage, also whatever is really there: a key written behind
+    // this file's back (a test, a hand edit) is still something a reload reads.
+    if (!pdaBackend) shardKeys().forEach((k) => out.add(k));
+    return Array.from(out);
+  }
+
+  // The hands as shard entries, one key per hand. Keyed by Torn's game id,
+  // which is what makes a new hand ONE new key instead of a rewrite of the
+  // list — and a trimmed hand one removal. A hand with no id (joined mid-way,
+  // or recorded by an old version) falls back to its timestamp; a repeat of
+  // either gets a suffix, so no two hands can share a key.
+  function handShardEntries(hands) {
+    const seen = new Set();
+    return (hands || []).filter((h) => h && typeof h === 'object').map((h) => {
+      const base = h.g ? 'g' + h.g : 't' + (h.t || 0);
+      let id = base;
+      for (let n = 2; seen.has(id); n += 1) id = base + '~' + n;
+      seen.add(id);
+      return { key: SHARD_HAND + id, value: h };
+    });
+  }
+
+  // The ledger as chunks of LEDGER_CHUNK_ROWS, numbered by absolute row.
+  function ledgerShardEntries(rows, base) {
+    const out = [];
+    const list = rows || [];
+    const b = Math.max(0, Math.floor(base) || 0);
+    let i = 0;
+    while (i < list.length) {
+      const abs = b + i;
+      const k = Math.floor(abs / LEDGER_CHUNK_ROWS);
+      const end = Math.min(list.length, (k + 1) * LEDGER_CHUNK_ROWS - b);
+      out.push({ key: SHARD_LEDGER + k, value: { s: abs, r: list.slice(i, end) } });
+      i = end;
+    }
+    return out;
+  }
+
+  // The loader's half. Hands come back in any key order and are sorted newest
+  // first, which is the order STORE.hands is kept in. Ledger chunks are laid
+  // end to end by their own start; a row claimed by two chunks (only possible
+  // if a removal failed after a re-chunking) is taken once.
+  function hydrateSections(hands, chunks) {
+    const sortedHands = hands.slice().sort((a, b) => (b.t || 0) - (a.t || 0));
+    const sorted = chunks.filter((c) => c && Array.isArray(c.r))
+      .sort((a, b) => (a.s || 0) - (b.s || 0));
+    const rows = [];
+    let base = sorted.length ? (sorted[0].s || 0) : 0;
+    let next = base;
+    sorted.forEach((c) => {
+      const s = c.s || 0;
+      c.r.forEach((row, j) => {
+        if (s + j < next) return;
+        rows.push(row);
+        next = s + j + 1;
+      });
+    });
+    if (!rows.length) base = 0;
+    return { hands: sortedHands, ledger: rows, base };
+  }
+
   // --- Backend: localStorage -------------------------------------------------
   //
   // Every read and write of persisted state goes through these four, so the
@@ -914,14 +1056,17 @@
     try { return localStorage.getItem(key); } catch (e) { return null; }
   }
 
-  function shardWrite(key, raw) {
+  // Feeds `persisted` only on this backend (see clearLocalStorageCopy).
+  function shardWrite(key, raw, hash) {
     localStorage.setItem(key, raw);
     noteShardBytes(key, raw.length);
+    if (!pdaBackend && key.indexOf(SHARD_PREFIX) === 0) persisted.set(key, hash || contentHash(raw));
   }
 
   function shardRemove(key) {
     try { localStorage.removeItem(key); } catch (e) { /* already gone */ }
     noteShardBytes(key, 0);
+    if (!pdaBackend) persisted.delete(key);
   }
 
   // Every key this HUD owns. Enumerated rather than tracked in an index key,
@@ -984,16 +1129,53 @@
     // store, a future format change), the dedicated shards still win, so a
     // stale copy inside core can never shadow the real one.
     SHARD_SPLIT_KEYS.forEach((k) => { delete store[k]; });
-    store.hands = read(SHARD_HANDS, [], 'hands');
-    store.plLedger = read(SHARD_PL, [], 'plLedger');
     store.players = {};
+    const hands = [];
+    const chunks = [];
     keys.forEach((k) => {
-      if (k.indexOf(SHARD_PLAYER) !== 0) return;
-      const xid = k.slice(SHARD_PLAYER.length);
-      const p = read(k, null, 'player ' + xid);
-      if (p && typeof p === 'object') store.players[xid] = p;
-      else if (onBad) onBad(k); // corrupt: don't leave it holding quota
+      if (k.indexOf(SHARD_PLAYER) === 0) {
+        const xid = k.slice(SHARD_PLAYER.length);
+        const p = read(k, null, 'player ' + xid);
+        if (p && typeof p === 'object') store.players[xid] = p;
+        else if (onBad) onBad(k); // corrupt: don't leave it holding quota
+      } else if (k.indexOf(SHARD_HAND) === 0) {
+        const h = read(k, null, 'hand ' + k.slice(SHARD_HAND.length));
+        if (h && typeof h === 'object' && !Array.isArray(h)) hands.push(h);
+        else if (onBad) onBad(k);
+      } else if (k.indexOf(SHARD_LEDGER) === 0) {
+        const c = read(k, null, 'ledger ' + k.slice(SHARD_LEDGER.length));
+        if (c && typeof c === 'object' && Array.isArray(c.r)) chunks.push(c);
+        else if (onBad) onBad(k);
+      }
     });
+    const split = hydrateSections(hands, chunks);
+    store.hands = split.hands;
+    store.plLedger = split.ledger;
+    ledgerBase = split.base;
+
+    // The pre-v1.98.0 single keys. Both layouts on disk at once means a
+    // migration was interrupted, in one of two directions: new keys partly
+    // written with the old key still whole, or new keys complete with the old
+    // key's removal refused and newer hands added since. A UNION is right in
+    // both — for hands by the same key the new layout uses, the new copy
+    // winning a tie; for the ledger, which has no row identity, whichever
+    // side holds more rows, the rule reclaimLegacyBlob already uses.
+    legacySectionsPending = keys.indexOf(SHARD_HANDS) !== -1 || keys.indexOf(SHARD_PL) !== -1;
+    if (keys.indexOf(SHARD_HANDS) !== -1) {
+      const old = read(SHARD_HANDS, [], 'hands');
+      if (Array.isArray(old) && old.length) {
+        const have = new Set(handShardEntries(store.hands).map((e) => e.key));
+        const add = handShardEntries(old).filter((e) => !have.has(e.key)).map((e) => e.value);
+        if (add.length) store.hands = hydrateSections(store.hands.concat(add), []).hands;
+      }
+    }
+    if (keys.indexOf(SHARD_PL) !== -1) {
+      const old = read(SHARD_PL, [], 'plLedger');
+      if (Array.isArray(old) && old.length > store.plLedger.length) {
+        store.plLedger = old;
+        ledgerBase = 0;
+      }
+    }
     return store;
   }
 
@@ -1098,6 +1280,7 @@
 
   function loadStore() {
     const keys = shardKeys();
+    persisted.clear();
 
     // No shards: either a fresh install, or a store written by a version
     // before this one. Both are handled by reading the legacy blob — absent,
@@ -1125,6 +1308,10 @@
     const raws = {};
     keys.forEach((k) => { raws[k] = shardRead(k); });
     keys.forEach((k) => noteShardBytes(k, (raws[k] || '').length));
+    // What is on disk, so the first save writes only what differs from it.
+    // This used to be markAllDirty() and nothing else — a full rewrite of the
+    // store on every page load.
+    keys.forEach((k) => { if (raws[k] != null) persisted.set(k, contentHash(raws[k])); });
 
     const store = reclaimLegacyBlob(assembleShards(keys,
       (k, fallback, label) => parseShard(raws[k], fallback, label),
@@ -1174,9 +1361,18 @@
         // first save. Until that lands, localStorage remains the only copy.
         STORE = loadStore();
         legacyLocalPending = true;
+        // loadStore indexed the LOCALSTORAGE keys. The native store holds
+        // nothing yet, so everything must be written there; and the legacy
+        // section keys it found go with the rest of the localStorage copy.
+        persisted.clear();
+        legacySectionsPending = false;
         markAllDirty();
         return STORE;
       }
+      persisted.clear();
+      keys.forEach((k) => {
+        try { persisted.set(k, contentHash(JSON.stringify(bag[k]))); } catch (e) { /* written next save */ }
+      });
 
       // Values come back already decoded — PDA_storage stores JSON-serialisable
       // values, not strings — so there is no per-shard parse to fail. A shard
@@ -1257,64 +1453,147 @@
   // What a flush intends to do, worked out ONCE and then handed to whichever
   // backend is active. Built rather than executed inline because the two
   // backends apply it very differently — localStorage one key at a time and
-  // synchronously, PDA_storage as a single batched round trip across the app
-  // bridge — and the decision about WHAT to persist must not be duplicated in
-  // two places that can drift.
+  // synchronously, PDA_storage in batched round trips across the app bridge —
+  // and the decision about WHAT to persist must not be duplicated in two
+  // places that can drift.
   //
-  // Marks are NOT cleared here. Only a backend that has actually written
-  // something may clear its mark.
-  function buildFlushPlan() {
-    const writes = [];
-    const removes = [];
+  // `full` is the reconcile: every shard is considered whatever its marks say.
+  // Either way a shard is only WRITTEN when its serialised content differs
+  // from the fingerprint of what is on disk (`persisted`), so the reconcile
+  // checks everything and writes what actually changed.
+  //
+  // Marks are TAKEN here, and each entry carries an `undo` that puts its mark
+  // back if the write is refused. See point 2 at the top of this section.
+  function buildFlushPlan(full) {
+    const plan = {
+      writes: [],
+      removes: [],
+      after: [],
+      stats: { at: Date.now(), full: !!full, written: 0, skipped: 0, removed: 0, chars: 0 },
+    };
+    // Listed only if a section is planned: on localStorage it enumerates every
+    // key, which a single action's save must not pay for.
+    let onDiskList = null;
+    const onDisk = () => onDiskList || (onDiskList = persistedKeys());
+    const want = (key, value, undo, knownHash) => {
+      let str = null;
+      let hash = knownHash;
+      if (!hash) { str = JSON.stringify(value); hash = contentHash(str); }
+      if (persisted.get(key) === hash) { plan.stats.skipped += 1; return; }
+      if (str == null) str = JSON.stringify(value);
+      plan.writes.push({ key, value, str, hash, undo });
+    };
+    const drop = (key, undo) => plan.removes.push({ key, undo });
 
     // Removals first: they FREE space, so on a store under quota pressure
     // doing them last would fail the very writes the prune was run to make
     // room for.
-    removedPlayers.forEach((xid) => removes.push({ key: SHARD_PLAYER + xid, mark: { kind: 'removed', xid } }));
+    removedPlayers.forEach((xid) => drop(SHARD_PLAYER + xid, () => {
+      if (!STORE.players[xid]) removedPlayers.add(xid);
+    }));
+    removedPlayers.clear();
 
-    if (dirtyCore) writes.push({ key: SHARD_CORE, value: coreSnapshot(), mark: { kind: 'core' } });
-    if (dirtyHands) writes.push({ key: SHARD_HANDS, value: STORE.hands || [], mark: { kind: 'hands' } });
-    if (dirtyPl) writes.push({ key: SHARD_PL, value: STORE.plLedger || [], mark: { kind: 'pl' } });
+    if (dirtyCore || full) {
+      dirtyCore = false;
+      want(SHARD_CORE, coreSnapshot(), () => { dirtyCore = true; });
+    }
 
-    dirtyPlayers.forEach((xid) => {
+    // A section whose old single key is still on disk is always planned, so
+    // that key is removed as soon as a pass has put its replacement down.
+    if (dirtyHands || full || legacySectionsPending) {
+      dirtyHands = false;
+      const undo = () => { dirtyHands = true; };
+      const entries = handShardEntries(STORE.hands);
+      const live = new Set(entries.map((e) => e.key));
+      onDisk().forEach((k) => { if (k.indexOf(SHARD_HAND) === 0 && !live.has(k)) drop(k, undo); });
+      entries.forEach((e) => want(e.key, e.value, undo));
+    }
+
+    if (dirtyPl || full || legacySectionsPending) {
+      dirtyPl = false;
+      const undo = () => { dirtyPl = true; };
+      const entries = ledgerShardEntries(STORE.plLedger, ledgerBase);
+      const live = new Set(entries.map((e) => e.key));
+      onDisk().forEach((k) => { if (k.indexOf(SHARD_LEDGER) === 0 && !live.has(k)) drop(k, undo); });
+      Array.from(ledgerChunkMemo.keys()).forEach((k) => { if (!live.has(k)) ledgerChunkMemo.delete(k); });
+      entries.forEach((e) => {
+        const r = e.value.r;
+        const m = ledgerChunkMemo.get(e.key);
+        const same = !full && m && m.s === e.value.s && m.n === r.length
+          && m.first === r[0] && m.last === r[r.length - 1];
+        const hash = same ? m.hash : contentHash(JSON.stringify(e.value));
+        ledgerChunkMemo.set(e.key, { s: e.value.s, n: r.length, first: r[0], last: r[r.length - 1], hash });
+        want(e.key, e.value, undo, hash);
+      });
+    }
+
+    const xs = new Set(dirtyPlayers);
+    if (full) Object.keys(STORE.players || {}).forEach((x) => xs.add(x));
+    dirtyPlayers.clear();
+    xs.forEach((xid) => {
       const p = STORE.players[xid];
+      const key = SHARD_PLAYER + xid;
       // Deleted without going through markPlayerRemoved. Treat the mark as a
       // removal rather than writing `undefined` over the record.
-      if (!p) removes.push({ key: SHARD_PLAYER + xid, mark: { kind: 'dirty', xid } });
-      else writes.push({ key: SHARD_PLAYER + xid, value: p, mark: { kind: 'dirty', xid } });
+      if (!p) {
+        if (persisted.has(key)) drop(key, () => { if (!STORE.players[xid]) removedPlayers.add(xid); });
+        return;
+      }
+      want(key, p, () => { dirtyPlayers.add(xid); });
     });
 
-    return { writes, removes };
+    if (legacySectionsPending) plan.after.push(SHARD_HANDS, SHARD_PL);
+    return plan;
   }
 
-  // Clear one entry's dirty mark — and ONLY after its own write has landed.
-  function clearMark(mark) {
-    if (!mark) return;
-    if (mark.kind === 'core') dirtyCore = false;
-    else if (mark.kind === 'hands') dirtyHands = false;
-    else if (mark.kind === 'pl') dirtyPl = false;
-    else if (mark.kind === 'removed') removedPlayers.delete(mark.xid);
-    else if (mark.kind === 'dirty') dirtyPlayers.delete(mark.xid);
+  // Ledger chunk fingerprints by the rows they hold. Rows are appended and
+  // never edited, so a chunk holding the same first row, last row and count
+  // as last time holds the same content, and 40 chunks need not be serialised
+  // to find the one that changed. NOT trusted by the reconcile, which hashes
+  // every chunk — that is the check this cache would otherwise be skipping.
+  const ledgerChunkMemo = new Map();
+
+  // The last pass, and the last reconcile, for the deep scan: what was
+  // written, what was skipped as already on disk, what was removed. The only
+  // way to see on the device that a quiet reconcile writes nothing.
+  let lastFlushStats = null;
+  let lastReconcileStats = null;
+
+  function noteFlushStats(stats) {
+    lastFlushStats = stats;
+    if (stats.full) lastReconcileStats = stats;
   }
 
   // Apply a plan against localStorage, one key at a time.
   //
-  // A refusal part-way through leaves exactly the unwritten shards dirty and
-  // the next save retries them. The first error is re-thrown once the pass is
-  // over, so the caller still sees the failure — but the shards that DID fit
-  // are persisted rather than being abandoned because a later one didn't.
+  // A refusal part-way through puts back exactly the unwritten shards' marks
+  // and the next save retries them. The first error is re-thrown once the
+  // pass is over, so the caller still sees the failure — but the shards that
+  // DID fit are persisted rather than being abandoned because a later one
+  // didn't.
   function applyPlanSync(plan) {
     let firstError = null;
-    const attempt = (fn, mark) => {
-      try { fn(); clearMark(mark); } catch (e) { if (!firstError) firstError = e; }
-    };
-    plan.removes.forEach((r) => attempt(() => shardRemove(r.key), r.mark));
-    plan.writes.forEach((w) => attempt(() => shardWrite(w.key, JSON.stringify(w.value)), w.mark));
+    plan.removes.forEach((r) => {
+      try { shardRemove(r.key); plan.stats.removed += 1; } catch (e) { if (!firstError) firstError = e; r.undo(); }
+    });
+    plan.writes.forEach((w) => {
+      try {
+        shardWrite(w.key, w.str, w.hash);
+        plan.stats.written += 1;
+        plan.stats.chars += w.str.length;
+      } catch (e) { if (!firstError) firstError = e; w.undo(); }
+    });
+    // Old section keys go only once everything replacing them has landed.
+    if (!firstError && plan.after.length) {
+      plan.after.forEach((k) => shardRemove(k));
+      legacySectionsPending = false;
+    }
+    noteFlushStats(plan.stats);
     if (firstError) throw firstError;
   }
 
-  function flushShards() {
-    applyPlanSync(buildFlushPlan());
+  function flushShards(full) {
+    applyPlanSync(buildFlushPlan(full));
   }
 
   // --- Backend: PDA_storage --------------------------------------------------
@@ -1344,40 +1623,51 @@
     // Removals first, for the same reason as the sync path: they free space
     // the writes may need. Failures are tolerated individually — a delete that
     // does not land leaves an orphan key, which costs quota but corrupts
-    // nothing, and the mark stays set so the next pass retries it.
+    // nothing, and its mark goes back so the next pass retries it.
     const deletions = plan.removes.map((r) => Promise.resolve()
       .then(() => s.delete(r.key))
-      .then(() => { clearMark(r.mark); }, () => { /* retried next pass */ }));
+      .then(() => { persisted.delete(r.key); plan.stats.removed += 1; }, () => { r.undo(); }));
 
-    return Promise.all(deletions).then(() => writeChunks(s, chunkWrites(plan.writes), 0));
+    return Promise.all(deletions)
+      .then(() => writeChunks(s, chunkWrites(plan.writes), 0, plan.stats))
+      .then(() => {
+        noteFlushStats(plan.stats);
+        if (!plan.after.length) return null;
+        // Old section keys, only now that everything replacing them landed.
+        return Promise.all(plan.after.map((k) => Promise.resolve()
+          .then(() => s.delete(k)).then(() => { persisted.delete(k); })))
+          .then(() => { legacySectionsPending = false; }, () => { /* retried next pass */ });
+      });
   }
 
   // Keys per setMany. The batch is marshalled across the flutter bridge in one
-  // call, so ONE call carrying the whole store is a multi-megabyte payload —
-  // and the 60s reconcile marks everything dirty, so on a 1,200-player store
-  // that repeated every minute, forever. Reported from a live table as the page
-  // no longer scrolling: the bridge marshal blocks, the compositor stalls, and
-  // it comes back round a minute later.
+  // call, so ONE call carrying the whole store is a multi-megabyte payload.
+  // Reported from a live table as the page no longer scrolling: the bridge
+  // marshal blocks, the compositor stalls, and — when the 60s reconcile used
+  // to rewrite everything — it came back round a minute later.
   //
   // On localStorage that same reconcile costs 23ms, which is why this never
   // showed up until the native backend was actually reachable (v1.75.0).
   const PDA_WRITE_CHUNK = 48;
+  // And a size budget per call, in serialised characters. Players (~1.4 KB)
+  // hit the key limit first; ledger chunks (~25 KB) hit this one, so a first
+  // write of a full ledger is several calls of ~64 KB rather than one of
+  // ~1.3 MB. One entry bigger than the budget still goes, on its own.
+  const PDA_WRITE_CHARS = 64 * 1024;
 
-  // The three SECTION shards are single values of their own — ~680 KB of hand
-  // history, ~500 KB of ledger — and cannot be split, so each gets a call to
-  // itself rather than riding along with 47 players and tripling that chunk.
   function chunkWrites(writes) {
     const chunks = [];
     let current = [];
+    let chars = 0;
     writes.forEach((w) => {
-      const bulky = w.key === SHARD_CORE || w.key === SHARD_HANDS || w.key === SHARD_PL;
-      if (bulky) {
-        if (current.length) { chunks.push(current); current = []; }
-        chunks.push([w]);
-        return;
+      const n = (w.str != null ? w.str : (JSON.stringify(w.value) || '')).length;
+      if (current.length && (current.length >= PDA_WRITE_CHUNK || chars + n > PDA_WRITE_CHARS)) {
+        chunks.push(current);
+        current = [];
+        chars = 0;
       }
       current.push(w);
-      if (current.length >= PDA_WRITE_CHUNK) { chunks.push(current); current = []; }
+      chars += n;
     });
     if (current.length) chunks.push(current);
     return chunks;
@@ -1389,19 +1679,23 @@
   // bridge, so the event loop is free between calls and the page can paint and
   // scroll instead of being held for the length of the whole store.
   //
-  // Marks clear PER CHUNK. That gives up the all-or-nothing property a single
-  // setMany had — but it gives it up in the same direction the localStorage
-  // path already works (per key), so a refusal part way leaves exactly the
-  // unwritten shards dirty for the next pass. The rejection still propagates,
-  // so the caller reports the failure.
-  function writeChunks(s, chunks, i) {
+  // A refused call puts back the marks of that chunk AND of every chunk not
+  // yet attempted, so the next pass retries exactly what did not land. The
+  // rejection still propagates, so the caller reports the failure.
+  function writeChunks(s, chunks, i, stats) {
     if (i >= chunks.length) return Promise.resolve(null);
     const chunk = chunks[i];
     const batch = {};
     chunk.forEach((w) => { batch[w.key] = w.value; });
-    return Promise.resolve(s.setMany(batch)).then(() => {
-      chunk.forEach((w) => clearMark(w.mark));
-      return writeChunks(s, chunks, i + 1);
+    return Promise.resolve().then(() => s.setMany(batch)).then(() => {
+      chunk.forEach((w) => {
+        if (w.hash) persisted.set(w.key, w.hash);
+        if (stats) { stats.written += 1; stats.chars += (w.str || '').length; }
+      });
+      return writeChunks(s, chunks, i + 1, stats);
+    }, (e) => {
+      for (let j = i; j < chunks.length; j += 1) chunks[j].forEach((w) => { if (w.undo) w.undo(); });
+      throw e;
     });
   }
 
@@ -1413,16 +1707,17 @@
   // coalesced into a single follow-up pass.
   let flushInFlight = false;
   let flushAgain = false;
+  let flushAgainFull = false;
 
-  function flushShardsAsync() {
+  function flushShardsAsync(full) {
     // Guarded here as well as in saveStore, not only there. saveStore is the
     // normal entry point but not the only possible one, and writing an empty
     // store over intact data is the one irreversible mistake available on this
     // path — so the check belongs at the place that does the writing.
     if (storeLoadFailed) return Promise.resolve();
-    if (flushInFlight) { flushAgain = true; return Promise.resolve(); }
+    if (flushInFlight) { flushAgain = true; flushAgainFull = flushAgainFull || !!full; return Promise.resolve(); }
     flushInFlight = true;
-    return applyPlanAsync(buildFlushPlan()).then(() => {
+    return applyPlanAsync(buildFlushPlan(full)).then(() => {
       flushInFlight = false;
       if (saveFailure) { saveFailure = null; renderStorageWarning(); }
       if (legacyLocalPending) clearLocalStorageCopy();
@@ -1431,7 +1726,12 @@
       // lands for the NEXT read, which is soon enough for a meter and a
       // threshold that only matters at 75%.
       probePdaStorageUsage();
-      if (flushAgain) { flushAgain = false; return flushShardsAsync(); }
+      if (flushAgain) {
+        const again = flushAgainFull;
+        flushAgain = false;
+        flushAgainFull = false;
+        return flushShardsAsync(again);
+      }
       // Pruning reads storageStats, which for this backend is refreshed from
       // usage() rather than tracked per write — see refreshPdaUsage.
       if (maybePrune(false)) { flushAgain = false; return flushShardsAsync(); }
@@ -1439,6 +1739,7 @@
     }, (e) => {
       flushInFlight = false;
       flushAgain = false;
+      flushAgainFull = false;
       console.warn('[TornPokerHUD] Save failed', e);
       if (!saveFailure) saveFailure = { at: Date.now(), message: (e && e.message) || String(e) };
       renderStorageWarning();
@@ -1481,16 +1782,17 @@
       // mutation that never marked its player is persisted anyway. This is
       // what makes the dirty-marking safe rather than merely fast.
       const now = Date.now();
+      let full = false;
       if (now - lastReconcileAt >= STORE_RECONCILE_MS) {
-        markAllDirty();
+        full = true;
         lastReconcileAt = now;
       }
       // A load that failed must never be followed by a write: the store in
       // memory is empty and the real one is intact on disk.
       if (storeLoadFailed) return;
-      if (pdaBackend) { flushShardsAsync(); return; }
+      if (pdaBackend) { flushShardsAsync(full); return; }
       try {
-        flushShards();
+        flushShards(full);
         // Only now is the legacy blob redundant: its contents are in shards
         // that have actually been accepted. Removing it any earlier turns a
         // refused write into total data loss, and leaving it forever would
@@ -1518,11 +1820,15 @@
         // that can be freed to let its own replacement land. The risk taken is
         // a crash inside the retry below — milliseconds — against a deadlock
         // that is certain. Taken ONLY after a refusal, never pre-emptively.
-        if (legacyBlobPending) {
-          shardRemove(STORAGE_KEY);
+        // The pre-v1.98.0 section keys are the same kind of thing: a copy of
+        // what is in memory, sitting beside the keys replacing it.
+        if (legacyBlobPending || legacySectionsPending) {
+          if (legacyBlobPending) shardRemove(STORAGE_KEY);
+          if (legacySectionsPending) { shardRemove(SHARD_HANDS); shardRemove(SHARD_PL); }
           legacyBlobPending = false;
+          legacySectionsPending = false;
           try {
-            flushShards();
+            flushShards(true);
             if (saveFailure) { saveFailure = null; renderStorageWarning(); }
             if (maybePrune(false)) saveStore();
             return;
@@ -1579,8 +1885,9 @@
     const out = { players: 0, hands: 0, ledger: 0, core: 0, total: 0 };
     const players = (STORE && STORE.players) || {};
     Object.keys(players).forEach((xid) => { out.players += size(players[xid]); });
-    out.hands = size((STORE && STORE.hands) || []);
-    out.ledger = size((STORE && STORE.plLedger) || []);
+    // As the plan lays them out: a key per hand, the ledger in chunks.
+    handShardEntries((STORE && STORE.hands) || []).forEach((e) => { out.hands += size(e.value); });
+    ledgerShardEntries((STORE && STORE.plLedger) || [], ledgerBase).forEach((e) => { out.ledger += size(e.value); });
     out.core = size(STORE ? coreSnapshot() : {});
     out.total = out.players + out.hands + out.ledger + out.core;
     return out;
@@ -9620,7 +9927,12 @@
     if (room) row.n = room;
     STORE.plLedger.push(row);
     if (STORE.plLedger.length > PL_LEDGER_CAP) {
-      STORE.plLedger.splice(0, STORE.plLedger.length - PL_LEDGER_CAP);
+      const evicted = STORE.plLedger.length - PL_LEDGER_CAP;
+      STORE.plLedger.splice(0, evicted);
+      // The chunks are numbered by absolute row, so the rows that left the
+      // front move the base, not every chunk after them — see
+      // LEDGER_CHUNK_ROWS. The one place rows leave the front.
+      ledgerBase += evicted;
     }
     // Marked here, beside the append. Core (hero.netChips) is marked by
     // saveStore itself, so the row and the total it sums to land together.
@@ -15525,6 +15837,17 @@
       const legacy = shardRead(STORAGE_KEY);
       L.push('  legacy blob: ' + (legacy ? fmtBytes(legacy.length) + ' STILL PRESENT' : 'none')
         + (legacyBlobPending ? '  (pending removal after the next successful save)' : ''));
+      // The v1.98.0 layout, and whether writing only what changed is holding
+      // on this device: a quiet reconcile should read "wrote 0".
+      const onDisk = persistedKeys();
+      const count = (pre) => onDisk.filter((k) => k.indexOf(pre) === 0).length;
+      L.push(`  layout: ${count(SHARD_HAND)} hand keys, ${count(SHARD_LEDGER)} ledger chunks `
+        + `(${LEDGER_CHUNK_ROWS} rows), ${count(SHARD_PLAYER)} player keys`
+        + (legacySectionsPending ? '  (pre-v1.98.0 hands/pl keys pending removal)' : ''));
+      const fs = (x) => (x ? `wrote ${x.written} (${fmtBytes(x.chars)}), skipped ${x.skipped} unchanged, `
+        + `removed ${x.removed}, ${Math.round((Date.now() - x.at) / 1000)}s ago` : 'none yet this page');
+      L.push('  last save: ' + fs(lastFlushStats));
+      L.push('  last reconcile: ' + fs(lastReconcileStats));
       const pr = STORE && STORE.lastPrune;
       L.push('  lastPrune: ' + (pr && pr.dropped
         ? `${new Date(pr.at).toLocaleDateString()} dropped ${pr.dropped} `
@@ -16484,6 +16807,18 @@
       markAllDirty,
       dirtyPlayers,
       removedPlayers,
+      runDeepScan,
+      persisted,
+      contentHash,
+      handShardEntries,
+      ledgerShardEntries,
+      LEDGER_CHUNK_ROWS,
+      PDA_WRITE_CHARS,
+      get ledgerBase() { return ledgerBase; },
+      set ledgerBase(v) { ledgerBase = v; },
+      get legacySectionsPending() { return legacySectionsPending; },
+      get lastFlushStats() { return lastFlushStats; },
+      get lastReconcileStats() { return lastReconcileStats; },
       get dirtyCore() { return dirtyCore; },
       set dirtyCore(v) { dirtyCore = v; },
       get dirtyHands() { return dirtyHands; },

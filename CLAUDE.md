@@ -492,16 +492,22 @@ string up to four times a second to record one call.
 | key | holds | changes |
 |---|---|---|
 | `<key>:core` | settings, hero, session, flags (~2 KB) | most saves, cheap |
-| `<key>:hands` | `STORE.hands` (~412 KB) | once per hand |
-| `<key>:pl` | `STORE.plLedger` (~1259 KB) | once per hand |
+| `<key>:h:<id>` | one hand, by game id (~1.5 KB) | one new key per hand (v1.98.0) |
+| `<key>:L:<n>` | 500 ledger rows, `{s, r}` (~25 KB) | only the newest, per hand (v1.98.0) |
 | `<key>:p:<xid>` | one player (~1.4 KB) | individually |
+
+(`<key>:hands` and `<key>:pl` — the whole history and ledger as one key each —
+are the pre-v1.98.0 layout. Still read on load; see "Only what changed is
+written" below.)
 
 Measured through the real save path at 900 players: **one action 19ms → 0.037ms
 (510x)**, hand settlement 11ms, full reconcile 23ms once a minute.
 
 **Three things hold this up. All three are load-bearing:**
 
-- **A missed dirty mark must not be data loss.** Players are marked in
+- **A missed dirty mark must not be data loss.** (Since v1.98.0 the reconcile
+  *checks* every shard and writes only the ones whose content changed — see
+  "Only what changed is written" below. The guarantee is the same.) Players are marked in
   `getPlayer()` — which marks on EVERY call, including read-only ones, because
   it hands out the live record and cannot see whether the caller wrote to it —
   plus the handful of sites that reach `STORE.players[xid]` directly. Proving
@@ -558,6 +564,48 @@ inside the retry — milliseconds — against a deadlock that is certain. **Only
 after a refusal, never pre-emptively**, and `test/store-shards.test.js` pins
 both directions with a real byte budget rather than a blanket failure, because
 "fails until the blob goes, then succeeds" IS the bug.
+
+### Only what changed is written (v1.98.0)
+
+Measured at 900 players / 300 hands / 20,000 ledger rows through the real save
+path: a quiet reconcile 2.9 MB → **nothing**, a settled hand 1.42 MB → **43 KB**,
+at equal or lower CPU. On the native backend that is the bridge traffic behind
+the v1.76.0 scrolling report, gone rather than chunked.
+
+- **`persisted` is a fingerprint of every key on disk**, seeded from what the
+  loader read and updated by every write and removal that lands, on BOTH
+  backends. `buildFlushPlan` skips a shard whose serialised content matches.
+  That is what keeps the reconcile safe while writing nothing: a change nobody
+  marked is changed content. Don't replace the content check with a "was it
+  marked" check — that is the thing the reconcile exists not to trust.
+- **It is also the list of what is persisted.** `shardKeys()` reads
+  localStorage only, so on the native backend it listed nothing — and
+  `replaceStore` used it, so "Reset all data" restored every player on the
+  next reload. Use `persistedKeys()` for "what is on disk".
+- **Marks are taken at plan time and restored by `undo` on a refusal**, never
+  cleared when a write lands: clearing on landing wiped a mark set while a
+  native write was in flight.
+- **Ledger chunks are numbered by ABSOLUTE row** (`ledgerBase` + index), and
+  each chunk stores its own start, so eviction at the cap touches the oldest
+  and newest chunk only. `pushLedgerEntry` is the one place rows leave the
+  front and the one place `ledgerBase` moves; a wrong base costs a rewrite,
+  never a row. The first cut forgot to move it, and the eviction test caught
+  every chunk being rewritten.
+- **`ledgerChunkMemo` trusts rows to be immutable between reconciles only.**
+  The reconcile hashes every chunk; a test edits a row in place and requires
+  the reconcile to write it.
+- **The old `:hands`/`:pl` keys are removed only after a pass that wrote their
+  replacement without a refusal** (`legacySectionsPending`), and unioned with
+  the new layout at load if both exist. On a sync refusal they are dropped and
+  the write retried, the same deadlock rule as the legacy blob.
+- **Hot loops: bind globals locally.** `Math.imul` looked up per character ran
+  130x slower under the harness's vm sandbox (a 910ms reconcile). Bound once
+  (`const imul`) it is 3ms. The harness is where this file gets measured, so a
+  loop it cannot run fast is a loop nobody can measure.
+
+The deep scan prints the layout and what the last save and last reconcile
+wrote/skipped — a quiet reconcile reads `wrote 0`. That line is how this gets
+confirmed on the device.
 
 ### Anything the LOAD PATH reaches must be declared above bootStore() (v1.73.0)
 
@@ -2920,7 +2968,7 @@ is attributed.
 secret-Gist mirror. Clearing the app's browser data wipes it.
 
 **Sharded across several keys under the `tornPokerHUD_v1:` prefix** since
-v1.69.0 — see "The store is sharded" above for the layout and the invariants.
+v1.69.0 (hands and ledger split further in v1.98.0) — see "The store is sharded" above for the layout and the invariants.
 `tornPokerHUD_v1` itself is the pre-v1.69.0 single blob, read once on upgrade
 and removed after the first successful sharded save.
 

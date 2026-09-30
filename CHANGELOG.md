@@ -9,6 +9,69 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.98.0
+Saving writes only what changed
+
+Two storage changes asked for together, plus a data-loss bug found while
+building them. Measured at the documented store size (900 players, 300 hands,
+20,000 ledger rows) through the real save path:
+
+| | before | after |
+|---|---|---|
+| once-a-minute reconcile, nothing changed | 24.5ms, **2.9 MB written** | 22.4ms, **nothing written** |
+| one action | 0.1ms, 2.7 KB | ~0ms, 1.7 KB |
+| a settled hand | 14.9ms, **1.42 MB** | 6.7ms, **43 KB** |
+| page load | 39.3ms, then a full rewrite | 30.8ms, then nothing |
+
+**The reconcile checks instead of rewriting.** Every 60s it wrote every shard
+regardless of marks — the net that makes a missed dirty mark cost one minute
+rather than data. On the native backend that is ~3 MB across the PDA bridge
+every minute, the traffic behind the v1.76.0 "page stops scrolling" report,
+still paid in 48-key pieces. Every write now records a fingerprint of what it
+put on disk (`persisted`, seeded from what the loader read), and a shard whose
+serialised content still matches is skipped. The safety is the same — a
+change nobody marked is changed content, which does not match — and
+`test/store-delta.test.js` pins that directly: an unmarked edit is not written
+between reconciles and IS written by the next one, alone.
+
+**Hands and the ledger are no longer one key each.** A hand is its own key,
+by Torn's game id (`:h:g<id>`); the ledger is 500-row chunks numbered by
+ABSOLUTE row (`:L:<n>`, each carrying its own start), so evicting from the
+front at the 20,000-row cap changes only the oldest chunk rather than
+shifting every one. The old `:hands` and `:pl` keys are read on load — unioned
+with the new layout if both are present, for an interrupted migration — and
+removed only after their replacement has been written, the legacy blob's rule.
+Native writes are now capped by size (64 KB) as well as by key count, so a
+first write of a full ledger is several small calls, not one of 1.3 MB.
+
+**Marks are taken when the plan is built and put back on a refusal**, instead
+of cleared when the write lands. Clearing on landing wiped any mark set while
+a native write was in flight, so a hand settled during a save waited for the
+next reconcile. Pinned with a held `setMany`.
+
+**"Reset all data" on the native backend brought every player back.**
+`replaceStore` (reset, import, gist merge) found the persisted player keys
+with `shardKeys()`, which only ever reads localStorage — empty once the store
+lives in `PDA_storage`. So a reset cleared the screen and the next reload
+restored everyone. It now uses the same on-disk index. Reproduced first,
+pinned in `test/store-delta.test.js`.
+
+One measurement trap, worth knowing for any future hot loop: the first cut
+reconciled in **910ms** under the test harness. `Math.imul` looked up per
+character is 130x slower inside Node's vm sandbox (397ms against 3ms for
+1.1 MB). Bound to a local once, it is 3ms. No browser was ever going to pay
+that, but the harness measures honestly now.
+
+The deep scan's storage block prints the layout (hand keys, ledger chunks,
+player keys, old keys pending) and what the last save and last reconcile
+wrote and skipped — a quiet reconcile should read `wrote 0`.
+
+`test/store-delta.test.js` (36), plus three new boot-path cases for the new
+layout, a mixed layout and a corrupt hand key. Each key assertion was checked
+by mutation: listing players from localStorage again, never skipping unchanged
+shards, clearing marks on landing, and trusting the ledger chunk cache during a
+reconcile each fail it.
+
 ## 1.97.0
 
 Tap Leave twice to confirm, same as Fold.

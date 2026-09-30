@@ -33,6 +33,13 @@ const keysUnder = (T) => {
   return out.sort();
 };
 const flush = (T) => { T.saveStore(); T._sandbox.runTimers(); };
+// Hands and the ledger as stored since v1.98.0: a key per hand, and the
+// ledger in chunks that each say where they start.
+const storedHands = (T) => keysUnder(T).filter((k) => k.indexOf(KEY + ':h:') === 0)
+  .map((k) => JSON.parse(raw(T, k)));
+const storedLedger = (T) => keysUnder(T).filter((k) => k.indexOf(KEY + ':L:') === 0)
+  .map((k) => JSON.parse(raw(T, k))).sort((a, b) => a.s - b.s)
+  .reduce((all, c) => all.concat(c.r), []);
 
 function seeded(n) {
   const T = load();
@@ -50,8 +57,7 @@ function seeded(n) {
 {
   const T = seeded(3);
   t.ok('core is written', !!raw(T, KEY + ':core'));
-  t.ok('hands has its own shard', raw(T, KEY + ':hands') !== null);
-  t.ok('the ledger has its own shard', raw(T, KEY + ':pl') !== null);
+  t.ok('no pre-v1.98.0 section key is written', raw(T, KEY + ':hands') === null && raw(T, KEY + ':pl') === null);
   t.ok('each player has its own key', !!raw(T, KEY + ':p:x1'));
   t.eq('three players, three player keys',
     keysUnder(T).filter((k) => k.indexOf(KEY + ':p:') === 0).length, 3);
@@ -109,12 +115,14 @@ function seeded(n) {
   flush(T);
 
   t.ok('the touched player is written', written.indexOf(KEY + ':p:x2') !== -1);
-  // Core rides along on every save since v1.83.1 (~2 KB, and it is where
-  // hero.netChips lives) — see the settlement block below.
-  t.eq('and nothing else but core is', written.slice().sort().join(' '),
-    [KEY + ':core', KEY + ':p:x2'].sort().join(' '));
+  // Core is CHECKED on every save since v1.83.1 (it is where hero.netChips
+  // lives — see the settlement block below), and since v1.98.0 written only
+  // when its content changed. It did not here.
+  t.eq('and nothing else is — not even an unchanged core', written.slice().sort().join(' '),
+    KEY + ':p:x2');
   t.ok('untouched players are not rewritten', written.indexOf(KEY + ':p:x0') === -1);
-  t.ok('the ledger is not rewritten for a preflop call', written.indexOf(KEY + ':pl') === -1);
+  t.ok('the ledger is not rewritten for a preflop call',
+    !written.some((k) => k.indexOf(KEY + ':L:') === 0));
 }
 
 // --- A settled hand lands at once, not a reconcile later (v1.83.1) ----------
@@ -141,9 +149,9 @@ function midInterval(T) {
   h.winners = [];
   T.recordHandHistory(h);
   flush(T);
-  const stored = JSON.parse(raw(T, KEY + ':hands'));
-  t.ok('a recorded hand reaches the hands shard inside the reconcile window',
-    stored.some((x) => x.g === 'abc123'));
+  const stored = storedHands(T);
+  t.ok('a recorded hand reaches its own key inside the reconcile window',
+    stored.some((x) => x.g === 'abc123') && raw(T, KEY + ':h:gabc123') !== null);
   t.ok('and the mark is cleared by that write', !T.dirtyHands);
 }
 
@@ -153,8 +161,8 @@ function midInterval(T) {
   T.STORE.hero.netChips = 5000;
   T.pushLedgerEntry(5000, 100, 'g1');
   flush(T);
-  const rows = JSON.parse(raw(T, KEY + ':pl'));
-  t.ok('a ledger row reaches the pl shard inside the reconcile window',
+  const rows = storedLedger(T);
+  t.ok('a ledger row reaches a ledger chunk inside the reconcile window',
     rows.some((r) => r.g === 'g1' && r.d === 5000));
   t.eq('and the total it sums to lands in the SAME save',
     JSON.parse(raw(T, KEY + ':core')).hero.netChips, 5000);
@@ -170,7 +178,7 @@ function midInterval(T) {
   T.resetProfitLoss();
   T._sandbox.runTimers();
   t.eq('a P/L reset empties the stored ledger, not just the one in memory',
-    JSON.parse(raw(T, KEY + ':pl')).length, 0);
+    storedLedger(T).length, 0);
   t.eq('and zeroes the stored total beside it',
     JSON.parse(raw(T, KEY + ':core')).hero.netChips, 0);
 }
@@ -184,7 +192,7 @@ function midInterval(T) {
   T.resetHeroStats();
   T._sandbox.runTimers();
   t.eq('resetting hero stats empties the stored ledger too',
-    JSON.parse(raw(T, KEY + ':pl')).length, 0);
+    storedLedger(T).length, 0);
 }
 
 {
