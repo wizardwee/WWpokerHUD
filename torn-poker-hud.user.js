@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.96.0
+// @version      1.97.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,16 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.97.0 - Tap Leave twice to confirm, same as Fold.
+ *            - Asked for: a guard on leaving the seat. It shares the fold
+ *              guard's handler, so it never acts for you, lets the second tap
+ *              through untouched, and passes the tap straight on if anything
+ *              fails. Its own toggle in Settings > Fold guard; on by default.
+ *            - Arming Fold never confirms Leave, or the other way round.
+ *            - Unconfirmed: nobody has scanned the leave button, so it is
+ *              matched by label ("Leave", "Stand up", or its aria-label). The
+ *              deep scan gains a "leave control" line; NONE there means the
+ *              guard cannot fire yet and the label needs one scan to fix.
  * 1.96.0 - Faster departure alerts, and a one-tap attack button.
  *            - Reported: the pill was too slow to notify and hit someone.
  *              The HUD now reads Torn's own "X left the table" log line
@@ -32,12 +42,6 @@
  *            v1.37.0; the heading now says so, and that a NO MATCH there
  *            means Torn changed its layout. $10M High Rollers is confirmed
  *            by a v1.94.0 scan. No behaviour change.
- * 1.95.0 - P/L by table, not just by stake.
- *            - Each hand's P/L row now records the room you tapped, so Cat's
- *              Chance and Cat's Chance II get their own lines ("By table").
- *            - From now on only: earlier hands stay grouped by blind, shown
- *              as "$2.5M BB, room not recorded" beside the room lines.
- *            - The P/L CSV gains a table column.
  */
 
 /*
@@ -79,7 +83,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.96.0';
+  const HUD_VERSION = '1.97.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -552,6 +556,7 @@
     minTableStake: 0,    // hide table-list rows showing less than this; 0 = show all
     turnSound: false,   // opt-in: a synthesised two-note chime
     foldGuard: true,    // tap Fold twice to confirm — see foldGuardHandler
+    leaveGuard: true,   // tap Leave twice to confirm — same handler
     heroName: '',      // YOUR Torn username. Without it P/L and position can't be attributed.
     // Monte Carlo samples per equity estimate. Exposed in Settings because
     // this is by far the most expensive thing the script does, and the phones
@@ -12451,16 +12456,17 @@
     if (ctx && ctx.state === 'suspended') ctx.resume().catch(() => {});
   }
 
-  // --- Fold misclick guard ---------------------------------------------------
+  // --- Fold / leave misclick guard ------------------------------------------
   //
   // The one place friction is worth adding: folding is irreversible, the button
   // sits next to Call, and a phone screen is small. Tap once to arm, tap again
-  // to fold.
+  // to fold. Leaving the seat (v1.97.0) gets the same treatment, by request:
+  // a stray tap stands you up mid-session and costs your seat.
   //
   // Deliberate design limits, because this is the only code in the HUD that
   // touches the game's own controls:
   //
-  // - It NEVER folds for you. There is no synthetic click anywhere here; the
+  // - It NEVER acts for you. There is no synthetic click anywhere here; the
   //   second tap is your real tap, passed through untouched. The HUD stays
   //   advisory.
   // - It fails OPEN. Any error, any unrecognised button, and the click goes
@@ -12468,10 +12474,20 @@
   //   no guard.
   // - Missing the window costs nothing. Torn folds you on timeout anyway, so
   //   the worst case of hesitating is the outcome you were choosing regardless.
+  //
+  // ONE armed state, tagged with its kind: arming Fold and then tapping Leave
+  // must re-arm for Leave, never confirm it. Each kind has its own setting.
   const FOLD_ARM_MS = 4000;      // how long the confirm stays live
   const FOLD_MIN_GAP_MS = 250;   // a second tap sooner than this is a double-fire
 
-  let foldArmedAt = 0;
+  let guardArmedAt = 0;
+  let guardArmedKind = null;
+
+  function disarmGuard() {
+    guardArmedAt = 0;
+    guardArmedKind = null;
+    hideFoldPrompt();
+  }
 
   function isFoldControl(el) {
     if (!el || el.closest('[class^="tph-"], [class*=" tph-"]')) return false; // our own UI
@@ -12484,51 +12500,90 @@
     return /\bfold\b/i.test(text) ? btn : false;
   }
 
+  // The leave control has NEVER been scanned: its label and element type are
+  // unknown. So it is matched by visible text first, then aria-label / title
+  // (an icon-only button carries no text), and links count as well as buttons.
+  // Anything that does not match passes straight through — unconfirmed means
+  // unguarded, never blocked. The deep scan's "leave control" line settles it.
+  const LEAVE_BTN_RE = /\b(leave|stand\s*up)\b/i;
+
+  function controlLabel(btn) {
+    const text = (btn.textContent || '').trim();
+    if (text) return text;
+    return ((btn.getAttribute && (btn.getAttribute('aria-label') || btn.getAttribute('title'))) || '').trim();
+  }
+
+  function isLeaveControl(el) {
+    if (!el || el.closest('[class^="tph-"], [class*=" tph-"]')) return false; // our own UI
+    const btn = el.closest('button, [role="button"], a');
+    if (!btn) return null;
+    const label = controlLabel(btn);
+    if (!label || label.length >= ACTION_BTN_MAX_LEN) return false;
+    // A fold control is never a leave control, whatever else it says.
+    if (/\bfold\b/i.test(label)) return false;
+    return LEAVE_BTN_RE.test(label) ? btn : false;
+  }
+
+  // Which guarded control (if any) this tap landed on, honouring each setting.
+  function guardedControl(el) {
+    if (STORE.settings.foldGuard) {
+      const btn = isFoldControl(el);
+      if (btn) return { btn, kind: 'fold' };
+    }
+    if (STORE.settings.leaveGuard) {
+      const btn = isLeaveControl(el);
+      if (btn) return { btn, kind: 'leave' };
+    }
+    return null;
+  }
+
   function foldGuardHandler(e) {
     try {
-      if (!STORE.settings.foldGuard) return;
-      const btn = isFoldControl(e.target);
-      if (!btn) return;
+      const hit = guardedControl(e.target);
+      if (!hit) return;
+      const { btn, kind } = hit;
 
       const now = Date.now();
-      const elapsed = now - foldArmedAt;
+      const elapsed = now - guardArmedAt;
+      const armedHere = guardArmedAt && guardArmedKind === kind;
 
-      // Armed, and this is a deliberate second tap — let the real click through.
-      if (foldArmedAt && elapsed >= FOLD_MIN_GAP_MS && elapsed <= FOLD_ARM_MS) {
-        foldArmedAt = 0;
-        hideFoldPrompt();
-        noteUse('event:foldguard-confirmed');
+      // Armed for THIS control, and a deliberate second tap — let it through.
+      if (armedHere && elapsed >= FOLD_MIN_GAP_MS && elapsed <= FOLD_ARM_MS) {
+        disarmGuard();
+        noteUse('event:' + kind + 'guard-confirmed');
         return;
       }
       // A second tap inside FOLD_MIN_GAP_MS is a fat-finger double-fire, not a
       // confirmation. Swallow it and keep the window open.
-      if (foldArmedAt && elapsed < FOLD_MIN_GAP_MS) {
+      if (armedHere && elapsed < FOLD_MIN_GAP_MS) {
         e.preventDefault();
         e.stopPropagation();
         return;
       }
 
-      // First tap: block it and arm.
+      // First tap (or a different guarded control): block it and arm.
       e.preventDefault();
       e.stopPropagation();
-      foldArmedAt = now;
-      showFoldPrompt(btn);
-      noteUse('event:foldguard-caught');
+      guardArmedAt = now;
+      guardArmedKind = kind;
+      showFoldPrompt(btn, kind);
+      noteUse('event:' + kind + 'guard-caught');
       setTimeout(() => {
-        if (Date.now() - foldArmedAt >= FOLD_ARM_MS) { foldArmedAt = 0; hideFoldPrompt(); }
+        if (Date.now() - guardArmedAt >= FOLD_ARM_MS) disarmGuard();
       }, FOLD_ARM_MS + 50);
     } catch (err) {
       // Fail open, always.
-      foldArmedAt = 0;
-      console.warn('[TornPokerHUD] fold guard error, passing the click through', err);
+      guardArmedAt = 0;
+      guardArmedKind = null;
+      console.warn('[TornPokerHUD] misclick guard error, passing the click through', err);
     }
   }
 
-  function showFoldPrompt(btn) {
+  function showFoldPrompt(btn, kind) {
     hideFoldPrompt();
     const el = document.createElement('div');
     el.className = 'tph-fold-prompt';
-    const label = (btn.textContent || 'fold').trim();
+    const label = controlLabel(btn) || kind || 'fold';
     el.innerHTML = `<b>Tap “${escapeHtml(label)}” again to confirm</b>`
       + `<span class="tph-fold-sub">misclick guard · expires in ${FOLD_ARM_MS / 1000}s</span>`;
     document.body.appendChild(el);
@@ -14619,8 +14674,9 @@
         your turn after ${TURN_ESCALATE_MS / 1000}s. Keep buzzing adds up to ${TURN_REBUZZ_MAX} more buzzes, no chime.
         Sound and buzz need one tap on the page first — use Test. iPhones can't vibrate.</div>
       <h4>Fold guard</h4>
-      <label><input type="checkbox" class="tph-foldguard-toggle" ${STORE.settings.foldGuard ? 'checked' : ''}> Tap Fold twice to confirm</label>
-      <div style="opacity:.7;margin:2px 0 10px">Stops a misclick on Fold. Never folds for you; confirm within
+      <label><input type="checkbox" class="tph-foldguard-toggle" ${STORE.settings.foldGuard ? 'checked' : ''}> Tap Fold twice to confirm</label><br>
+      <label><input type="checkbox" class="tph-leaveguard-toggle" ${STORE.settings.leaveGuard ? 'checked' : ''}> Tap Leave twice to confirm</label>
+      <div style="opacity:.7;margin:2px 0 10px">Stops a misclick. Never acts for you; confirm within
         ${FOLD_ARM_MS / 1000}s. If anything fails, the tap goes straight through.</div>
       <h4>Coach</h4>
       <label><input type="checkbox" class="tph-coach-toggle" ${STORE.settings.coachHidden ? '' : 'checked'}> Show coach panel</label><br>
@@ -14926,7 +14982,12 @@
     panel.querySelector('.tph-foldguard-toggle').addEventListener('change', (e) => {
       STORE.settings.foldGuard = e.target.checked;
       saveStore();
-      if (!e.target.checked) { foldArmedAt = 0; hideFoldPrompt(); }
+      if (!e.target.checked) disarmGuard();
+    });
+    panel.querySelector('.tph-leaveguard-toggle').addEventListener('change', (e) => {
+      STORE.settings.leaveGuard = e.target.checked;
+      saveStore();
+      if (!e.target.checked) disarmGuard();
     });
     panel.querySelector('.tph-selfbadge-toggle').addEventListener('change', (e) => {
       STORE.settings.showSelfBadge = e.target.checked;
@@ -15406,6 +15467,16 @@
     L.push('actionButtons by TEXT: ' + btns.length
       + (btns.length ? ' -> ' + btns.map((b) => JSON.stringify(squish(b.textContent, 20))).join(' ') : '')
       + (btns.length ? '' : '  <-- run this scan again ON YOUR TURN'));
+    // The leave control has never been scanned, so the guard on it is
+    // unconfirmed until this line names it — see isLeaveControl.
+    (() => {
+      const found = [];
+      document.querySelectorAll('button, [role="button"], a').forEach((b) => {
+        if (isLeaveControl(b)) found.push(b.tagName + ' ' + JSON.stringify(squish(controlLabel(b), 20)));
+      });
+      L.push('leave control: ' + (found.length ? found.join(' ') : 'NONE matched — the leave guard cannot fire')
+        + '   guard: ' + (STORE.settings.leaveGuard ? 'on' : 'off'));
+    })();
     L.push('activeSeat: ' + (activeSeatXid() || 'NO MATCH for ' + SELECTORS.seatActive));
     // Whether hero is IN the ring is the load-bearing part, not the ring
     // itself: isHeroNextToAct walks it looking for hero, so a ring that omits
@@ -16151,11 +16222,14 @@
       BIG_LOSS_MEMORY_HANDS,
       HEAT_WIN_PCT,
       isFoldControl,
+      isLeaveControl,
       foldGuardHandler,
       FOLD_ARM_MS,
       FOLD_MIN_GAP_MS,
-      get foldArmedAt() { return foldArmedAt; },
-      set foldArmedAt(v) { foldArmedAt = v; },
+      get guardArmedAt() { return guardArmedAt; },
+      set guardArmedAt(v) { guardArmedAt = v; },
+      get guardArmedKind() { return guardArmedKind; },
+      set guardArmedKind(v) { guardArmedKind = v; },
       handRoles,
       roleTagText,
       handClassFromCards,

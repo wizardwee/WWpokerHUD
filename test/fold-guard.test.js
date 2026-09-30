@@ -27,6 +27,7 @@ function button(text, opts = {}) {
       if (sel.includes('button')) return el;
       return null;
     },
+    getAttribute(name) { return (opts.attrs || {})[name] || null; },
   };
   return el;
 }
@@ -65,67 +66,67 @@ t.eq('a long string is not a control',
 
 {
   T.STORE.settings.foldGuard = true;
-  T.foldArmedAt = 0;
+  T.guardArmedAt = 0;
   ['Call $2,500,000', 'Raise', 'Check'].forEach((label) => {
     const e = clickEvent(button(label));
     T.foldGuardHandler(e);
     t.ok(`"${label}" is never delayed`, !e.defaultPrevented && !e.propagationStopped);
   });
-  t.eq('and nothing gets armed by them', T.foldArmedAt, 0);
+  t.eq('and nothing gets armed by them', T.guardArmedAt, 0);
 }
 
 // --- Arm, then confirm ------------------------------------------------------
 
 {
   T.STORE.settings.foldGuard = true;
-  T.foldArmedAt = 0;
+  T.guardArmedAt = 0;
 
   const first = clickEvent(button('Fold'));
   T.foldGuardHandler(first);
   t.ok('the first tap is blocked', blocked(first));
-  t.ok('and arms the guard', T.foldArmedAt > 0);
+  t.ok('and arms the guard', T.guardArmedAt > 0);
 
   // Backdate the arm so the second tap reads as deliberate rather than a
   // double-fire, without waiting in real time.
-  T.foldArmedAt = Date.now() - (T.FOLD_MIN_GAP_MS + 50);
+  T.guardArmedAt = Date.now() - (T.FOLD_MIN_GAP_MS + 50);
 
   const second = clickEvent(button('Fold'));
   T.foldGuardHandler(second);
   t.ok('the second tap passes through', !second.defaultPrevented && !second.propagationStopped);
-  t.eq('and disarms', T.foldArmedAt, 0);
+  t.eq('and disarms', T.guardArmedAt, 0);
 }
 
 // A fat-finger double-fire is not a confirmation.
 {
-  T.foldArmedAt = 0;
+  T.guardArmedAt = 0;
   const first = clickEvent(button('Fold'));
   T.foldGuardHandler(first);
-  const armedAt = T.foldArmedAt;
+  const armedAt = T.guardArmedAt;
 
   const bounce = clickEvent(button('Fold')); // immediately, same gesture
   T.foldGuardHandler(bounce);
   t.ok('an instant second tap is swallowed', blocked(bounce));
-  t.eq('and the window stays open', T.foldArmedAt, armedAt);
+  t.eq('and the window stays open', T.guardArmedAt, armedAt);
 }
 
 // An expired window re-arms rather than folding.
 {
-  T.foldArmedAt = Date.now() - (T.FOLD_ARM_MS + 1000);
+  T.guardArmedAt = Date.now() - (T.FOLD_ARM_MS + 1000);
   const late = clickEvent(button('Fold'));
   T.foldGuardHandler(late);
   t.ok('a tap after the window expires is blocked, not passed', blocked(late));
-  t.ok('and re-arms', T.foldArmedAt > Date.now() - 1000);
+  t.ok('and re-arms', T.guardArmedAt > Date.now() - 1000);
 }
 
 // --- Turned off means completely absent ------------------------------------
 
 {
   T.STORE.settings.foldGuard = false;
-  T.foldArmedAt = 0;
+  T.guardArmedAt = 0;
   const e = clickEvent(button('Fold'));
   T.foldGuardHandler(e);
   t.ok('disabled: the fold goes straight through', !e.defaultPrevented && !e.propagationStopped);
-  t.eq('disabled: nothing is armed', T.foldArmedAt, 0);
+  t.eq('disabled: nothing is armed', T.guardArmedAt, 0);
 }
 
 // --- Fails open -------------------------------------------------------------
@@ -134,7 +135,7 @@ t.eq('a long string is not a control',
 // swallowing a genuine fold is the worst outcome available to it.
 {
   T.STORE.settings.foldGuard = true;
-  T.foldArmedAt = 0;
+  T.guardArmedAt = 0;
   const hostile = {
     tagName: 'BUTTON',
     get textContent() { throw new Error('boom'); },
@@ -145,7 +146,7 @@ t.eq('a long string is not a control',
   try { T.foldGuardHandler(e); } catch (err) { threw = true; }
   t.ok('a throwing target does not propagate an exception', !threw);
   t.ok('and the click is not blocked', !e.defaultPrevented && !e.propagationStopped);
-  t.eq('and the guard is left disarmed', T.foldArmedAt, 0);
+  t.eq('and the guard is left disarmed', T.guardArmedAt, 0);
 }
 
 // A null target is simply not a control.
@@ -160,5 +161,89 @@ t.eq('a long string is not a control',
 t.ok('the confirm window is at least 2s', T.FOLD_ARM_MS >= 2000);
 t.ok('but well under a typical decision clock', T.FOLD_ARM_MS <= 10000);
 t.ok('the double-fire guard is short enough not to feel laggy', T.FOLD_MIN_GAP_MS <= 400);
+
+// --- Leave seat (v1.97.0) ---------------------------------------------------
+//
+// Same guard, second control. The leave button's label has never been scanned,
+// so it is matched by text, then aria-label/title for an icon-only button.
+
+t.ok('a Leave button', !!T.isLeaveControl(button('Leave')));
+t.ok('Leave table', !!T.isLeaveControl(button('Leave table')));
+t.ok('Stand up', !!T.isLeaveControl(button('Stand up')));
+t.ok('an icon button labelled by aria-label',
+  !!T.isLeaveControl(button('', { attrs: { 'aria-label': 'Leave the table' } })));
+t.ok('an icon button labelled by title',
+  !!T.isLeaveControl(button('', { attrs: { title: 'Leave' } })));
+['Fold', 'Call $2,500,000', 'Raise', 'Check', 'Check / Fold', 'Sit out', 'Leaves'].forEach((label) => {
+  t.eq(`"${label}" is not a leave control`, T.isLeaveControl(button(label)), false);
+});
+t.eq('our own buttons are ignored', T.isLeaveControl(button('Leave', { isOurs: true })), false);
+t.eq('a long string is not a leave control',
+  T.isLeaveControl(button('Players who leave the table are tracked')), false);
+
+// Arm, then confirm — and nothing else is delayed.
+{
+  T.STORE.settings.foldGuard = true;
+  T.STORE.settings.leaveGuard = true;
+  T.guardArmedAt = 0;
+  T.guardArmedKind = null;
+
+  const first = clickEvent(button('Leave'));
+  T.foldGuardHandler(first);
+  t.ok('leave: the first tap is blocked', blocked(first));
+  t.eq('leave: armed for leave', T.guardArmedKind, 'leave');
+
+  T.guardArmedAt = Date.now() - (T.FOLD_MIN_GAP_MS + 50);
+  const second = clickEvent(button('Leave'));
+  T.foldGuardHandler(second);
+  t.ok('leave: the second tap passes through', !second.defaultPrevented && !second.propagationStopped);
+  t.eq('leave: and disarms', T.guardArmedAt, 0);
+}
+
+// Arming one control must never confirm the other. Fold armed, then Leave
+// tapped: that Leave tap is a FIRST tap and is blocked, and vice versa.
+{
+  T.guardArmedAt = 0;
+  T.guardArmedKind = null;
+  T.foldGuardHandler(clickEvent(button('Fold')));
+  T.guardArmedAt = Date.now() - (T.FOLD_MIN_GAP_MS + 50);
+  const leave = clickEvent(button('Leave'));
+  T.foldGuardHandler(leave);
+  t.ok('armed fold does not confirm a leave', blocked(leave));
+  t.eq('and re-arms for leave', T.guardArmedKind, 'leave');
+
+  T.guardArmedAt = Date.now() - (T.FOLD_MIN_GAP_MS + 50);
+  const fold = clickEvent(button('Fold'));
+  T.foldGuardHandler(fold);
+  t.ok('armed leave does not confirm a fold', blocked(fold));
+  t.eq('and re-arms for fold', T.guardArmedKind, 'fold');
+}
+
+// Each setting governs only its own control.
+{
+  T.STORE.settings.foldGuard = true;
+  T.STORE.settings.leaveGuard = false;
+  T.guardArmedAt = 0;
+  T.guardArmedKind = null;
+  const e = clickEvent(button('Leave'));
+  T.foldGuardHandler(e);
+  t.ok('leave guard off: leave goes straight through', !e.defaultPrevented && !e.propagationStopped);
+  const f = clickEvent(button('Fold'));
+  T.foldGuardHandler(f);
+  t.ok('leave guard off: fold is still guarded', blocked(f));
+
+  T.STORE.settings.foldGuard = false;
+  T.STORE.settings.leaveGuard = true;
+  T.guardArmedAt = 0;
+  T.guardArmedKind = null;
+  const f2 = clickEvent(button('Fold'));
+  T.foldGuardHandler(f2);
+  t.ok('fold guard off: fold goes straight through', !f2.defaultPrevented);
+  const l2 = clickEvent(button('Leave'));
+  T.foldGuardHandler(l2);
+  t.ok('fold guard off: leave is still guarded', blocked(l2));
+}
+
+t.eq('the leave guard is on by default', T.emptyStore().settings.leaveGuard, true);
 
 process.exit(t.report());

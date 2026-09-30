@@ -9,6 +9,26 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.97.0
+
+Tap Leave twice to confirm, same as Fold.
+
+- Asked for: a double-tap guard on leaving the seat. It is the fold guard's
+  handler with a second control, so it inherits the same three rules: it never
+  acts for you (no synthetic click — the confirming tap is yours, passed
+  through untouched), it fails open on any error, and it intercepts nothing but
+  the controls it names. Its own toggle sits under Settings > Fold guard, on by
+  default (existing installs pick it up from the settings defaults on load).
+- One armed state tagged with its kind: arming Fold and then tapping Leave
+  re-arms for Leave rather than confirming it, and the other way round.
+- **Unconfirmed on the device.** No scan has ever captured the leave button, so
+  its label and element type are guesses: it is matched by visible text, then
+  aria-label / title (an icon-only button has no text), against "leave" or
+  "stand up", and links count as well as buttons. Anything unmatched passes
+  straight through — unconfirmed means unguarded, never blocked. The deep scan
+  gains a `leave control:` line naming what matched; `NONE matched` there means
+  the guard cannot fire and one scan will say what the label really is.
+
 ## 1.96.0
 Faster departure alerts, and a one-tap attack button
 
