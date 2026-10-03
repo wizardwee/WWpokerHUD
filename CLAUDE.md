@@ -527,8 +527,10 @@ Measured through the real save path at 900 players: **one action 19ms → 0.037m
   `saveStore()` marks core unconditionally (~2 KB; written from too many sites
   to enumerate). The reconcile is the net for a missed mark, not the mechanism
   for a whole shard. `test/store-shards.test.js` pins each mark by mutation.
-- **A mark is cleared only by its OWN successful write.** A refused write
-  leaves that shard dirty so the next save retries it. `flushShards` also
+- **A mark is never lost to a refused write.** Since v1.98.0 marks are taken
+  when the plan is built and each entry's `undo` restores its mark if that
+  write is refused, so the next save retries it (clearing on success, the old
+  rule, wiped marks set while a native write was in flight). `flushShards`
   keeps going after a failure and re-throws at the end, so the shards that fit
   are persisted rather than abandoned because a later one didn't.
 - **Deletions are tracked, not inferred.** A pruned key left behind is a record
@@ -701,11 +703,9 @@ seam is what makes the backend swappable.
 truth that drifts silently in both directions — a listed-but-missing player,
 and an orphan nothing cleans up.
 
-**Still open, and the next lever if hand settlement is ever reported as a
-hitch:** settlement costs 11ms because `plLedger` is one 1.26 MB shard
-rewritten whenever a row is appended. It is append-only and FIFO-evicted, so
-chunking it would take that to ~450 KB. Not done here — once per hand is not
-four times a second, and this file's rule is to measure before moving a number.
+**Done in v1.98.0:** the ledger and hand history are no longer single shards
+rewritten each hand (see "Only what changed is written"). A settled hand now
+writes ~43 KB, down from ~1.4 MB.
 
 ### The backend is PDA_storage when the app offers it (v1.70.0)
 
@@ -748,13 +748,12 @@ undetected from v1.70.0 until v1.75.0 made the store findable.
 - `PDA_WRITE_CHUNK` (48) keys per call, **awaited sequentially**. The await
   matters as much as the chunking: `setMany` returns across the bridge, so the
   event loop is free between calls and the page can paint and scroll.
-- **The three section shards each get a call of their own.** `hands` is ~680 KB
-  and `plLedger` ~500 KB as single values that cannot be split, so letting one
-  ride along with 47 players triples that chunk for nothing.
-- **Marks clear PER CHUNK**, which gives up the all-or-nothing property — in
-  the same direction the `localStorage` path already worked (per key). A
-  refusal part way leaves exactly the unwritten shards dirty for the next pass,
-  and the rejection still propagates so the failure is reported.
+- **Each call is also capped by size**, `PDA_WRITE_CHARS` (64 KB) — since
+  v1.98.0 nothing is one huge value any more, but 48 ledger chunks in one call
+  would still be ~1.2 MB. An entry bigger than the budget goes alone.
+- **A refused call restores the marks of its chunk and of every chunk not yet
+  attempted**, so the next pass retries exactly what did not land; the
+  rejection still propagates so the failure is reported.
 - **Pin the chunk size against a LITERAL ceiling in tests, never against
   `PDA_WRITE_CHUNK` itself.** `n <= PDA_WRITE_CHUNK` is vacuous and passes
   cleanly with the constant raised to 100000 — which is the bug. Caught by
@@ -1306,9 +1305,8 @@ same known gap: an unstar can be undone by merging from a device that still has
 it. The **Saved** mode ignores the aggression exclusion and the played bar —
 the hand is there because you put it there — but tags still narrow it.
 
-`dirtyHands` is set by the toggle. Nothing else marks that shard between hands
-(recording relies on the 60s reconcile), so a star without the mark would be
-lost if the page closed inside that window.
+`dirtyHands` is set by the toggle, so the starred hand's key is written on the
+next save rather than waiting for the reconcile.
 
 ## Turn barrels, won at showdown, table softness, P/L by stake (v1.82.0)
 
@@ -2978,7 +2976,7 @@ and NOT wiped by clearing the app's browser data. `localStorage` remains the
 fallback and is what runs everywhere else. One backend is chosen at load and
 they are never mixed; see "The backend is PDA_storage when the app offers it".
 
-`store.version` (currently `STORE_VERSION = 2`) drives one-time repairs in
+`store.version` (currently `STORE_VERSION = 3`) drives one-time repairs in
 `migrateStore`, run from both `loadStore` and `importJson`. Two rules:
 
 - **Every migration must be idempotent.** It deliberately does not call
