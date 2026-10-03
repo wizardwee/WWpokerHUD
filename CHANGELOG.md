@@ -9,6 +9,32 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.99.0
+"Full table size" removed from Settings
+
+The setting was the last item on the review list as open finding #5: "tableMax
+only drives the equity quote… at a 6-max table with the default left alone,
+equity reads pessimistically (quoted vs 8 opponents)". That stopped being true
+in v0.18.0, when the quote moved to the seats actually seen each hand. Since
+then the setting was read in exactly one place, as the fallback when no seat
+count could be read — where its default, 9, is what is now assumed
+(`TABLE_SEATS_FALLBACK`). The finding is closed, the control, its handler and
+its help line are gone, and `test/settings-sections.test.js` fails if
+anything reads `settings.tableMax` again. Old stores keep the key; nothing
+reads it.
+
+A stale comment went with it: the coach's preflop routing still carried
+"KNOWN IMPRECISION: preflopRaiseEvents counts an all-in as a raise", which
+v1.92.1 settled (Torn logs an all-in call as `called $X`).
+
+**Considered and not built: sharing page lookups between the coach and the
+turn cue.** Proposed on an estimate that the coach repeated its DOM reads.
+Measured with V8 call counts in Chromium, it does not — every lookup runs once
+per coach render, the turn cue's two once per tick, and the two timers (1.5s
+and 400ms) seldom fire close enough for a short cache to be hit. The one real
+repeat, the seat-ring measurement, costs ~0.016ms the second time. Nothing to
+share, so nothing was added.
+
 ## 1.98.0
 Saving writes only what changed
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.98.0
+// @version      1.99.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,10 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.99.0 - "Full table size" is gone from Settings ▸ Coach.
+ *            - Equity is quoted against the seats actually at your table, and
+ *              has been for a long time; the setting only mattered when the
+ *              seats could not be read, where 9 is now assumed.
  * 1.98.0 - Saving writes only what changed.
  *            - The once-a-minute safety save used to rewrite the whole store
  *              (~3 MB across the PDA bridge). It now checks every piece and
@@ -36,15 +40,6 @@
  *              matched by label ("Leave", "Stand up", or its aria-label). The
  *              deep scan gains a "leave control" line; NONE there means the
  *              guard cannot fire yet and the label needs one scan to fix.
- * 1.96.0 - Faster departure alerts, and a one-tap attack button.
- *            - Reported: the pill was too slow to notify and hit someone.
- *              The HUD now reads Torn's own "X left the table" log line
- *              (about 1s) instead of waiting for two seat checks (3-6s).
- *            - A leaver who is attackable, level 80 or under and left with
- *              $500M+ gets a red "Attack" button at the top of the screen:
- *              one tap opens their attack page. Limits are in Settings.
- *            - It ignores taps for its first 0.35s, drags by its grip, and
- *              goes after 60s, on ✕ or once used.
  */
 
 /*
@@ -86,7 +81,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.98.0';
+  const HUD_VERSION = '1.99.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -582,8 +577,6 @@
     // inside the noise — see potOddsVerdict, which is the guard that makes
     // approximating here safe rather than merely cheaper.
     equityIters: 600,
-    tableMax: 9,       // seats at a full table — the baseline equity is always
-                       // quoted against a full ring (tableMax - 1 opponents)
     // Optional. A public-only Torn API key is enough — used solely to look up
     // faction/marriage on currently seated players (see refreshSeatedAffiliations).
     // Empty = the feature does nothing, no error, no nag. LOCAL_ONLY_SETTINGS below.
@@ -8831,8 +8824,14 @@
 
   // Seven or more players makes it a full-ring hand. Below that the short-handed
   // charts apply; Torn tables run both, so this is read per hand rather than
-  // taken from the tableMax setting (which only drives the equity quote).
+  // taken from a setting.
   const FULL_RING_SEATS = 7;
+  // Seats assumed when the table's own count cannot be read. This was the
+  // "Full table size" setting until v1.99.0; the equity quote has used the
+  // seats actually seen each hand since v0.18.0, so the setting only ever
+  // reached this fallback and was removed. Old stores keep a `tableMax` key
+  // that nothing reads.
+  const TABLE_SEATS_FALLBACK = 9;
   function rfiChartFor(position, seats) {
     const set = (seats >= FULL_RING_SEATS) ? RFI_RANGES.FULL : RFI_RANGES.SHORT;
     return set[position] || null;
@@ -10336,16 +10335,13 @@
       pot,
       posDiag: position ? null : positionDiagnosis(hand),
       // Seat count for THIS hand picks the chart set — Torn runs both short and
-      // full ring, and the tableMax setting only drives the equity quote.
+      // full ring.
       seats: pos ? pos.seats : 0,
       // Which preflop spot this actually is. Without these the chart was chosen
       // from betFacing alone, which cannot tell an unopened pot from a limped
       // one, or a 3-bet from a 4-bet.
-      // KNOWN IMPRECISION: preflopRaiseEvents counts an all-in as a raise, so a
-      // short stack shoving what is really a CALL can push this to 2 and make
-      // the coach read the spot as facing a 3-bet. Fixing it needs the all-in
-      // amount compared against the current bet, which the log doesn't always
-      // print.
+      // An all-in call is logged as "called $X", so it cannot inflate this
+      // (open finding #3, closed v1.92.1).
       preflopRaises: hand.preflopRaiseEvents,
       limpers: preflopLimperCount(hand),
       heroInPosition: heroIsInPositionVs(hand, villainXid),
@@ -10354,11 +10350,10 @@
 
     if (heroCards.length === 2) {
       const live = Math.max(1, hand.playersIn.size - 1);
-      // Seats actually at THIS table. The tableMax setting (default 9) was
-      // quoting "vs 8 (9-max)" at a five-handed table, which is a number about
-      // a game you are not playing. Fall back to the setting only when the seat
-      // count can't be read.
-      const seatsNow = (pos && pos.seats) || countSeats(hand) || STORE.settings.tableMax || 9;
+      // Seats actually at THIS table. A fixed table size quoted "vs 8 (9-max)"
+      // at a five-handed table, which is a number about a game you are not
+      // playing. The fallback applies only when the seat count can't be read.
+      const seatsNow = (pos && pos.seats) || countSeats(hand) || TABLE_SEATS_FALLBACK;
       const full = Math.max(1, seatsNow - 1);
 
       // Always quote the full-ring number so the figure means the same thing
@@ -14993,11 +14988,9 @@
       <h4>Coach</h4>
       <label><input type="checkbox" class="tph-coach-toggle" ${STORE.settings.coachHidden ? '' : 'checked'}> Show coach panel</label><br>
       <label><input type="checkbox" class="tph-tableannounce-toggle" ${STORE.settings.tableAnnounce !== false ? 'checked' : ''}> Summary message when you join a new table</label><br>
-      <label>Full table size: <input type="number" class="tph-table-max" min="2" max="10" value="${STORE.settings.tableMax}" style="width:60px"></label><br>
       <label>Equity samples: <input type="number" class="tph-equity-iters" min="${EQUITY_ITERS_MIN}" max="${EQUITY_ITERS_MAX}" step="100" value="${STORE.settings.equityIters}" style="width:80px"></label>
       <div style="opacity:.7;margin:2px 0 6px">Lower = faster on a slow phone. 300 &asymp; &plusmn;3 pts,
-        600 &plusmn;2, 1200 &plusmn;1.4. Too-close spots read &ldquo;marginal&rdquo; either way.
-        Table size: equity is quoted vs a full table this size, plus live and heads-up.</div>
+        600 &plusmn;2, 1200 &plusmn;1.4. Too-close spots read &ldquo;marginal&rdquo; either way.</div>
       <button class="tph-coach-reset">Reset panel positions &amp; size</button>
       <div style="opacity:.7;margin:2px 0 10px">Drag the coach panel's ◢ corner to resize it.</div>
       <h4>Table list</h4>
@@ -15328,12 +15321,6 @@
     });
     panel.querySelector('.tph-coach-toggle').addEventListener('change', (e) => {
       setCoachHidden(!e.target.checked);
-    });
-    panel.querySelector('.tph-table-max').addEventListener('change', (e) => {
-      const n = parseInt(e.target.value, 10);
-      STORE.settings.tableMax = Math.min(10, Math.max(2, isNaN(n) ? 9 : n));
-      e.target.value = STORE.settings.tableMax;
-      saveStore();
     });
     panel.querySelector('.tph-equity-iters').addEventListener('change', (e) => {
       STORE.settings.equityIters = clampEquityIters(e.target.value);

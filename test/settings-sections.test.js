@@ -93,12 +93,22 @@ t.ok('and nowhere near Coach', calibToggle > html.indexOf('<h4>Departure watch</
 [
   'tph-close', 'tph-open-self', 'tph-open-players', 'tph-hero-name', 'tph-min-hands',
   'tph-badge-toggle', 'tph-selfbadge-toggle', 'tph-badgestats-toggle', 'tph-rolebadge-toggle',
-  'tph-turncue-toggle', 'tph-foldguard-toggle', 'tph-coach-toggle', 'tph-table-max',
+  'tph-turncue-toggle', 'tph-foldguard-toggle', 'tph-coach-toggle',
   'tph-equity-iters', 'tph-coach-reset', 'tph-calib-toggle', 'tph-depart-toggle',
   'tph-torn-api-key', 'tph-spy-toggle', 'tph-spy-api-key', 'tph-client-id', 'tph-connect',
   'tph-export', 'tph-copy-export', 'tph-save-export', 'tph-import', 'tph-do-import',
   'tph-reset-pl', 'tph-reset-hero', 'tph-reset',
 ].forEach((cls) => t.ok('present: .' + cls, html.indexOf(cls) > 0));
+
+// The "Full table size" setting was removed in v1.99.0: the equity quote reads
+// the seats seen each hand, so the setting only reached a fallback. Nothing may
+// read it again — old stores still carry the key, and a reader would quietly
+// bring back a number about a table you are not at.
+{
+  const src = require('fs').readFileSync(require('./harness').SCRIPT_PATH, 'utf8');
+  t.ok('nothing reads the retired tableMax setting', !/settings\.tableMax/.test(src));
+  t.ok('and its control is gone', html.indexOf('tph-table-max') < 0);
+}
 
 // --- The walker -------------------------------------------------------------
 //

@@ -211,8 +211,8 @@ quoted percentage covers both. It is banded by analogy with the 6-max SB.
 
 Torn runs both short and full ring, so `rfiChartFor(position, seats)` picks
 `RFI_RANGES.SHORT` (≤6 handed) or `.FULL` (7+). The seat count comes from the
-hand's own `dealtInXids`, **not** from the `tableMax` setting — that setting only
-drives the equity quote. `seatLabel` names positions from the button backwards so
+hand's own `dealtInXids`, never from a setting (the old `tableMax` setting was
+removed in v1.99.0). `seatLabel` names positions from the button backwards so
 it degrades sensibly at 7- and 8-handed tables rather than assuming exactly nine.
 
 This mattered a lot: at 9-handed, four distinct early seats previously collapsed
@@ -446,9 +446,10 @@ figure) is what P/L falls back to when a winner line carries no amount.
    $Y` and an all-in call is `called $X`. So a call is never counted as a raise,
    and the hazard this described does not occur. The `allin` pattern stays as a
    fallback for wording nobody has seen.
-5. **`tableMax` (default 9) only drives the equity quote**, not the preflop
-   charts, which read the per-hand seat count. At a 6-max table with the default
-   left alone, equity reads pessimistically (quoted vs 8 opponents).
+5. ~~`tableMax` only drives the equity quote~~ — **closed v1.99.0.** The quote
+   has used the seats seen each hand since v0.18.0; the setting only reached a
+   fallback, so it was removed (`TABLE_SEATS_FALLBACK` = 9). A test fails if
+   anything reads `settings.tableMax` again.
 
 ## Storage, and what it costs (v0.40.0)
 
@@ -863,6 +864,11 @@ only because the second pass finds nothing to drop and returns false.
 `test/prune.test.js` asserts exactly two `setItem` attempts for that reason.
 
 ## Should this be refactored?
+
+**Measured and NOT worth doing (v1.99.0): sharing DOM lookups between the
+coach and the turn cue.** V8 call counts show each lookup runs once per coach
+render and the two timers seldom coincide; don't re-propose it without a new
+measurement.
 
 **`tools/` holds measurement scripts that need a browser** —
 `tools/profile-ticks.js` times every interval job in Chromium (v1.92.1
