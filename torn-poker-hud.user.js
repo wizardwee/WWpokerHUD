@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.99.0
+// @version      1.99.1
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,12 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.99.1 - Stacks and the table's pot read in BB display mode.
+ *            - A scan at a table showing amounts in big blinds read no stacks
+ *              and no pot: both readers only accepted "$" figures. "157.45 BB"
+ *              is now priced with the table's blind, so effective stack, the
+ *              strike button's stack gate and stack tracking work again.
+ *            - Unconfirmed: the next scan's "stacks read" and "pot: dom=" lines.
  * 1.99.0 - "Full table size" is gone from Settings ▸ Coach.
  *            - Equity is quoted against the seats actually at your table, and
  *              has been for a long time; the setting only mattered when the
@@ -30,16 +36,6 @@
  *              so a settled hand writes ~40 KB instead of ~1.4 MB.
  *            - "Reset all data" no longer brings players back on the next
  *              reload when the app's own storage is in use.
- * 1.97.0 - Tap Leave twice to confirm, same as Fold.
- *            - Asked for: a guard on leaving the seat. It shares the fold
- *              guard's handler, so it never acts for you, lets the second tap
- *              through untouched, and passes the tap straight on if anything
- *              fails. Its own toggle in Settings > Fold guard; on by default.
- *            - Arming Fold never confirms Leave, or the other way round.
- *            - Unconfirmed: nobody has scanned the leave button, so it is
- *              matched by label ("Leave", "Stand up", or its aria-label). The
- *              deep scan gains a "leave control" line; NONE there means the
- *              guard cannot fire yet and the label needs one scan to fix.
  */
 
 /*
@@ -81,7 +77,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.99.0';
+  const HUD_VERSION = '1.99.1';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -4369,16 +4365,32 @@
   // only by luck of ordering. Where several candidates match, the largest wins,
   // since a player's stack is bigger than the amount they've bet this street in
   // every case except an all-in, where the two are equal.
+  //
+  // In Torn's BB display mode the element reads "157.45 BB" instead (scan,
+  // v1.99.0: every seat in BB, `stacks read: 0`). Priced by displayAmount.
   function readSeatStack(seatEl) {
     if (!seatEl) return null;
     let best = null;
     seatEl.querySelectorAll(SELECTORS.seatStack).forEach((el) => {
-      const txt = (el.textContent || '').trim();
-      if (!/^\$/.test(txt)) return; // a `name_` wrapper can match seatStack too
-      const n = parseAmount(txt.replace(/^\$/, ''));
+      const n = displayAmount((el.textContent || '').trim());
       if (n > 0 && (best === null || n > best)) best = n;
     });
     return best;
+  }
+
+  // Chips from a figure Torn renders ON THE TABLE (a stack, the pot): "$X" in
+  // dollar mode, "X BB" in BB display mode. 0 for anything else — a `name_`
+  // wrapper can match the stack selector too, so a bare number or a username
+  // must not read as chips.
+  //
+  // BB figures are priced with this hand's blind, else the last one seen, the
+  // same rule as logAmount. No plausible blind means 0 (unreadable), never a
+  // tiny number: the amount is unknown, not small.
+  function displayAmount(txt) {
+    const s = String(txt || '').trim();
+    if (/^\$/.test(s)) return parseAmount(s.replace(/^\$/, ''));
+    if (!/^[\d,]+(?:\.\d+)?\s*BB$/i.test(s)) return 0;
+    return parseAmount(s, (currentHand && currentHand.bbAmount) || lastSeenBB);
   }
 
   // Face-up cards showing at a seat right now, as [{rank,suit}].
@@ -9208,11 +9220,12 @@
       if (!el) continue;
       const text = el.textContent || '';
       let best = null;
-      const re = /\$\s*([\d,]+)/g;
+      // "$X" in dollar mode, "X BB" in BB display mode — see displayAmount.
+      const re = /\$\s*[\d,]+|[\d,]+(?:\.\d+)?\s*BB/gi;
       let m;
       // Side pots put several figures in the wrapper; the total is the largest.
       while ((m = re.exec(text))) {
-        const v = parseAmount(m[1]);
+        const v = displayAmount(m[0]);
         if (v > 0 && (best === null || v > best)) best = v;
       }
       if (best !== null) return best;
@@ -16319,6 +16332,9 @@
       cleanName,
       containsNameToken,
       parseAmount,
+      displayAmount,
+      readSeatStack,
+      readDomPot,
       diffLogRows,
       logLineKey,
       RFI_RANGES,

@@ -9,6 +9,30 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.99.1
+Stacks and the DOM pot are read in BB display mode
+
+A v1.99.0 deep scan from a table with Torn set to show amounts in big blinds
+printed `stacks read: 0` and `pot: dom=UNREADABLE`, while the log priced fine
+(`log=$6.3M`) — v1.85.1 taught the log parser the BB unit but not the two DOM
+readers. `readSeatStack` dropped anything not starting with `$`, and every seat
+read `157.45 BB`; `readDomPot` scanned only for `$` figures.
+
+Both now go through `displayAmount`, which takes `$X` as before or `X BB`
+priced with the hand's blind (else `lastSeenBB`) — the same pricing rule as
+`logAmount`, and the same refusal: no plausible blind reads as unreadable (0),
+never as a tiny number. Anything else, a username or a bare number on a
+wrapper the stack selector also matches, is still rejected.
+
+What this restores at a BB-mode table: effective stack and SPR on the coach,
+per-player stack tracking, the strike button's minimum-stack gate (which fails
+closed on an unknown stack, so it could never fire), and the DOM-vs-log pot
+cross-check. `test/bb-display-dom.test.js` drives the real functions.
+
+Unconfirmed on the device: that the `money_` element holds the bare
+`157.45 BB` figure, and the pot wrapper's text shape in BB mode. The next
+scan's `stacks read:` and `pot: dom=` lines settle both.
+
 ## 1.99.0
 "Full table size" removed from Settings
 
