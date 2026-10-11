@@ -9,6 +9,42 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.99.2
+P/L keeps counting in BB display mode after a reload or a stake move
+
+Asked: is P/L accurate, and does it stay accurate over a large number of
+hands? The settlement fuzz answers the first half for dollar wording — run at
+2 × 25,000 hands it lands on hero's net to the chip, with the per-opponent
+split summing back to it. But it only ever generated `$` lines, and the
+v1.99.0 scan shows the table in BB display mode (`called 1 BB`, `won 14.5 BB`).
+Fuzzed in that mode, two faults:
+
+- **After a reload, every hand settled at $0.** A BB-mode log never states the
+  blind in dollars, so with `lastSeenBB` reset by the reload nothing could
+  price "1 BB" — `logAmount` returned 0 and flagged display mode, as designed
+  for an unknown blind. But the blind WAS known: the Cash Games row you tapped
+  (`STORE.joinedTable`) records it, and tapping is the only way to join.
+  `bbPriceUnit` now falls back to that record while it is fresh. It comes last,
+  after the hand's blind and `lastSeenBB`, because a dollar blind line is
+  stronger evidence; once one hand is priced from the tap, `noteBlindLevel`
+  carries it forward as `lastSeenBB`.
+- **After a move between stakes, the old blind priced the new table.** The
+  known limit `logAmount` documented. In the fuzz, a $2.5M → $1M move recorded
+  −$8.0B against a true −$3.0B: every chip figure at the $1M table 2.5× too
+  large while every BB figure looked right. `rememberTappedRow` now drops
+  `lastSeenBB` when the tapped stake differs, and signals `noteTableChange` —
+  the same table change `noteBlindLevel` would have signalled on a dollar line.
+
+`test/settlement-fuzz.test.js` gains three scenarios — BB mode priced only by a
+tap, BB mode across a stake move, and dollars switching to BB mid-session —
+and each fix is pinned by mutation (6 and 2 failures respectively when
+reverted).
+
+Still an estimate in two respects, unchanged: multiway attribution is modelled,
+and BB display rounds to 0.01 BB ($25k at a $2.5M blind), so a BB-mode figure
+can be off by up to half that per amount. Not repairable: hands already settled
+at $0 in this state.
+
 ## 1.99.1
 Stacks and the DOM pot are read in BB display mode
 

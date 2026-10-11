@@ -29,13 +29,16 @@ const t = runner('settlement-fuzz');
 
 const NAMES = ['Wonkawee', 'Bauderix', 'GhostNote', 'Xelphina', 'ImEx', 'Rollo', 'Tamsin', 'Quade', 'Fennick'];
 const HERO = 'Wonkawee';
-const BB = 2500000;
 const SUITS = ['♠', '♥', '♦', '♣'];
 const RANKS = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'];
-const fmt = (n) => '$' + Math.round(n).toLocaleString('en-US');
+const usd = (n) => '$' + Math.round(n).toLocaleString('en-US');
+// Torn's BB display mode, as the v1.99.0 scan shows it: "14.5 BB", "0.5 BB",
+// "1 BB" — up to two decimals, trailing zeros dropped. Every generated amount
+// is a whole number of half-blinds, so nothing here is lost to that rounding.
+const inBB = (bb) => (n) => (Math.round((n / bb) * 100) / 100) + ' BB';
 
 // One hand of generated log lines, plus what it should do to hero.
-function genHand(g, rnd) {
+function genHand(g, rnd, BB = 2500000, fmt = usd) {
   const pick = (a) => a[Math.floor(rnd() * a.length)];
   const deck = [];
   SUITS.forEach((s) => RANKS.forEach((r) => deck.push(r + s)));
@@ -115,7 +118,10 @@ function genHand(g, rnd) {
   return { L, pot, contrib, heroIn, heroDelta: heroIn ? (won[HERO] || 0) - contrib[HERO] : 0 };
 }
 
-function run(seed, hands) {
+// `stakes` is the sequence of tables played: [{ bb, hands, mode, tap }].
+// mode 'bb' writes the log in BB display mode; tap(T) runs before the stake's
+// first hand, standing in for the Cash Games row tap that joined it.
+function run(seed, hands, stakes) {
   let s = seed * 7919 + 1;
   const rnd = () => { s = (s * 16807) % 2147483647; return s / 2147483647; };
   const T = load();
@@ -123,13 +129,19 @@ function run(seed, hands) {
   T.STORE.settings.heroName = HERO;
   T.heroXid = 'name:' + HERO;
   T.lastSeenBB = 0;
+  const plan = [];
+  (stakes || [{ bb: 2500000, hands, mode: 'usd' }]).forEach((st) => {
+    for (let i = 0; i < st.hands; i++) plan.push({ ...st, first: i === 0 });
+  });
 
   const bad = [];
   let expNet = 0;
   let expHands = 0;
   let prev = null;
-  for (let g = 0; g < hands; g++) {
-    const h = genHand(g, rnd);
+  for (let g = 0; g < plan.length; g++) {
+    const st = plan[g];
+    if (st.first && st.tap) st.tap(T);
+    const h = genHand(g, rnd, st.bb, st.mode === 'bb' ? inBB(st.bb) : usd);
     h.L.forEach((line, i) => {
       T.handleLogLine(line);
       // Replayed marker for the previous hand, as a re-rendered log produces.
@@ -146,8 +158,47 @@ function run(seed, hands) {
   return { T, bad, expNet, expHands, prev };
 }
 
-for (const seed of [1, 2, 3]) {
-  const { T, bad, expNet, expHands } = run(seed, 250);
+// A Cash Games row and the tap that joins it — the same shape
+// table-name.test.js drives rememberTappedRow with.
+function tapRow(T, name, blinds) {
+  const node = (text, kids) => {
+    const n = { ownText: text || '', children: [], parentElement: null,
+      get textContent() { return n.ownText + n.children.map((c) => c.textContent).join(''); } };
+    (kids || []).forEach((k) => { k.parentElement = n; n.children.push(k); });
+    return n;
+  };
+  const nameCell = node(name);
+  const el = node('', [nameCell, node(blinds), node('30'), node('3/9')]);
+  node('', [el]);
+  T.rememberTappedRow(nameCell, [{ row: el, bb: T.tableBlindsBB(blinds) }], Date.now());
+}
+
+const SCENARIOS = [
+  { seed: 1, label: 'dollars' },
+  { seed: 2, label: 'dollars' },
+  { seed: 3, label: 'dollars' },
+  // A reload at a BB-mode table: no dollar figure is ever logged, so the
+  // tapped row is the only thing that knows the blind. Before v1.99.2 every
+  // hand here settled at $0.
+  { seed: 4, label: 'BB mode, priced by the tapped row',
+    stakes: [{ bb: 2500000, hands: 250, mode: 'bb', tap: (T) => tapRow(T, "Cat's Chance II", '$1.25m / $2.5m') }] },
+  // A move between stakes inside one page session, in BB mode throughout.
+  // Before v1.99.2 the $1M table was priced at the $2.5M blind: every chip
+  // figure 2.5x too large while every BB figure looked right.
+  { seed: 5, label: 'BB mode across a stake move',
+    stakes: [
+      { bb: 2500000, hands: 120, mode: 'bb', tap: (T) => tapRow(T, "Cat's Chance", '$1.25m / $2.5m') },
+      { bb: 1000000, hands: 130, mode: 'bb', tap: (T) => tapRow(T, 'River Wizard', '$500k / $1m') },
+    ] },
+  // Switching the display mode mid-session at one table.
+  { seed: 6, label: 'dollars, then BB mode',
+    stakes: [{ bb: 2500000, hands: 120, mode: 'usd' }, { bb: 2500000, hands: 130, mode: 'bb' }] },
+];
+
+for (const sc of SCENARIOS) {
+  const seed = sc.seed;
+  const { T, bad, expNet, expHands } = run(seed, 250, sc.stakes);
+  if (sc.stakes) t.ok(`seed ${seed} (${sc.label}): the blind was priced`, !T.bbDisplayModeSuspected && T.STORE.hero.bbHands === T.STORE.hero.hands);
   const S = T.STORE;
   t.eq(`seed ${seed}: every log pot matches the hand's own sum`, bad.join('\n'), '');
   t.eq(`seed ${seed}: hero's net is the sum of hero's hand results`, S.hero.netChips, expNet);

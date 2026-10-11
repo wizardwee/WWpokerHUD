@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.99.1
+// @version      1.99.2
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,13 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.99.2 - P/L keeps counting in BB display mode after a reload or a move.
+ *            - With amounts shown in big blinds the log never states the blind
+ *              in dollars. After a reload nothing could price it, so every hand
+ *              settled at $0; after moving stakes, the old table's blind priced
+ *              the new one (a $1M table counted at $2.5M).
+ *            - The Cash Games row you tapped now prices it, and tapping a
+ *              different stake drops the old blind.
  * 1.99.1 - Stacks and the table's pot read in BB display mode.
  *            - A scan at a table showing amounts in big blinds read no stacks
  *              and no pot: both readers only accepted "$" figures. "157.45 BB"
@@ -28,14 +35,6 @@
  *            - Equity is quoted against the seats actually at your table, and
  *              has been for a long time; the setting only mattered when the
  *              seats could not be read, where 9 is now assumed.
- * 1.98.0 - Saving writes only what changed.
- *            - The once-a-minute safety save used to rewrite the whole store
- *              (~3 MB across the PDA bridge). It now checks every piece and
- *              writes only what differs: usually nothing.
- *            - Each hand is its own key and the P/L log is stored in chunks,
- *              so a settled hand writes ~40 KB instead of ~1.4 MB.
- *            - "Reset all data" no longer brings players back on the next
- *              reload when the app's own storage is in use.
  */
 
 /*
@@ -77,7 +76,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.99.1';
+  const HUD_VERSION = '1.99.2';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -4390,7 +4389,21 @@
     const s = String(txt || '').trim();
     if (/^\$/.test(s)) return parseAmount(s.replace(/^\$/, ''));
     if (!/^[\d,]+(?:\.\d+)?\s*BB$/i.test(s)) return 0;
-    return parseAmount(s, (currentHand && currentHand.bbAmount) || lastSeenBB);
+    return parseAmount(s, bbPriceUnit(currentHand));
+  }
+
+  // Chips per "BB" for a BB-display figure: this hand's blind, else the last
+  // one read, else the blind of the Cash Games row you tapped while it is
+  // fresh (joinedTableName's window). The tap is LAST, not first: a blind read
+  // off a dollar line is the stronger evidence, and in BB mode the blind line
+  // priced from the tap feeds noteBlindLevel, so lastSeenBB carries it from
+  // the first hand on. 0 when none is known — an unknown amount, never a
+  // guessed one.
+  function bbPriceUnit(hand) {
+    if (hand && hand.bbAmount) return hand.bbAmount;
+    if (lastSeenBB) return lastSeenBB;
+    const j = STORE.joinedTable;
+    return j && plausibleBB(j.bb) && joinedTableName(j.bb) ? j.bb : 0;
   }
 
   // Face-up cards showing at a seat right now, as [{rank,suit}].
@@ -5070,13 +5083,15 @@
 
   // A log amount, priced in this hand's blind (else the last one seen).
   //
-  // Known limit, stated rather than solved: a BB-denominated line at a NEW
-  // table is priced with the old table's blind until a dollar blind line
-  // lands, because a BB-mode log never states the blind in chips. An amount
-  // that cannot be priced at all flags BB display mode, which withholds P/L.
+  // A BB-mode log never states the blind in chips, so the unit comes from
+  // bbPriceUnit: this hand's blind, the last one read, or the Cash Games row
+  // you tapped. Before v1.99.2 there was no third source — after a reload
+  // every hand settled at $0 — and a move between stakes kept pricing with the
+  // old table's blind (rememberTappedRow now drops it). An amount that cannot
+  // be priced at all flags BB display mode, which withholds P/L.
   function logAmount(str, hand) {
     if (!str) return 0;
-    const amt = parseAmount(str, (hand && hand.bbAmount) || lastSeenBB);
+    const amt = parseAmount(str, bbPriceUnit(hand));
     if (!amt && /bb$/i.test(String(str).trim())) bbDisplayModeSuspected = true;
     return amt;
   }
@@ -13225,6 +13240,16 @@
     // and with no room on record there is nothing to compare against.
     const prev = STORE.joinedTable;
     if (prev && prev.name && (prev.name !== name || prev.bb !== hit.bb)) rollSessionNow();
+    // A different stake: the blind carried from the old table must not price
+    // the new one. In dollar mode the next blind line would correct it; in BB
+    // display mode nothing ever would, and every amount would be off by the
+    // ratio of the two stakes. Dropped here, bbPriceUnit falls through to this
+    // tap. Same table change noteBlindLevel would have signalled.
+    if (lastSeenBB && plausibleBB(hit.bb) && hit.bb !== lastSeenBB) {
+      noteTableChange();
+      lastSeenBB = 0;
+      currentTableBB = null;
+    }
     STORE.joinedTable = { name, bb: hit.bb, at: now };
     return STORE.joinedTable;
   }

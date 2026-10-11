@@ -1808,9 +1808,15 @@ again at `$22.5M`. Two faults:
 
 - The patterns dropped the unit, so `called 9 BB` read as $9. The amount
   capture now keeps `BB` / `k` / `M` / `B`, and `logAmount` prices a BB figure
-  with the hand's blind (else `lastSeenBB`). **Unpriceable means 0 and flags
-  display mode, never a tiny number.** Known limit: at a new table in BB mode
-  the old blind prices it until a dollar blind line lands.
+  with `bbPriceUnit` — the hand's blind, else `lastSeenBB`, else the tapped
+  Cash Games row while fresh (v1.99.2). **Unpriceable means 0 and flags
+  display mode, never a tiny number.** The tap is the only blind source a
+  BB-mode log has after a reload (before v1.99.2 every hand settled at $0),
+  and a tap on a different stake drops `lastSeenBB` so the old table's blind
+  cannot price the new one. Stacks and the DOM pot go through `displayAmount`
+  on the same unit (v1.99.1). `test/settlement-fuzz.test.js` fuzzes BB mode,
+  a stake move and a mid-session mode switch; dollar mode was run at
+  2 × 25,000 hands and lands on hero's net to the chip.
 - Switching units rewrites every row, so the raw-text diff found no overlap and
   replayed the whole visible log into the live hand. `diffLogRows` aligns on
   `logLineKey` (amounts blanked; `Game <hex>` lines verbatim, since they are the
