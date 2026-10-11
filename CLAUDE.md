@@ -2103,6 +2103,19 @@ out of `r3` would understate the 3-bet range. The UI labels it a subset instead.
 `preflopRaiseEvents > 0`, so `countedLimp` only ever holds players who acted
 before any raise — an ordinary raiser is never in it.
 
+### Recent showdowns are a window beside the counters (v1.100.0)
+
+`p.sdRecent` holds the last `SD_RECENT_MAX` (50) showdowns as `"<tier><L?><cls>"`
+strings (`"2LAKs"`), and the Range tab highlights those classes in place.
+**Live entries come from `noteShowdown`'s own tier and limp-raise**, never
+re-derived. The one-off history seed has no `preflopTier` to read, so
+`preflopTiersFromActions` re-reads the raise order from a stored hand's
+actions — a second implementation of exactly what the v1.1.0 note says not to
+duplicate, accepted for a one-off and pinned instead: `test/recent-showdowns`
+fuzzes preflop action and requires both readings to agree. **Change either rule
+and that test is the place it shows.** Recent counts are capped at the
+lifetime count per class, so the window can never claim more than the counter.
+
 ### Postflop re-raise was already collected (v1.1.0)
 
 `streetRates.rr` is `raise / (raise + call + fold)`, and needs no new storage:

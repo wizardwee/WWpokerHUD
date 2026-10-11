@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.99.2
+// @version      1.100.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,12 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.100.0 - The Range tab highlights each player's last 50 showdowns.
+ *            - Gold chips are hands they showed within their last 50
+ *              showdowns, in the same Opened / 3-bet / 4-bet / Called groups;
+ *              each group says how many are recent.
+ *            - Seeded once from the hands your history still holds, then kept
+ *              up live. Older showdowns had no date, so they stay unhighlighted.
  * 1.99.2 - P/L keeps counting in BB display mode after a reload or a move.
  *            - With amounts shown in big blinds the log never states the blind
  *              in dollars. After a reload nothing could price it, so every hand
@@ -31,10 +37,6 @@
  *              is now priced with the table's blind, so effective stack, the
  *              strike button's stack gate and stack tracking work again.
  *            - Unconfirmed: the next scan's "stacks read" and "pot: dom=" lines.
- * 1.99.0 - "Full table size" is gone from Settings ▸ Coach.
- *            - Equity is quoted against the seats actually at your table, and
- *              has been for a long time; the setting only mattered when the
- *              seats could not be read, where 9 is now assumed.
  */
 
 /*
@@ -76,7 +78,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.99.2';
+  const HUD_VERSION = '1.100.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -7579,8 +7581,96 @@
     const tier = (hand && hand.preflopTier && hand.preflopTier[xid]) || 0;
     if (tier === 2) e.r3 = (e.r3 || 0) + 1;
     else if (tier >= 3) e.r4 = (e.r4 || 0) + 1;
-    if (hand && hand.limpRaised && typeof hand.limpRaised.has === 'function'
-        && hand.limpRaised.has(xid)) e.lr = (e.lr || 0) + 1;
+    const lr = !!(hand && hand.limpRaised && typeof hand.limpRaised.has === 'function'
+        && hand.limpRaised.has(xid));
+    if (lr) e.lr = (e.lr || 0) + 1;
+    // Same tier and limp-raise as the counters above, never re-derived, so a
+    // highlighted chip can never sit in a group its counter does not.
+    pushRecentShowdown(p, cls, tier, lr);
+  }
+
+  // Each player's last SD_RECENT_MAX showdowns, oldest first (v1.100.0), so
+  // the Range tab can highlight what they have shown LATELY inside the
+  // lifetime groups. `shownHands` is a running count with no time on it, so
+  // it could never say this on its own.
+  //
+  // One short string per showdown: tier digit (0 called, 1 open, 2 3-bet,
+  // 3 4-bet or more - the same tiers shownRange splits by), an optional L for
+  // a limp-3bet, then the hand class: "2LAKs", "0T9s", "1QQ". Prefixed rather
+  // than suffixed because "L" is never a rank, so it parses without
+  // ambiguity. ~7 bytes each, so a full window adds ~350 bytes to a record
+  // (a long-tracked one is ~1 KB) - and only players seen at showdown carry
+  // it at all, sparse like `barrel`.
+  const SD_RECENT_MAX = 50;
+  const SD_RECENT_RE = /^([0-3])(L?)([2-9TJQKA]{2}[so]?)$/;
+
+  function pushRecentShowdown(p, cls, tier, lr) {
+    if (!p || !cls) return;
+    if (!Array.isArray(p.sdRecent)) p.sdRecent = [];
+    p.sdRecent.push(String(Math.min(3, Math.max(0, tier || 0))) + (lr ? 'L' : '') + cls);
+    if (p.sdRecent.length > SD_RECENT_MAX) p.sdRecent.splice(0, p.sdRecent.length - SD_RECENT_MAX);
+  }
+
+  function parseRecentShowdown(entry) {
+    const m = SD_RECENT_RE.exec(String(entry || ''));
+    return m ? { tier: Number(m[1]), lr: m[2] === 'L', cls: m[3] } : null;
+  }
+
+  // Preflop tiers and limp-raisers, re-derived from a STORED hand's action
+  // list - for the one-off backfill only. A live hand reads hand.preflopTier,
+  // set at the moment of each raise; a stored hand kept only its actions.
+  // Mirrors markAsPreflopRaiseAction / maybeCountLimp rule for rule: the k-th
+  // preflop raise is tier k and a player keeps their highest; a limp is a
+  // preflop call before any raise by anyone but the big blind; a raise by a
+  // limper is a limp-3bet. test/recent-showdowns.test.js drives fuzzed hands
+  // through both and requires them to agree.
+  function preflopTiersFromActions(actions) {
+    const tier = {};
+    const limped = new Set();
+    const limpRaised = new Set();
+    let raises = 0;
+    let bbXid = null;
+    (actions || []).forEach((a) => {
+      if (!a || a.s !== 'preflop' || !a.x) return;
+      if (a.a === 'bb') bbXid = a.x;
+      else if (a.a === 'call' && raises === 0 && a.x !== bbXid) limped.add(a.x);
+      else if (a.a === 'raise' || a.a === 'all-in') {
+        raises += 1;
+        if (!tier[a.x] || raises > tier[a.x]) tier[a.x] = raises;
+        if (limped.has(a.x)) limpRaised.add(a.x);
+      }
+    });
+    return { tier, limpRaised };
+  }
+
+  // Once, from init - same flag discipline as backfillBarrels. Seeds the
+  // window from the hands history still holds, oldest first, so a player's
+  // recent showdowns are there on the first open rather than after fifty more.
+  // Only fills a player whose window is EMPTY: one that already has entries
+  // (from a merged store, say) is not appended to, so nothing is counted
+  // twice. A reveal that never parsed to two cards was never banked live
+  // either, and is skipped the same way.
+  function backfillRecentShowdowns() {
+    if (STORE.sdRecentBackfilled) return 0;
+    const fill = {};
+    (STORE.hands || []).slice().reverse().forEach((h) => {
+      if (!h || !h.shown || typeof h.shown !== 'object') return;
+      let derived = null;
+      Object.keys(h.shown).forEach((xid) => {
+        const p = STORE.players[xid];
+        if (!p) return; // pruned since; nothing to attribute to
+        if (!(xid in fill)) fill[xid] = !(Array.isArray(p.sdRecent) && p.sdRecent.length);
+        if (!fill[xid]) return;
+        const cls = handClassFromCards(parseCardsFromText(h.shown[xid]));
+        if (!cls) return;
+        derived = derived || preflopTiersFromActions(h.actions);
+        pushRecentShowdown(p, cls, derived.tier[xid] || 0, derived.limpRaised.has(xid));
+        markPlayerDirty(xid);
+      });
+    });
+    STORE.sdRecentBackfilled = true;
+    saveStore();
+    return Object.keys(fill).filter((x) => fill[x]).length;
   }
 
   // Hand category of hole+board at a given point in the hand, {r,s} numeric
@@ -7672,9 +7762,29 @@
 
   // Everything a player has shown down, newest counts first. Optionally split
   // by preflop action so the caller can ask "what do they raise with".
+  // Does a recent-showdown entry belong in this shownRange mode? The same
+  // split shownRange applies to the lifetime counters, entry by entry.
+  function recentInMode(e, mode) {
+    if (mode === 'raised') return e.tier >= 1;
+    if (mode === 'called') return e.tier === 0;
+    if (mode === 'open') return e.tier === 1;
+    if (mode === 'threebet') return e.tier === 2;
+    if (mode === 'fourbet') return e.tier === 3;
+    if (mode === 'limpraise') return e.lr;
+    return true;
+  }
+
   function shownRange(p, mode) {
     const src = (p && p.shownHands) || {};
     const out = [];
+    // How many of each class's showdowns in this mode fall in the player's
+    // last SD_RECENT_MAX. Capped at the lifetime count, so a window seeded
+    // from history can never claim more than the counter holds.
+    const recent = {};
+    ((p && Array.isArray(p.sdRecent)) ? p.sdRecent : []).forEach((raw) => {
+      const e = parseRecentShowdown(raw);
+      if (e && recentInMode(e, mode)) recent[e.cls] = (recent[e.cls] || 0) + 1;
+    });
     Object.keys(src).forEach((cls) => {
       const e = src[cls] || {};
       // `open` is raises that were NOT a 3-bet or 4-bet, i.e. tier 1 — derived
@@ -7692,7 +7802,7 @@
               : mode === 'fourbet' ? (e.r4 || 0)
                 : mode === 'limpraise' ? (e.lr || 0)
                   : (e.seen || 0);
-      if (n > 0) out.push({ cls, n, won: e.won || 0, seen: e.seen || 0 });
+      if (n > 0) out.push({ cls, n, won: e.won || 0, seen: e.seen || 0, recent: Math.min(n, recent[cls] || 0) });
     });
     out.sort((a, b) => b.n - a.n || a.cls.localeCompare(b.cls));
     return out;
@@ -12100,6 +12210,10 @@
                       border-radius: 3px; padding: 2px 5px; font-size: 12px;
                       font-family: ui-monospace, Menlo, monospace; }
     .tph-range-hand sub { color: #8fa6bd !important; font-size: 9px; margin-left: 1px; }
+    .tph-range-recent { color: #ffe9a8 !important; background: #3a3220; border-color: #c9a227; }
+    .tph-range-recent sub { color: #d9c27a !important; }
+    .tph-range-recent-key { color: #ffe9a8 !important; background: #3a3220; border: 1px solid #c9a227;
+                            border-radius: 3px; padding: 0 4px; }
     /* Exploit plan. Ranked list, tag on the left so the category is scannable. */
     .tph-plan-lead { color: #8d959c !important; font-size: 10px; margin-bottom: 7px; }
     .tph-plan { display: flex; gap: 7px; align-items: flex-start; margin-bottom: 8px;
@@ -13950,13 +14064,20 @@
       return '<i>No showdowns yet. Fills in when they reveal at showdown.</i>';
     }
     const total = all.reduce((s, e) => s + e.n, 0);
+    const recentTotal = all.reduce((s, e) => s + e.recent, 0);
 
+    // A class shown within their last SD_RECENT_MAX showdowns is highlighted
+    // in place, in every group it belongs to. The lifetime list stays whole,
+    // because most players have too few showdowns to split into two lists.
     const group = (mode, title, note) => {
       const rows = shownRange(p, mode);
       if (!rows.length) return '';
       const n = rows.reduce((s, e) => s + e.n, 0);
-      return `<div class="tph-range-group"><b>${title}</b> <span class="tph-range-note">${n} showdown${n === 1 ? '' : 's'}${note}</span><div class="tph-range-list">`
-        + rows.map((e) => `<span class="tph-range-hand" title="${escapeHtml(e.cls)}: shown ${e.n}×, won ${e.won} of ${e.seen}">`
+      const r = rows.reduce((s, e) => s + e.recent, 0);
+      return `<div class="tph-range-group"><b>${title}</b> <span class="tph-range-note">${n} showdown${n === 1 ? '' : 's'}`
+        + `${r && r < n ? ` · ${r} recent` : ''}${note}</span><div class="tph-range-list">`
+        + rows.map((e) => `<span class="tph-range-hand${e.recent ? ' tph-range-recent' : ''}" title="${escapeHtml(e.cls)}: shown ${e.n}×`
+          + `${e.recent ? ` (${e.recent} recent)` : ''}, won ${e.won} of ${e.seen}">`
           + `${escapeHtml(e.cls)}${e.n > 1 ? `<sub>${e.n}</sub>` : ''}</span>`).join('')
         + '</div></div>';
     };
@@ -13970,7 +14091,9 @@
     // open + 3-bet + 4-bet reconstructs the old "raised" group exactly, so
     // nothing is lost by dropping it.
     return `<div class="tph-range-total">${total} showdown${total === 1 ? '' : 's'}`
-      + `${total < 8 ? ' — thin sample' : ''}</div>`
+      + `${total < 8 ? ' — thin sample' : ''}`
+      + (recentTotal ? ` · <span class="tph-range-recent-key">highlighted</span> = in their last ${SD_RECENT_MAX}` : '')
+      + '</div>'
       + group('open', 'Opened the pot', '')
       + group('threebet', '3-bet', '')
       + group('fourbet', '4-bet or more', '')
@@ -15905,7 +16028,14 @@
     })();
     const withShowdowns = Object.keys(STORE.players)
       .filter((x) => STORE.players[x] && Object.keys(STORE.players[x].shownHands || {}).length).length;
-    L.push('showdown ranges: ' + withShowdowns + ' player(s) with at least one shown hand');
+    // Recent windows (v1.100.0): how many players carry one, and whether the
+    // one-off seeding from saved history has run. "seeded: no" after a load
+    // of this version means backfillRecentShowdowns never ran.
+    const withRecent = Object.keys(STORE.players)
+      .filter((x) => STORE.players[x] && Array.isArray(STORE.players[x].sdRecent) && STORE.players[x].sdRecent.length).length;
+    L.push('showdown ranges: ' + withShowdowns + ' player(s) with at least one shown hand'
+      + '   recent windows (last ' + SD_RECENT_MAX + '): ' + withRecent
+      + ', seeded from history: ' + (STORE.sdRecentBackfilled ? 'yes' : 'no'));
     // A reveal that parses but carries no cards is invisible: it never reaches
     // the unmatched list, and the Range tab just stays empty. Print the raw
     // reveal rows so the wording and the card shape can both be checked.
@@ -16743,6 +16873,10 @@
       barrelEventsFor,
       noteBarrels,
       backfillBarrels,
+      backfillRecentShowdowns,
+      preflopTiersFromActions,
+      parseRecentShowdown,
+      SD_RECENT_MAX,
       BARREL_MIN,
       FOLD_BARREL_MIN,
       tableSoftness,
@@ -16910,6 +17044,7 @@
     // history-seeded figures behind it rather than starting from zero.
     backfillBoardTexture();
     backfillBarrels();
+    backfillRecentShowdowns();
     // Discards affiliation timestamps written while the transport was broken,
     // so the badges do not stay dead for up to 24h after the fix. Once only.
     repairAffiliationCache();

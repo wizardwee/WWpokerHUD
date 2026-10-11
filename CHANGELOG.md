@@ -9,6 +9,39 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.100.0
+The Range tab highlights each player's last 50 showdowns
+
+Asked for: a way to see a player's RECENT showdown range, not only the
+lifetime one. `shownHands` is a running count per hand class with no time on
+it, so it could never answer that by itself.
+
+- **A per-player window, `p.sdRecent`**: the last `SD_RECENT_MAX` (50)
+  showdowns, oldest first, one short string each — tier digit, an optional
+  `L` for a limp-3bet, the class (`"2LAKs"`, `"0T9s"`). ~350 bytes at most, and
+  sparse: only players seen at showdown carry one.
+- **Recorded live in `noteShowdown`**, from the very `preflopTier` and
+  `limpRaised` the lifetime counters use, so a highlighted chip can never sit
+  in a group its counter does not.
+- **Seeded once from saved history** (`backfillRecentShowdowns`, from
+  `init()`, flag `STORE.sdRecentBackfilled` — the `backfillBarrels`
+  discipline). A stored hand kept only its actions, so tiers are re-derived by
+  `preflopTiersFromActions`, which mirrors `markAsPreflopRaiseAction` /
+  `maybeCountLimp` rule for rule. Because that is a second reading of the
+  raise order, `test/recent-showdowns.test.js` drives 400 random preflop
+  sequences through the real parser and requires both readings to agree on
+  every hand. A player whose window already has entries is not appended to.
+  Only the hands history still holds can be seeded; older showdowns have no
+  date and stay unhighlighted.
+- **Highlighted in place, not split into a second list.** Most players have too
+  few showdowns for two lists to read; gold chips inside the existing groups
+  keep the whole range and show what changed. Each group's note gains
+  "· N recent", the tooltip says the same, and the header carries the key.
+  Recent counts are capped at the lifetime count per class.
+
+The deep scan's `showdown ranges:` line now reports how many players carry a
+window and whether the history seeding has run.
+
 ## 1.99.2
 P/L keeps counting in BB display mode after a reload or a stake move
 
