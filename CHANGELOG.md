@@ -9,6 +9,30 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.101.0
+Seat boxes now mean target or avoid
+
+Asked for: rework the red boxes so they do two things — target the fish, and
+avoid the sharks — and avoid Nits too.
+
+- **Green solid box: a fish to target.** Fish or Station by archetype (the same
+  `SOFT_TYPES` the table-softness line counts), or your 📞 tag.
+- **Red dashed box: a player to avoid.** TAG or LAG (the regulars who beat this
+  pool) or Nit (plays only strong hands: little to win, and their bets mean
+  it). The tooltip says which reason applies.
+- **Colour and line style both differ**, so the two stay distinguishable with
+  red/green colour blindness.
+- **The v1.87.0 dashed "folds to aggression" box is removed**, along with the
+  `folds: true` marks in `buildTendencyEntries` that fed only it. The fold
+  reads themselves are unchanged and stay in the coach and the Exploit tab,
+  where they come with the play to make.
+- Maniac and Balanced get no box. 📞 makes anyone a fish; 🚪, 🤥 and 🐍 rule
+  out the fish box but leave an avoid read from the archetype in place.
+
+`test/target-box.test.js` is rewritten around fixtures built from the live
+`POOL_AVG` bars, each checked to classify as the type it is named for before
+its box is asserted.
+
 ## 1.100.0
 The Range tab highlights each player's last 50 showdowns
 

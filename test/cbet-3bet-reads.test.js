@@ -46,7 +46,7 @@ const entry = (p, tag, voice) => (voice === 'leak' ? T.buildLeakPlan(p) : T.buil
   t.eq('under 30 hands the frequency read waits', entry(base({ hands: 20, threeBetMade: 5 }), '3-bettor').length, 0);
 }
 
-// --- per-street folding now counts as folding to aggression for the red box ---
+// --- per-street folding fires the Fold read ---
 {
   const streets = { flop: { bet: 0, raise: 0, call: 0, check: 0, fold: 0 },
     turn: { bet: 1, raise: 0, call: 3, check: 2, fold: 12 },
@@ -54,8 +54,6 @@ const entry = (p, tag, voice) => (voice === 'leak' ? T.buildLeakPlan(p) : T.buil
   const p = base({ streetActions: streets });
   const plan = T.buildExploitPlan(p);
   t.ok('folding 60%+ of turns fires the Fold read', plan.some((e) => e.tag === 'Fold'));
-  t.ok('...and is marked as folding', plan.some((e) => e.tag === 'Fold' && e.folds));
-  t.eq('...so it draws the dashed box', T.exploitTargetKind(p), 'bluff');
 }
 
 process.exit(t.report());

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.100.0
+// @version      1.101.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,11 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.101.0 - Seat boxes now mean target or avoid.
+ *            - Green box: a fish or station (or your 📞 tag), to target.
+ *            - Red dashed box: a TAG, LAG or Nit, to avoid.
+ *            - The dashed "folds to aggression" box is gone; those reads stay
+ *              in the coach and the Exploit tab.
  * 1.100.0 - The Range tab highlights each player's last 50 showdowns.
  *            - Gold chips are hands they showed within their last 50
  *              showdowns, in the same Opened / 3-bet / 4-bet / Called groups;
@@ -31,12 +36,6 @@
  *              the new one (a $1M table counted at $2.5M).
  *            - The Cash Games row you tapped now prices it, and tapping a
  *              different stake drops the old blind.
- * 1.99.1 - Stacks and the table's pot read in BB display mode.
- *            - A scan at a table showing amounts in big blinds read no stacks
- *              and no pot: both readers only accepted "$" figures. "157.45 BB"
- *              is now priced with the table's blind, so effective stack, the
- *              strike button's stack gate and stack tracking work again.
- *            - Unconfirmed: the next scan's "stacks read" and "pot: dom=" lines.
  */
 
 /*
@@ -78,7 +77,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.100.0';
+  const HUD_VERSION = '1.101.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -513,7 +512,7 @@
     badgeMode: 'session',
     sessionWindow: 15,
     showSelfBadge: true, // badge your own seat too — see renderBadges
-    targetBoxes: true,   // red box round seats worth exploiting — see exploitTargetKind
+    targetBoxes: true,   // green box round fish, red dashed round TAG/LAG/Nit — see exploitTargetKind
     badgeStats: true,  // V/P/A on the seat badge. Off leaves type + role + state
                        // emoji, which is the read; the numbers are the evidence
                        // for it and are one tap away. The escape hatch for a
@@ -8814,38 +8813,46 @@
   // line would read as an invitation. The verdict needs 3+ rated players.
   const SOFT_TYPES = { Fish: 1, Station: 1 };
 
-  // --- Target boxes (v1.87.0) --------------------------------------------------
+  // --- Seat boxes (v1.87.0, reworked v1.101.0) --------------------------------
   //
-  // Asked for: "highlight certain types of players to exploit … fish/stations,
-  // and people who fold to aggression … a red box around their square."
+  // Two boxes, one per intent the user stated: TARGET the fish, AVOID the
+  // strong and the tight. Drawn round the seat, never on it.
   //
-  // Two kinds, because they call for OPPOSITE plays: a station pays off value
-  // bets and must never be bluffed; a folder is exactly who you bluff. One box
-  // for both would say "target" without saying which way, and the wrong way
-  // round costs money. Same red, drawn solid for 'value' and dashed for
-  // 'bluff'.
+  //   fish  — green, solid:  Fish or Station (SOFT_TYPES, the same two
+  //           tableSoftness counts), or your 📞 tag.
+  //   avoid — red, dashed:   TAG, LAG or Nit. TAG/LAG are the regulars who
+  //           beat this pool; a Nit only plays strong hands, so there is
+  //           little to win and their aggression means it.
   //
-  // Your manual tag wins (📞 → value, 🚪 → bluff; 🤥 and 🐍 → no box, since
-  // both say "careful", not "go"). Otherwise: a folds-to-aggression read from
-  // buildExploitPlan (fold to c-bet, fold to 3-bet or fold to a turn barrel
-  // past the SAME thresholds the Exploit tab uses, read off its own mark), then
-  // the Fish/Station archetype. Only RATED players — the minHands bar that
-  // decides Unrated everywhere else, and the same one tableSoftness uses.
-  // Never hero.
+  // Colour AND line style differ, so the two stay distinguishable to anyone
+  // who has trouble telling red from green.
+  //
+  // The v1.87.0 dashed "folds to aggression" box is gone, by request: the
+  // fold reads stay in the coach and the Exploit tab, where they come with the
+  // play to make. Maniac and Balanced get no box — neither a target nor
+  // someone to avoid on type alone.
+  //
+  // Manual tags: 📞 is a fish whatever the stats say (your read wins). 🚪, 🤥
+  // and 🐍 rule out the fish box — each says the player is not a calling
+  // station — but leave the avoid box to the archetype. Only RATED players
+  // (minHands, the bar that decides Unrated everywhere else) get a box from
+  // stats. Never hero.
+  const AVOID_TYPES = { TAG: 1, LAG: 1, Nit: 1 };
   function exploitTargetKind(p) {
     if (!p) return null;
-    const tag = p.tag;
-    if (tag === 'station') return 'value';
-    if (tag === 'folds') return 'bluff';
-    if (tag === 'bluff' || tag === 'trap') return null;
+    if (p.tag === 'station') return 'fish';
     if ((p.hands || 0) < STORE.settings.minHands) return null;
-    if (buildExploitPlan(p).some((e) => e.folds)) return 'bluff';
-    return SOFT_TYPES[classify(p)] ? 'value' : null;
+    const type = classify(p);
+    if (SOFT_TYPES[type] && !p.tag) return 'fish';
+    if (AVOID_TYPES[type]) return 'avoid';
+    return null;
   }
-  const TARGET_BOX_TEXT = {
-    value: 'Calls too much — value bet, never bluff.',
-    bluff: 'Folds to aggression — bet and bluff at them.',
-  };
+  // Tooltip line per box, by archetype where the reason differs.
+  function targetBoxText(kind, type) {
+    if (kind === 'fish') return "Fish — loose and passive: value bet them, don't bluff.";
+    if (type === 'Nit') return 'Avoid — Nit: plays only strong hands; little to win, and their bets mean it.';
+    return `Avoid — ${type}: a strong regular; skip marginal spots against them.`;
+  }
   const SOFT_MIN_RATED = 3;
   // Postflop actions a player needs before their AFq joins the table average.
   // Same bar the exploit reads use for a per-street aggression figure.
@@ -10717,11 +10724,6 @@
       when: when || null,
       edge: typeof edge === 'number' ? edge : null,
     });
-    // Marks the entry just added as a "folds to aggression" read. The seat
-    // highlight (exploitTargetKind) reads THIS mark rather than re-testing the
-    // thresholds, so the box and the Exploit tab cannot disagree about who
-    // folds too much.
-    const markFolds = () => { out[out.length - 1].folds = true; };
     const n = p.hands || 0;
 
     // --- Postflop: the biggest lever against a passive pool ------------------
@@ -10736,7 +10738,6 @@
             + 'of your range, especially in position; anyone paying attention is printing off you right now.',
           'fire every flop', 'defend flops more', ['flop', 'lead'],
           spreadEdge(s.foldToCbet, POOL_AVG.foldToCbet, POOL_SPREAD.foldToCbet));
-        markFolds();
       } else if (s.foldToCbet < POOL_AVG.foldToCbet - POOL_SPREAD.foldToCbet) {
         add(95, 'C-bet',
           `Folds to c-bets only ${fmtPct(r.foldToCbet)} (${p.foldToCbetOpp} spots). `
@@ -10813,7 +10814,6 @@
             + 'or continue on more turns.',
           'bet the turn again', 'call flops you keep', ['turn', 'lead'],
           thresholdEdge(r.foldToBarrel, 60, 85));
-        markFolds();
       } else if (r.foldToBarrel <= 25) {
         add(78, 'Barrel',
           `Once they call your flop c-bet they rarely fold the turn (${fmtPct(r.foldToBarrel)}, `
@@ -10857,7 +10857,6 @@
             + '3-betting you light and taking the pot uncontested; 4-bet or continue more instead of folding.',
           '3-bet them light', 'defend your opens', ['preflop'],
           spreadEdge(s.foldTo3Bet, PA.foldTo3Bet, POOL_SPREAD.foldTo3Bet));
-        markFolds();
       } else if (s.foldTo3Bet < PA.foldTo3Bet - POOL_SPREAD.foldTo3Bet) {
         add(60, '3-bet',
           `Rarely folds to 3-bets (${fmtPct(r.foldTo3Bet)}). 3-bet for value only — `
@@ -11225,7 +11224,6 @@
             + `the ${st} more than you should. Bluff-catch or barrel through it more instead of folding on autopilot.`,
           `barrel the ${st}`, `stop over-folding the ${st}`, [st],
           thresholdEdge(b.foldPct, 60, 90));
-        markFolds();
       } else if (b.foldPct < 20) {
         add(74, 'Fold',
           `Almost never folds the ${st} — ${fmtPct(b.foldPct)} of ${b.actions} decisions. `
@@ -11838,7 +11836,8 @@
        one thing on a seat you always need to read. */
     .tph-target-box { position: fixed; z-index: 99997; pointer-events: none; box-sizing: border-box;
       border: 2px solid #ff3b3b; border-radius: 6px; }
-    .tph-target-bluff { border-style: dashed; }
+    .tph-target-fish { border-color: #3ddc84; }
+    .tph-target-avoid { border-color: #ff3b3b; border-style: dashed; }
     .tph-badge { position: fixed; z-index: 99998; background: rgba(10,10,14,0.82) !important;
       color: #cfd6dd !important; border: none; border-radius: 3px; padding: 1px 3px;
       font: 10px/1.45 -apple-system, sans-serif !important;
@@ -13625,7 +13624,7 @@
         box.style.width = (rect.width + 4) + 'px';
         box.style.height = (rect.height + 4) + 'px';
         frag.appendChild(box);
-        badge.title += ' ' + (target === 'value' ? '▭ solid red box: ' : '▭ dashed red box: ') + TARGET_BOX_TEXT[target];
+        badge.title += ' ' + (target === 'fish' ? '▭ green box: ' : '▭ red dashed box: ') + targetBoxText(target, classify(player));
       }
     });
     document.body.appendChild(frag);
@@ -15107,9 +15106,9 @@
       <label><input type="checkbox" class="tph-badgestats-toggle" ${STORE.settings.badgeStats !== false ? 'checked' : ''}> Numbers (v/p/a) on the labels</label>
       <div style="opacity:.7;margin:2px 0 10px">Turn off if labels reach the board. Type, markers and 🤮/🔥 stay;
         numbers are one tap away.</div>
-      <label><input type="checkbox" class="tph-targetbox-toggle" ${STORE.settings.targetBoxes !== false ? 'checked' : ''}> Red box round players to exploit</label>
-      <div style="opacity:.7;margin:2px 0 10px">Solid: calls too much (fish, station, 📞) — value bet, don't bluff.
-        Dashed: folds to aggression (🚪) — bet at them. Rated players only.</div>
+      <label><input type="checkbox" class="tph-targetbox-toggle" ${STORE.settings.targetBoxes !== false ? 'checked' : ''}> Boxes round fish to target and players to avoid</label>
+      <div style="opacity:.7;margin:2px 0 10px">Green: fish or station (or 📞) — value bet, don't bluff.
+        Red dashed: TAG, LAG or Nit — avoid marginal spots. Rated players only.</div>
       <label><input type="checkbox" class="tph-rolebadge-toggle" ${STORE.settings.showRoleBadges !== false ? 'checked' : ''}> Mark this hand's raiser and postflop leads</label>
       <div style="opacity:.7;margin:2px 0 10px">Gold <b>PFR</b>/<b>3B</b>/<b>4B</b>: raised preflop.
         Blue <b>DONK</b>/<b>RR</b>: led or raised postflop after not being the last preflop raiser. Cleared each hand.</div>
@@ -16887,6 +16886,7 @@
       seatCovered,
       coveredSeatKeys,
       exploitTargetKind,
+      targetBoxText,
       isHudElement,
       tableBlindsBB,
       minStakeInputText,

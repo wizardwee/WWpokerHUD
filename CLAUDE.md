@@ -1449,16 +1449,18 @@ seat and log fixtures glued digits (`"$168,410,0832/6"`) and were rejected for
 reading as garbage, so the exclusion they were meant to prove went unexercised
 until mutation showed it.
 
-**Target boxes (v1.87.0).** A red box round a seat worth exploiting: solid =
-calls too much (Fish/Station or 📞), dashed = folds to aggression (🚪, or a fold
-read from `buildExploitPlan`). **Two kinds because they are opposite plays** —
-one box would say "target" without saying bluff or value bet. The fold reads
-come from a `folds: true` mark set on the three folding branches inside
-`buildTendencyEntries`, never a second copy of the thresholds; add the mark to
-any new "folds too much" rule or the box will not know about it. Manual tag
-wins; 🤥/🐍 suppress. Rated only, never hero, `pointer-events: none`.
-Since v1.88.0 the per-street "folds 60%+ of the {street}" read carries the
-mark too, so four rules feed the dashed box.
+**Seat boxes (v1.87.0, reworked v1.101.0).** Two boxes for the two intents
+the user stated: **green solid** round a fish to TARGET (Fish/Station by
+archetype, or 📞), **red dashed** round a player to AVOID (TAG, LAG or Nit).
+Colour and line style both differ, so it survives red/green colour blindness.
+The v1.87.0 dashed "folds to aggression" box is gone by request, and with it
+the `folds: true` marks in `buildTendencyEntries`, which fed nothing else —
+the fold reads stay in the coach and Exploit tab with their play attached.
+Maniac and Balanced get no box. 📞 wins (fish whatever the type); 🚪/🤥/🐍
+rule out the fish box only, so an avoid read from the archetype still shows.
+Rated only, never hero, `pointer-events: none`. "Avoid" is the code's word,
+not "shark": a Nit is avoided for a different reason (little to win) than a
+TAG/LAG (a strong regular), and `targetBoxText` says which.
 
 **C-bet and 3-bet frequency reads (v1.88.0)** — both stats were collected and
 shown and read by no rule. The 3-bet pool figure (1.5) equals its spread, so a
