@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.101.0
+// @version      1.102.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,13 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.102.0 - Two new stats on the Stats tab: 4-Bet+ and Fold v CB 3B+.
+ *            - 4-Bet+: how often they re-raise again (4-bet, 5-bet...) when
+ *              facing a 3-bet or bigger. Once per player per hand.
+ *            - Fold v CB 3B+: how often they fold to a flop c-bet in a pot
+ *              that was 3-bet or more preflop.
+ *            - Both count from this version on (no backfill), show their spot
+ *              count, and have no pool figure yet, so no tick or verdict.
  * 1.101.0 - Seat boxes now mean target or avoid.
  *            - Green box: a fish or station (or your 📞 tag), to target.
  *            - Red dashed box: a TAG, LAG or Nit, to avoid.
@@ -29,13 +36,6 @@
  *              each group says how many are recent.
  *            - Seeded once from the hands your history still holds, then kept
  *              up live. Older showdowns had no date, so they stay unhighlighted.
- * 1.99.2 - P/L keeps counting in BB display mode after a reload or a move.
- *            - With amounts shown in big blinds the log never states the blind
- *              in dollars. After a reload nothing could price it, so every hand
- *              settled at $0; after moving stakes, the old table's blind priced
- *              the new one (a $1M table counted at $2.5M).
- *            - The Cash Games row you tapped now prices it, and tapping a
- *              different stake drops the old blind.
  */
 
 /*
@@ -77,7 +77,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.101.0';
+  const HUD_VERSION = '1.102.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -4179,6 +4179,11 @@
       // because it needs both halves: countedLimp records the limp, and the
       // raise that follows is what makes it a trap rather than a limp.
       limpRaised: new Set(),
+      // 4-bet+ (v1.102.0): who has faced a preflop re-raise this hand, and who
+      // has made one at tier 3 or above. Once per player per hand each, so a
+      // 4-bet / 5-bet war counts as one spot, not three.
+      counted4BetOpp: new Set(),
+      counted4Bet: new Set(),
     };
   }
 
@@ -4939,6 +4944,7 @@
         saveStore();
       } else if (hand.street !== 'preflop' && hand.cbetFacedThisStreet && xid !== hand.cbetFacedThisStreet) {
         getPlayer(xid).foldToCbetMade += 1;
+        if (hand.street === 'flop' && hand.preflopRaiseEvents >= 2) bumpSparse(xid, 'fcb3', 'm');
         saveStore();
       }
       hand.playersIn.delete(xid);
@@ -5436,7 +5442,46 @@
     }
     maybeCountPfr(xid, hand);
     maybeCountThreeBet(xid, hand);
+    maybeCountFourBet(xid, hand);
     markAggressor(xid, hand);
+  }
+
+  // Sparse per player, `{m, o}`: absent until first seen in the spot, because
+  // these ride on every record forever (open finding #2's growth shape) — same
+  // shape as p.barrel. Used by the 4-bet+ and 3-bet-pot fold-to-c-bet stats.
+  function bumpSparse(xid, field, key) {
+    const p = getPlayer(xid);
+    if (!p[field] || typeof p[field] !== 'object') p[field] = {};
+    p[field][key] = (p[field][key] || 0) + 1;
+  }
+
+  // 4-bet+ (v1.102.0): re-raises at tier 3 or above, out of the times a player
+  // faced a 3-bet or bigger. A spot is any preflop re-raise (tier 2+) while the
+  // player is still in and is not the raiser, so the 3-bettor facing a 4-bet
+  // has a 5-bet spot and counts toward the same "+".
+  //
+  // Its OWN opportunity counter, not foldTo3BetOpp: every record already holds
+  // years of foldTo3BetOpp from before 4-bets were counted, and dividing new
+  // makes by old opportunities would read every player as never 4-betting.
+  // Starts empty and accrues forward, same as limpRaiseMade.
+  function maybeCountFourBet(xid, hand) {
+    if (hand.street !== 'preflop' || hand.preflopRaiseEvents < 2) return;
+    if (hand.preflopRaiseEvents >= 3 && !hand.counted4Bet.has(xid)) {
+      hand.counted4Bet.add(xid);
+      // A cold 4-bettor joined mid-hand may not be in playersIn yet; a make
+      // must never outnumber its opportunities.
+      if (!hand.counted4BetOpp.has(xid)) {
+        hand.counted4BetOpp.add(xid);
+        bumpSparse(xid, 'fourBet', 'o');
+      }
+      bumpSparse(xid, 'fourBet', 'm');
+    }
+    hand.playersIn.forEach((otherXid) => {
+      if (otherXid === xid || hand.counted4BetOpp.has(otherXid)) return;
+      hand.counted4BetOpp.add(otherXid);
+      bumpSparse(otherXid, 'fourBet', 'o');
+    });
+    saveStore();
   }
 
   function maybeCountCbet(xid, hand) {
@@ -5447,6 +5492,15 @@
       hand.playersIn.forEach((otherXid) => {
         if (otherXid !== xid) getPlayer(otherXid).foldToCbetOpp += 1;
       });
+      // The same spot narrowed to the FLOP of a 3-bet-or-bigger pot (v1.102.0).
+      // A separate counter rather than a filter on foldToCbet: that one mixes
+      // every street and every pot size, and a range that folds a single-raised
+      // flop is not the range that got to a 3-bet flop.
+      if (hand.street === 'flop' && hand.preflopRaiseEvents >= 2) {
+        hand.playersIn.forEach((otherXid) => {
+          if (otherXid !== xid) bumpSparse(otherXid, 'fcb3', 'o');
+        });
+      }
       saveStore();
     }
   }
@@ -7292,6 +7346,10 @@
   // thresholds, the same as bluff and slowplay rates.
   const BARREL_MIN = 10;
   const FOLD_BARREL_MIN = 8;
+  // Below these the Stats tab marks the 4-bet+ and 3-bet-pot fold-to-c-bet
+  // rows "low". Both spots are rare, so the bar is a count, not a percentage.
+  const FOUR_BET_MIN = 10;
+  const FOLD_CBET3_MIN = 8;
   // A 3-bet is ~1.5% of hands in this pool, so its absence means something
   // only over a long stretch: at 1.5% the chance of none in 80 hands is ~30%,
   // in 150 about 10%. The read says "their 3-bet is premium", which is safe
@@ -7460,6 +7518,9 @@
     const texBetSample = (tex.madeBets || 0) + (tex.drawBets || 0) + (tex.bluffBets || 0);
     // Turn barrels (v1.82.0), stored sparsely — see barrelEventsFor.
     const bar = (p.barrel && typeof p.barrel === 'object') ? p.barrel : {};
+    // 4-bet+ and fold to flop c-bet in a 3-bet+ pot (v1.102.0), both sparse.
+    const fb = (p.fourBet && typeof p.fourBet === 'object') ? p.fourBet : {};
+    const f3 = (p.fcb3 && typeof p.fcb3 === 'object') ? p.fcb3 : {};
     // Won at showdown, off the showdowns whose cards were SEEN — the same
     // sample shownHands already holds, so it needs no collection of its own.
     // It inherits that sample's bias: a showdown loser who mucks unseen is not
@@ -7501,6 +7562,10 @@
       barrelOpp: bar.o || 0,
       foldToBarrel: pct(bar.fm || 0, bar.fo || 0),
       foldToBarrelOpp: bar.fo || 0,
+      fourBet: pct(fb.m || 0, fb.o || 0),
+      fourBetOpp: fb.o || 0,
+      foldToCbet3: pct(f3.m || 0, f3.o || 0),
+      foldToCbet3Opp: f3.o || 0,
       medianBetPct: median(p.betSizes),
       // Median bet/raise size as % of pot, split by what they were caught
       // holding at showdown: two pair+, a live draw, or nothing at all. A
@@ -14206,8 +14271,18 @@
           })()}
           ${statRow('3-Bet', r.threeBet, s.threeBet, 'threeBet', null, s.anchor)}
           ${statRow('Fold v 3B', r.foldTo3Bet, s.foldTo3Bet, 'foldTo3Bet', null, s.anchor)}
+          <tr title="How often they re-raise again (4-bet, 5-bet…) when facing a 3-bet or bigger preflop. Counted from v1.102.0 on. No pool figure yet, so no tick and no verdict.">
+            <td class="tph-stat-l">4-Bet+</td>
+            <td class="tph-stat-v"><b>${fmtPct(r.fourBet)}</b></td>
+            <td class="tph-stat-n"><span class="tph-stat-norm">${r.fourBetOpp} spot${r.fourBetOpp === 1 ? '' : 's'}${r.fourBetOpp > 0 && r.fourBetOpp < FOUR_BET_MIN ? ', low' : ''}</span></td>
+          </tr>
           ${statRow('C-Bet', r.cbet, s.cbet, 'cbet', null, s.anchor)}
           ${statRow('Fold v CB', r.foldToCbet, s.foldToCbet, 'foldToCbet', null, s.anchor)}
+          <tr title="How often they fold to a flop c-bet in a pot that was 3-bet or more preflop. Counted from v1.102.0 on. No pool figure yet, so no tick and no verdict.">
+            <td class="tph-stat-l">Fold v CB 3B+</td>
+            <td class="tph-stat-v"><b>${fmtPct(r.foldToCbet3)}</b></td>
+            <td class="tph-stat-n"><span class="tph-stat-norm">${r.foldToCbet3Opp} spot${r.foldToCbet3Opp === 1 ? '' : 's'}${r.foldToCbet3Opp > 0 && r.foldToCbet3Opp < FOLD_CBET3_MIN ? ', low' : ''}</span></td>
+          </tr>
           <tr title="After betting the flop as the preflop raiser and only being called, how often they bet the turn again when it is theirs to bet. No pool figure yet, so no tick and no verdict.">
             <td class="tph-stat-l">Turn barrel</td>
             <td class="tph-stat-v"><b>${fmtPct(r.barrel)}</b></td>

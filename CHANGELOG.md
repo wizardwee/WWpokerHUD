@@ -9,6 +9,37 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.102.0
+Two new stats on the Stats tab: 4-Bet+ and fold to flop c-bet in a 3-bet+ pot
+
+Asked for directly: "Folded to continuation bet on flop in 3-bet+ pot" and
+"4-bet+ %".
+
+- **4-Bet+.** Re-raises at tier 3 or above (4-bet, 5-bet, …) out of the times a
+  player faced a 3-bet or bigger preflop. A spot is any preflop re-raise while
+  the player is still in and isn't the raiser, so the 3-bettor facing a 4-bet
+  has a 5-bet spot and counts toward the same "+". Once per player per hand
+  each way, so a raising war is one spot, not three. A cold 4-bettor not yet in
+  `playersIn` is granted the spot with the make, so makes never exceed spots.
+- **Fold v CB 3B+.** The existing fold-to-c-bet spot narrowed to the FLOP of a
+  pot with `preflopRaiseEvents >= 2`. A separate counter rather than a filter
+  on `foldToCbet`, which mixes every street and every pot size.
+- **Their own opportunity counters, not `foldTo3BetOpp`.** Every record already
+  holds years of 3-bet spots from before 4-bets were counted; dividing new makes
+  by old spots would read everyone as never 4-betting. Both accrue forward only,
+  no backfill — same precedent as `limpRaiseMade`.
+- **Stored sparsely** as `p.fourBet = {m, o}` and `p.fcb3 = {m, o}`, absent until
+  a player is first in the spot (open finding #2's growth shape, like
+  `p.barrel`).
+- **No pool figure, so no tick and no verdict**, same as Turn barrel. The rows
+  show the spot count and say "low" under 10 (4-bet) / 8 (fold v CB 3B+). Not
+  fed to the coach yet — measure the pool first.
+
+`test/four-bet-fcb3.test.js` drives real log lines: a 3-bet-pot flop fold, a
+single-raised pot that must not count, a turn fold that must not count, a
+4/5/6-bet war counted once each, a cold 4-bettor, sparse storage, and the Stats
+tab rendering both rows.
+
 ## 1.101.0
 Seat boxes now mean target or avoid
 
