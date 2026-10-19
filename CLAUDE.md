@@ -2841,6 +2841,20 @@ tracks). Ledger chunks still rehash in full.
 the whole key list per call, making enumeration O(n²): v1.103.0's "298ms at
 5000" and a 158ms per-hand save were that stub, not the script. Cached now.
 
+**Gist sync failed silently for six weeks (v1.105.0).** The user's gist stayed
+at 3 Sep while the status line read "Connected. Last sync: now". Three faults:
+`pdaFetch` sent every non-GET through `PDA_httpPost`, which takes no method,
+so the gist PATCH reached GitHub as a POST (404); no GitHub call checked the
+HTTP status, so the 404 stamped `lastSync`; and the API truncates file content
+at ~1MB, so the multi-MB pull never parsed and the merge never ran. Now only
+POST uses the bridge (other methods go to `fetch` — GitHub allows CORS; if
+the page blocks it, the error shows), `GistSync.call` throws on any non-2xx
+with GitHub's message, `pushGist` requires the gist id back, a `truncated`
+file is read from `raw_url`, and a good sync resets the status to connected.
+`test/gist-push.test.js`. **Unconfirmed on the device:** whether `fetch` to
+api.github.com is allowed from torn.com in the PDA webview — the status line
+after one Re-sync settles it.
+
 **Known cost, not solved: the gist backup.** `exportJson` is pretty-printed
 (indent 2) and carries every hand — ~9 MB at 2000 hands, ~18 MB at 5000, vs
 4.5 MB at 500. That may exceed what a gist PATCH through `pdaFetchJson`

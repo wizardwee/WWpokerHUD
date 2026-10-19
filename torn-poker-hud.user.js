@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.104.0
+// @version      1.105.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,12 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.105.0 - Gist sync says when it fails, and the update can land.
+ *            - The backup update went out as the wrong kind of request, and
+ *              GitHub refused it; nothing checked the answer, so the status
+ *              line still said "Last sync: now". Your gist stopped at 3 Sep.
+ *            - Every sync step now shows GitHub's error if one is refused.
+ *            - A backup over ~1MB is now read whole when merging.
  * 1.104.0 - History keeps 2000 hands by default, up to 5000.
  *            - Settings > Hand log now goes to 5000. A store on the old 200
  *              default moves to 2000 once; any other choice is kept.
@@ -34,13 +40,6 @@
  *              don't bluff, over 70% means barrel.
  *            - Settings > Hand log: keep 200 / 500 / 1000 / 2000 hands
  *              (above 500 needs the app's native storage).
- * 1.102.0 - Two new stats on the Stats tab: 4-Bet+ and Fold v CB 3B+.
- *            - 4-Bet+: how often they re-raise again (4-bet, 5-bet...) when
- *              facing a 3-bet or bigger. Once per player per hand.
- *            - Fold v CB 3B+: how often they fold to a flop c-bet in a pot
- *              that was 3-bet or more preflop.
- *            - Both count from this version on (no backfill), show their spot
- *              count, and have no pool figure yet, so no tick or verdict.
  */
 
 /*
@@ -82,7 +81,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.104.0';
+  const HUD_VERSION = '1.105.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -414,7 +413,13 @@
     if (method === 'GET' && typeof window.PDA_httpGet === 'function') {
       return pdaCall(window.PDA_httpGet, [url, headers]);
     }
-    if (method !== 'GET' && typeof window.PDA_httpPost === 'function') {
+    // POST only. PDA_httpPost takes no method argument, so routing a PATCH
+    // through it sent a POST — and GitHub answers a POST to /gists/<id> with
+    // 404. That was the gist backup's update, every sync, with nothing on
+    // screen saying so (v1.105.0). Any other method goes to fetch; GitHub's
+    // API allows cross-origin calls, and if the page blocks them the error
+    // now surfaces instead of a false "synced".
+    if (method === 'POST' && typeof window.PDA_httpPost === 'function') {
       return pdaCall(window.PDA_httpPost, [url, headers, body]);
     }
 
@@ -2541,6 +2546,23 @@
       };
     },
 
+    // One GitHub call, refusing anything but a 2xx (v1.105.0). Every sync call
+    // used to ignore the status, so a refused upload — 404, 401, 422 — still
+    // stamped lastSync and read "Connected. Last sync: now". The backup sat
+    // six weeks stale behind that line. The thrown message is what the status
+    // line shows, so it carries GitHub's own reason.
+    async call(method, url, body) {
+      const res = await pdaFetchJson(method, url, {
+        headers: this.authHeaders(),
+        body: body == null ? undefined : JSON.stringify(body),
+      });
+      if (!(res.status >= 200 && res.status < 300)) {
+        const why = res.json && res.json.message ? ' — ' + res.json.message : '';
+        throw new Error(`${method} ${url.replace(GITHUB_API, '')}: HTTP ${res.status}${why}`);
+      }
+      return res;
+    },
+
     async syncNow() {
       if (!STORE.settings.githubToken) return;
       try {
@@ -2551,6 +2573,10 @@
           await this.pushGist();
         }
         STORE.settings.lastSync = Date.now();
+        // Cleared on success, or one failed sync left the line reading
+        // "Error" through every good one after it.
+        this.status = 'connected';
+        this.error = null;
         saveStore();
         renderSettingsPanel();
       } catch (e) {
@@ -2562,34 +2588,45 @@
     },
 
     async createGist() {
-      const { json } = await pdaFetchJson('POST', `${GITHUB_API}/gists`, {
-        headers: this.authHeaders(),
-        body: JSON.stringify({
-          description: 'Torn Poker HUD data',
-          public: false,
-          files: { [GIST_FILENAME]: { content: exportJson() } },
-        }),
+      const { json } = await this.call('POST', `${GITHUB_API}/gists`, {
+        description: 'Torn Poker HUD data',
+        public: false,
+        files: { [GIST_FILENAME]: { content: exportJson() } },
       });
-      if (json && json.id) STORE.settings.gistId = json.id;
+      if (!json || !json.id) throw new Error('GitHub created no gist (no id in the reply)');
+      STORE.settings.gistId = json.id;
     },
 
     async pullAndMerge() {
-      const { json } = await pdaFetchJson('GET', `${GITHUB_API}/gists/${STORE.settings.gistId}`, {
-        headers: this.authHeaders(),
-      });
+      const { json } = await this.call('GET', `${GITHUB_API}/gists/${STORE.settings.gistId}`);
       const file = json && json.files && json.files[GIST_FILENAME];
-      if (!file || !file.content) return;
-      try {
-        const remote = JSON.parse(file.content);
-        replaceStore(mergeStores(STORE, remote));
-      } catch (e) { /* ignore malformed remote content */ }
+      if (!file) return;
+      // The API cuts a file's content off at about 1MB and sets `truncated`;
+      // a backup is several MB, so the content field was always partial, the
+      // parse below always failed, and the merge never ran. raw_url serves
+      // the whole file.
+      let content = file.content;
+      if (file.truncated && file.raw_url) {
+        const raw = await pdaFetch('GET', file.raw_url, {});
+        if (!(raw.status >= 200 && raw.status < 300)) {
+          throw new Error(`GET gist file: HTTP ${raw.status}`);
+        }
+        content = raw.text;
+      }
+      if (!content) return;
+      let remote;
+      try { remote = JSON.parse(content); } catch (e) {
+        throw new Error('gist file is not valid JSON — not merged');
+      }
+      replaceStore(mergeStores(STORE, remote));
     },
 
     async pushGist() {
-      await pdaFetchJson('PATCH', `${GITHUB_API}/gists/${STORE.settings.gistId}`, {
-        headers: this.authHeaders(),
-        body: JSON.stringify({ files: { [GIST_FILENAME]: { content: exportJson() } } }),
-      });
+      const id = STORE.settings.gistId;
+      const { json } = await this.call('PATCH', `${GITHUB_API}/gists/${id}`,
+        { files: { [GIST_FILENAME]: { content: exportJson() } } });
+      // A 2xx that is not the gist back is not proof it landed.
+      if (!json || json.id !== id) throw new Error('GitHub did not confirm the update');
     },
 
     // Put one text file in a NEW secret gist and hand back its URL.

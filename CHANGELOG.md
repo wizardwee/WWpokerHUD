@@ -9,6 +9,30 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.105.0
+Gist sync says when it fails, and the update can land
+
+Found while analysing a backup: the gist had not changed since 3 September,
+while the status line read "Connected. Last sync: <now>".
+
+- **The update went out as a POST.** On Torn PDA every non-GET request went
+  through `PDA_httpPost`, which has no method argument, so the gist update
+  (a PATCH) reached GitHub as a POST to `/gists/<id>`, which GitHub answers
+  with 404. Only POST uses that bridge now; PATCH goes through `fetch`.
+- **Nothing checked GitHub's answer.** Create, pull and update ignored the
+  HTTP status, so a refused update still stamped "Last sync". Each call now
+  fails on anything but a 2xx and the status line shows GitHub's reason
+  (e.g. `PATCH /gists/…: HTTP 404 — Not Found`, `HTTP 401 — Bad credentials`).
+  An update also has to come back with the gist's id.
+- **The pull never merged a real backup.** GitHub's API cuts file content off
+  at about 1 MB and marks it truncated; a backup is several MB, so the parse
+  failed silently. A truncated file is now fetched whole from its raw URL.
+- A good sync after a failed one now clears the error.
+
+Not yet confirmed on the device: whether the webview allows `fetch` to
+api.github.com from torn.com. One Re-sync settles it — the status line says
+either "Connected" with a fresh time, or the exact error.
+
 ## 1.104.0
 History keeps 2000 hands by default, up to 5000
 
