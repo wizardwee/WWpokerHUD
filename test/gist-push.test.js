@@ -30,6 +30,19 @@ function rig(opts) {
       const r = opts.reply('GET', url);
       return Promise.resolve({ status: r.status, responseText: typeof r.body === 'string' ? r.body : JSON.stringify(r.body) });
     };
+    if (opts.pdaPatch === 'window') {
+      T._sandbox.window.PDA_httpPatch = (url, headers, body) => {
+        calls.push({ via: 'pdaPatch', method: 'PATCH', url, body });
+        const r = opts.reply('PATCH', url);
+        return Promise.resolve({ status: r.status, responseText: JSON.stringify(r.body) });
+      };
+    } else if (opts.pdaPatch === 'handler') {
+      T._sandbox.window.flutter_inappwebview = { callHandler: (name, url, headers, body) => {
+        calls.push({ via: 'handler:' + name, method: 'PATCH', url, body, extra: arguments.length });
+        const r = opts.reply('PATCH', url);
+        return Promise.resolve({ status: r.status, responseText: JSON.stringify(r.body) });
+      } };
+    }
     T._sandbox.window.PDA_httpPost = (url) => {
       calls.push({ via: 'pdaPost', method: 'POST', url });
       // What GitHub does with a POST to an existing gist.
@@ -56,6 +69,33 @@ const gistReply = (content, extra) => ({
     t.ok('and not through the POST-only bridge', patch && patch.via === 'fetch');
     t.eq('a confirmed update reads connected', T.GistSync.status, 'connected');
     t.ok('and stamps lastSync', T.STORE.settings.lastSync > 0);
+  }
+
+  // --- 1b. v1.111.0: the PATCH goes through PDA when PDA offers it -------------
+  // On the device, the page's own fetch to api.github.com is refused ("Failed
+  // to fetch"), so v1.105.0's PATCH-by-fetch never reached GitHub.
+  {
+    const { T, calls } = rig({ pda: true, pdaPatch: 'window', reply: (m) => (m === 'PATCH' ? { status: 200, body: { id: 'g1' } } : gistReply('')) });
+    await T.GistSync.syncNow();
+    const patch = calls.find((c) => c.method === 'PATCH');
+    t.eq('with PDA_httpPatch, the update goes through it', patch && patch.via, 'pdaPatch');
+    t.ok('and never through fetch', !calls.some((c) => c.via === 'fetch'));
+    t.eq('the sync completes', T.GistSync.status, 'connected');
+    t.ok('the backup is compact JSON', patch && !/\\n  /.test(patch.body));
+  }
+  {
+    const { T, calls } = rig({ pda: true, pdaPatch: 'handler', reply: (m) => (m === 'PATCH' ? { status: 200, body: { id: 'g1' } } : gistReply('')) });
+    await T.GistSync.syncNow();
+    const patch = calls.find((c) => c.method === 'PATCH');
+    t.eq('with no visible wrapper, the app handler is called directly', patch && patch.via, 'handler:PDA_httpPatch');
+    t.eq('the sync completes', T.GistSync.status, 'connected');
+  }
+  {
+    const T = load();
+    T._sandbox.window.flutter_inappwebview = { callHandler: () => Promise.resolve(null) };
+    t.ok('GET keeps its window-only lookup (no bridge guess)', T.pdaHttpFn('GET') === null);
+    t.ok('PATCH uses the bridge when it is there', typeof T.pdaHttpFn('PATCH') === 'function');
+    t.ok('a big upload gets a longer timeout', T.pdaTimeoutFor('x'.repeat(5e6)) > 60000);
   }
 
   // --- 2. A refused update is an error, not a sync ------------------------------

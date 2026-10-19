@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.110.0
+// @version      1.111.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,10 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.111.0 - Gist sync goes through Torn PDA, so the backup can update.
+ *            - The update was sent from the page, which refuses it ("Failed
+ *              to fetch"). It now uses Torn PDA's own PATCH call.
+ *            - The backup is uploaded without indentation: half the size.
  * 1.110.0 - A plan for each player, and sharper reads behind it.
  *            - New Summary at the top of a player's Report, and a "Plan vs
  *              <player>" line under the coach's advice: tap to open.
@@ -33,11 +37,6 @@
  *              Chrome, so the coach stayed open. Fixed.
  *            - Each F or C press now shows a short message: shortcuts off,
  *              no Fold/Call button showing, or which button it pressed.
- * 1.108.0 - Keyboard shortcuts: F folds, C calls (or checks).
- *            - Turn on in Settings > Fold guard. Off by default.
- *            - With the fold guard on, F has to be pressed twice, same as a tap.
- *            - Your turn only, never while typing in a box, never with
- *              Ctrl/Alt/Cmd, and holding a key down presses nothing extra.
  */
 
 /*
@@ -79,7 +78,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.110.0';
+  const HUD_VERSION = '1.111.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -371,7 +370,37 @@
   // made — that ambiguity is the entire reason this took a live scan to find.
   const PDA_CALL_TIMEOUT_MS = 15000;
 
-  function pdaCall(fn, args) {
+  const PDA_HTTP_FN = {
+    GET: 'PDA_httpGet', POST: 'PDA_httpPost', PUT: 'PDA_httpPut', PATCH: 'PDA_httpPatch', DELETE: 'PDA_httpDelete',
+  };
+
+  // The PDA function for `method`, or null to use fetch. Looked up on window
+  // first (where GET and POST have always been found); for the methods this
+  // file never used before, the app's registered handler is called directly
+  // when no wrapper is visible — PDA_storage taught that an injected name can
+  // be scoped out of window's sight. GET and POST keep their old lookup
+  // exactly: they are confirmed working on the device.
+  function pdaHttpFn(method) {
+    const name = PDA_HTTP_FN[method];
+    if (!name) return null;
+    if (typeof window[name] === 'function') return window[name];
+    if (method === 'GET' || method === 'POST') return null;
+    const bridge = window.flutter_inappwebview;
+    if (bridge && typeof bridge.callHandler === 'function') {
+      return (...a) => bridge.callHandler(name, ...a.filter((x) => typeof x !== 'function'));
+    }
+    return null;
+  }
+
+  // A multi-MB gist backup is marshalled across the bridge and uploaded from
+  // a phone; 15s is for small API reads. One extra second per 50 KB of body.
+  function pdaTimeoutFor(body) {
+    const n = typeof body === 'string' ? body.length : 0;
+    return PDA_CALL_TIMEOUT_MS + Math.ceil(n / 50000) * 1000;
+  }
+
+  function pdaCall(fn, args, timeoutMs) {
+    const limit = timeoutMs || PDA_CALL_TIMEOUT_MS;
     return new Promise((resolve, reject) => {
       let settled = false;
       let timer = null;
@@ -388,8 +417,8 @@
         reject(err);
       };
       timer = setTimeout(
-        () => abort(new Error(`PDA request timed out after ${PDA_CALL_TIMEOUT_MS}ms`)),
-        PDA_CALL_TIMEOUT_MS,
+        () => abort(new Error(`PDA request timed out after ${limit}ms`)),
+        limit,
       );
       try {
         const maybe = fn(...args, finish);
@@ -408,17 +437,17 @@
    * also be exercised in a normal desktop browser during development.
    */
   async function pdaFetch(method, url, { headers = {}, body } = {}) {
-    if (method === 'GET' && typeof window.PDA_httpGet === 'function') {
-      return pdaCall(window.PDA_httpGet, [url, headers]);
-    }
-    // POST only. PDA_httpPost takes no method argument, so routing a PATCH
-    // through it sent a POST — and GitHub answers a POST to /gists/<id> with
-    // 404. That was the gist backup's update, every sync, with nothing on
-    // screen saying so (v1.105.0). Any other method goes to fetch; GitHub's
-    // API allows cross-origin calls, and if the page blocks them the error
-    // now surfaces instead of a false "synced".
-    if (method === 'POST' && typeof window.PDA_httpPost === 'function') {
-      return pdaCall(window.PDA_httpPost, [url, headers, body]);
+    // One PDA function per method. PDA_httpPost takes no method argument, so
+    // routing a PATCH through it sent a POST — and GitHub answers a POST to
+    // /gists/<id> with 404 (v1.105.0). v1.105.0 then sent PATCH to fetch,
+    // which the page refuses: "Failed to fetch (api.github.com)" on the
+    // device. Torn PDA has had PDA_httpPut / PDA_httpPatch / PDA_httpDelete
+    // beside GET and POST (userscripts/TornPDA_API.js in its repo), so every
+    // method now goes through the app when the app offers it (v1.111.0).
+    const fn = pdaHttpFn(method);
+    if (fn) {
+      const args = (method === 'GET' || method === 'DELETE') ? [url, headers] : [url, headers, body];
+      return pdaCall(fn, args, pdaTimeoutFor(body));
     }
 
     const resp = await fetch(url, { method, headers, body });
@@ -2253,8 +2282,10 @@
     return { ...STORE, settings };
   }
 
-  function exportJson() {
-    return JSON.stringify(sanitizedStore(), null, 2);
+  // `compact` for the gist (v1.111.0): the indent was ~a third of a multi-MB
+  // upload that has to cross the PDA bridge. Backup/Copy keep it readable.
+  function exportJson(compact) {
+    return JSON.stringify(sanitizedStore(), null, compact ? 0 : 2);
   }
 
   function importJson(text) {
@@ -2645,7 +2676,7 @@
       const { json } = await this.call('POST', `${GITHUB_API}/gists`, {
         description: 'Torn Poker HUD data',
         public: false,
-        files: { [GIST_FILENAME]: { content: exportJson() } },
+        files: { [GIST_FILENAME]: { content: exportJson(true) } },
       });
       if (!json || !json.id) throw new Error('GitHub created no gist (no id in the reply)');
       STORE.settings.gistId = json.id;
@@ -2678,7 +2709,7 @@
     async pushGist() {
       const id = STORE.settings.gistId;
       const { json } = await this.call('PATCH', `${GITHUB_API}/gists/${id}`,
-        { files: { [GIST_FILENAME]: { content: exportJson() } } });
+        { files: { [GIST_FILENAME]: { content: exportJson(true) } } });
       // A 2xx that is not the gist back is not proof it landed.
       if (!json || json.id !== id) throw new Error('GitHub did not confirm the update');
     },
@@ -16729,6 +16760,10 @@
     L.push('stacks read: ' + Object.keys(stacks).length + ' -> '
       + (Object.keys(stacks).map((x) => x + '=' + fmtMoney(stacks[x])).join(' ') || '(none)'));
     L.push('isPDA: ' + isPDA() + '  (flutter bridge: ' + (typeof window.flutter_inappwebview !== 'undefined') + ')');
+    // Which PDA_http* wrappers are visible (v1.111.0). PATCH is the gist
+    // backup's update; "via handler" means it is called on the bridge directly.
+    L.push('PDA http: ' + Object.keys(PDA_HTTP_FN).map((m) => m + '='
+      + (typeof window[PDA_HTTP_FN[m]] === 'function' ? 'yes' : (pdaHttpFn(m) ? 'via handler' : 'no'))).join(' '));
     // Refresh for the NEXT scan as well as reporting the cached answer now —
     // usage() is async and this report is built synchronously.
     probePdaStorageUsage();
@@ -17703,6 +17738,8 @@
       streetFoldHigh,
       STREET_POOL,
       buildPlayerSummary,
+      pdaHttpFn,
+      pdaTimeoutFor,
       buildReportHtml,
       coachPlanHtml,
       get coachPlanXid() { return coachPlanXid; },

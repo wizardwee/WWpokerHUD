@@ -9,6 +9,23 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.111.0
+Gist sync goes through Torn PDA, so the backup can update.
+
+- The device reported `Sync failed: Failed to fetch (api.github.com)`: the
+  answer to v1.105.0's open question. The page cannot reach api.github.com
+  with its own `fetch`, so the PATCH that updates the gist never left the
+  phone. Torn PDA has `PDA_httpPut` / `PDA_httpPatch` / `PDA_httpDelete`
+  beside GET and POST (`userscripts/TornPDA_API.js` in the torn-pda repo);
+  `pdaFetch` now routes every method through `pdaHttpFn`. GET and POST keep
+  their confirmed window lookup; the new methods fall back to calling the
+  app's handler directly when no wrapper is visible.
+- Bridge calls with a body get one extra second per 50 KB on the 15s
+  timeout: the backup is multi-MB.
+- The gist copy is compact JSON (`exportJson(true)`): 4.5 MB → 2.1 MB on the
+  3 Sep backup. Copy/Backup stay indented.
+- The deep scan prints which PDA http calls are available.
+
 ## 1.110.0
 A plan for each player, and sharper reads behind it.
 

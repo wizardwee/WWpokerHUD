@@ -2870,6 +2870,16 @@ offered only "Re-sync now", so there was no way to sign in again.
 `GistSync.call` now deletes `githubToken` on a 401, which puts the button back
 to Connect.
 
+**Settled on the device (v1.111.0): the page cannot fetch api.github.com.**
+The status read `Failed to fetch (api.github.com)`, so v1.105.0's PATCH-by-
+fetch never left the phone. Torn PDA also exposes `PDA_httpPut`/`Patch`/
+`Delete` (its repo's `userscripts/TornPDA_API.js`); `pdaHttpFn` routes every
+method through them, calling the app handler directly if no wrapper is on
+window. GET/POST keep their confirmed window-only lookup. **Unconfirmed:**
+whether this app build has `PDA_httpPatch` — the scan's `PDA http:` line says.
+The gist copy is compact JSON (half the size). On a desktop browser there is
+no PDA bridge, so sync there still depends on `fetch` being allowed.
+
 **Known cost, not solved: the gist backup.** `exportJson` is pretty-printed
 (indent 2) and carries every hand — ~9 MB at 2000 hands, ~18 MB at 5000, vs
 4.5 MB at 500. That may exceed what a gist PATCH through `pdaFetchJson`
