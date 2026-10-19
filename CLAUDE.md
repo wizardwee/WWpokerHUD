@@ -2865,6 +2865,13 @@ and the approval was never collected. The pending flow is now stored as
 it up at init until it expires, a dropped poll request retries instead of
 ending the poll, and the status line keeps the code visible while polling.
 
+**A dead token now clears itself (v1.107.0).** v1.106.0's first live report:
+`GET /gists/…: HTTP 401 — Bad credentials`. The stored token had been dead
+since 3 Sep (why the backup stopped), and v1.106.0's token-driven button
+offered only "Re-sync now", so there was no way to sign in again.
+`GistSync.call` now deletes `githubToken` on a 401, which puts the button back
+to Connect.
+
 **Known cost, not solved: the gist backup.** `exportJson` is pretty-printed
 (indent 2) and carries every hand — ~9 MB at 2000 hands, ~18 MB at 5000, vs
 4.5 MB at 500. That may exceed what a gist PATCH through `pdaFetchJson`

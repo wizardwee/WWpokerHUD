@@ -9,6 +9,19 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.107.0
+A sign-in GitHub rejects is forgotten, so you can sign in again
+
+Reported with a screenshot: `Sync failed: GET /gists/…: HTTP 401 — Bad
+credentials`, under a "Re-sync now" button.
+
+- The saved GitHub sign-in had stopped working — most likely the reason the
+  backup stopped on 3 September. v1.106.0 made the button follow whether a
+  sign-in was saved, so with a dead one saved it only offered Re-sync, which
+  could never succeed, and there was no way to sign in again.
+- On a 401 the HUD now forgets the rejected sign-in, the button goes back to
+  **Connect**, and the status line says to sign in again.
+
 ## 1.106.0
 GitHub sign-in no longer loops back to Connect
 

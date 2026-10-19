@@ -74,7 +74,10 @@ const gistReply = (content, extra) => ({
   {
     const { T } = rig({ reply: () => ({ status: 401, body: { message: 'Bad credentials' } }) });
     await T.GistSync.syncNow();
-    t.ok('an expired token says so', /HTTP 401/.test(T.GistSync.error) && /Bad credentials/.test(T.GistSync.error));
+    t.ok('an expired token says so', /HTTP 401/.test(T.GistSync.error) && /Connect/.test(T.GistSync.error));
+    // v1.107.0: the dead token is dropped, so the button offers a fresh sign-in.
+    t.ok('the rejected token is dropped', !T.STORE.settings.githubToken);
+    t.ok('and the button reads Connect again', /tph-connect">Connect/.test(T.settingsPanelHtml()));
   }
   {
     // Recovery: a later good sync clears the error.

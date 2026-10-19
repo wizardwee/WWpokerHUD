@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.106.0
+// @version      1.107.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,10 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.107.0 - A sign-in GitHub rejects is forgotten, so you can sign in again.
+ *            - Your saved GitHub sign-in had stopped working (HTTP 401), and
+ *              the button only offered Re-sync. It now clears the dead
+ *              sign-in and goes back to Connect.
  * 1.106.0 - GitHub sign-in no longer loops back to Connect.
  *            - Approving in your browser could be lost if Torn PDA reloaded
  *              the page when you came back. The HUD now remembers the
@@ -30,12 +34,6 @@
  *              line still said "Last sync: now". Your gist stopped at 3 Sep.
  *            - Every sync step now shows GitHub's error if one is refused.
  *            - A backup over ~1MB is now read whole when merging.
- * 1.104.0 - History keeps 2000 hands by default, up to 5000.
- *            - Settings > Hand log now goes to 5000. A store on the old 200
- *              default moves to 2000 once; any other choice is kept.
- *            - Without the app's native storage it still stops at 500.
- *            - Saving stays cheap at that size: a hand saves in ~8ms, and the
- *              once-a-minute check reads 500 hands per pass, not all of them.
  */
 
 /*
@@ -77,7 +75,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.106.0';
+  const HUD_VERSION = '1.107.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -2597,6 +2595,15 @@
         headers: this.authHeaders(),
         body: body == null ? undefined : JSON.stringify(body),
       });
+      // 401 means the stored sign-in itself is dead (revoked or expired). It
+      // is dropped (v1.107.0) so the button returns to Connect: keeping it
+      // left "Re-sync now" retrying a token GitHub will never accept, with no
+      // way to sign in again — the state a backup sat in for six weeks.
+      if (res.status === 401) {
+        delete STORE.settings.githubToken;
+        saveStore();
+        throw new Error('GitHub rejected the saved sign-in (HTTP 401) — tap Connect to sign in again');
+      }
       if (!(res.status >= 200 && res.status < 300)) {
         const why = res.json && res.json.message ? ' — ' + res.json.message : '';
         throw new Error(`${method} ${url.replace(GITHUB_API, '')}: HTTP ${res.status}${why}`);
