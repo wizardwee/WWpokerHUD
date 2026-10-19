@@ -163,4 +163,36 @@ function key(k, extra) {
   t.ok('Settings carries the switch', /tph-keys-toggle/.test(T.settingsPanelHtml()));
 }
 
+// --- Every recognised press says what happened (v1.109.0) ------------------------
+{
+  const { T } = table(['Fold', 'Call $1.5M']);
+  T.shortcutKeyHandler(key('c'));
+  t.ok('off: says so', /shortcuts are off/.test((T.lastKeyOutcome || {}).text || ''));
+}
+{
+  const { T } = table(['Check / Fold', 'Call Any']);
+  T.STORE.settings.keyShortcuts = true;
+  T.shortcutKeyHandler(key('f'));
+  t.ok('no turn button: says so, and counts the pre-action ones',
+    /no Fold button showing \(2 action buttons, 2 pre-action\)/.test((T.lastKeyOutcome || {}).text || ''));
+}
+{
+  const { T } = table(['Fold', 'Call $1.5M']);
+  T.STORE.settings.keyShortcuts = true;
+  T.shortcutKeyHandler(key('c'));
+  t.ok('pressed: names the button', /pressed “Call \$1\.5M”/.test((T.lastKeyOutcome || {}).text || ''));
+}
+{
+  const { T } = table([]);
+  T.shortcutKeyHandler(key('x'));
+  t.eq('other keys say nothing', T.lastKeyOutcome, null);
+  T.shortcutKeyHandler(key('f', { target: { tagName: 'INPUT' } }));
+  t.eq('nor does typing', T.lastKeyOutcome, null);
+}
+// Listened for on window, capture phase, so a page handler cannot stop it first.
+{
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'torn-poker-hud.user.js'), 'utf8');
+  t.ok('window capture listener', /window\.addEventListener\('keydown', shortcutKeyHandler, true\)/.test(src));
+}
+
 process.exit(t.report());

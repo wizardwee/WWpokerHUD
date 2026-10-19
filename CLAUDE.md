@@ -3073,6 +3073,13 @@ is attributed.
   bet sizing by key, no chained presses, nothing timer-driven — without the
   owner asking. Unconfirmed on the device: whether Torn's buttons accept a
   script-issued (untrusted) click.
+  Every recognised F/C press shows a toast naming the outcome (off / no
+  button / pressed "<label>") and the deep scan prints the last one (v1.109.0)
+  — a toast reading "pressed" with no action at the table is the untrusted-
+  click answer.
+- **A control inside a drag handle needs `makeDraggable`'s `ignore`.** The
+  handle takes pointer capture, and desktop Chrome then delivers the click to
+  the handle, not the control — the coach's Hide did nothing there (v1.109.0).
 - **Never come between the user and the table.** The turn-cue overlay covers the
   whole viewport and is `pointer-events: none` — one tap swallowed on a fold or
   call button is worse than any cue is good. The fold guard is the single

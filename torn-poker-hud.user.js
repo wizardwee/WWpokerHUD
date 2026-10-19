@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.108.0
+// @version      1.109.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,11 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.109.0 - The coach's Hide works on desktop; F and C say what they did.
+ *            - Hide was swallowed by the panel's drag handle on desktop
+ *              Chrome, so the coach stayed open. Fixed.
+ *            - Each F or C press now shows a short message: shortcuts off,
+ *              no Fold/Call button showing, or which button it pressed.
  * 1.108.0 - Keyboard shortcuts: F folds, C calls (or checks).
  *            - Turn on in Settings > Fold guard. Off by default.
  *            - With the fold guard on, F has to be pressed twice, same as a tap.
@@ -27,12 +32,6 @@
  *            - Your saved GitHub sign-in had stopped working (HTTP 401), and
  *              the button only offered Re-sync. It now clears the dead
  *              sign-in and goes back to Connect.
- * 1.106.0 - GitHub sign-in no longer loops back to Connect.
- *            - Approving in your browser could be lost if Torn PDA reloaded
- *              the page when you came back. The HUD now remembers the
- *              pending sign-in and collects it after a reload.
- *            - Once signed in, the button says Re-sync now even after a
- *              failed sync, and the error shows beside it.
  */
 
 /*
@@ -74,7 +73,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.108.0';
+  const HUD_VERSION = '1.109.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -12782,6 +12781,11 @@
       padding: 8px 12px; box-shadow: 0 3px 14px rgba(0,0,0,.55);
       font: 12px/1.4 -apple-system, sans-serif; color: #dfe5ea !important; }
     .tph-table-toast-h { color: #8ec5f0 !important; font-weight: 700; margin-bottom: 2px; }
+    /* Keyboard shortcut feedback — pointer-events:none, removes itself. */
+    .tph-key-toast { position: fixed; z-index: 100001; bottom: 90px; left: 50%;
+      transform: translateX(-50%); pointer-events: none; max-width: 86vw;
+      background: #1f2a36; border: 1px solid #4a6a88; border-radius: 8px;
+      padding: 6px 12px; font: 12px/1.4 -apple-system, sans-serif; color: #dfe5ea !important; }
     .tph-table-soft { color: #ffc94d !important; }
     .tph-table-mixed { color: #c9d1d9 !important; }
     .tph-table-tough { color: #7fb3e0 !important; }
@@ -13416,6 +13420,7 @@
   // is the question, and the deep scan's FEATURE USE block counts key presses.
   const SHORTCUT_KEYS = { f: 'fold', c: 'call' };
   let guardViaKey = false; // set only for the synchronous length of a key's click
+  let keyOffNoted = false;
 
   function isTypingTarget(el) {
     if (!el) return false;
@@ -13434,17 +13439,50 @@
     return null;
   }
 
+  // What the last F/C press did, for the deep scan. Reported as "pressing it
+  // doesn't seem to work" (v1.109.0) with nothing on screen to say whether the
+  // key was off, found no button, or pressed one the game ignored — three
+  // different fixes. Every recognised press now says which, in a toast.
+  let lastKeyOutcome = null;
+  const KEY_TOAST_MS = 2500;
+
+  function showKeyToast(text) {
+    lastKeyOutcome = { t: Date.now(), text };
+    document.querySelectorAll('.tph-key-toast').forEach((el) => el.remove());
+    const el = document.createElement('div');
+    el.className = 'tph-key-toast';
+    el.textContent = text;
+    document.body.appendChild(el);
+    setTimeout(() => el.remove(), KEY_TOAST_MS);
+  }
+
   function shortcutKeyHandler(e) {
     try {
-      if (!STORE.settings.keyShortcuts) return;
       if (!e || e.repeat || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
       const kind = SHORTCUT_KEYS[String(e.key || '').toLowerCase()];
       if (!kind || isTypingTarget(e.target)) return;
+      const K = kind === 'fold' ? 'F' : 'C';
+      if (!STORE.settings.keyShortcuts) {
+        // Said once per page, not on every F typed while the setting is off on
+        // purpose — the letters are common and this is not an error.
+        if (!keyOffNoted) { keyOffNoted = true; showKeyToast(K + ': keyboard shortcuts are off — Settings ▸ Fold guard'); }
+        return;
+      }
       const btn = shortcutButton(kind);
-      if (!btn) return;
+      if (!btn) {
+        const all = findActionButtons();
+        const queued = all.filter((b) => b.__tphPreaction).length;
+        showKeyToast(K + ': no ' + (kind === 'fold' ? 'Fold' : 'Call/Check') + ' button showing'
+          + (all.length ? ` (${all.length} action button${all.length === 1 ? '' : 's'}, ${queued} pre-action)` : ' — not your turn?'));
+        return;
+      }
       e.preventDefault();
       guardViaKey = true;
       try { btn.click(); } finally { guardViaKey = false; }
+      // The fold guard shows its own prompt when it blocks the first F.
+      if (!document.querySelector('.tph-fold-prompt') || kind !== 'fold') {
+        showKeyToast(K + ': pressed “' + (controlLabel(btn) || kind) + '”');
+      }
       noteUse('event:key-' + kind);
     } catch (err) {
       guardViaKey = false;
@@ -14171,7 +14209,7 @@
       hide.addEventListener('click', (e) => { e.stopPropagation(); setCoachHidden(true); });
       // Drag the whole panel by its header; no tap action, so a stray tap on the
       // bar does nothing rather than firing something unexpected.
-      makeDraggable(head, { posKey: 'coachPos', moveEl: el, keepVisiblePx: COACH_KEEP_VISIBLE_PX });
+      makeDraggable(head, { posKey: 'coachPos', moveEl: el, keepVisiblePx: COACH_KEEP_VISIBLE_PX, ignore: '.tph-coach-hide' });
       // Size before position: setFixedPos clamps against the element's own
       // measured width and height, so a stored size has to be on the element
       // before the stored position is judged against the viewport.
@@ -16586,6 +16624,8 @@
     // Last, and fenced: a throw here must not cost the diagnostic above it.
     L.push('--- FEATURE USE (on this device only) ---');
     try { usageReportLines().forEach((l) => L.push(l)); } catch (e) { L.push('unavailable: ' + (e && e.message)); }
+    L.push('keyboard shortcuts: ' + (STORE.settings.keyShortcuts ? 'on' : 'off')
+      + '   last key: ' + (lastKeyOutcome ? lastKeyOutcome.text : 'none this page'));
 
     return L.join('\n');
   }
@@ -16784,13 +16824,18 @@
   // and an accidental touch on the body doesn't shove the panel across the table.
   // Defaults to the handle itself, which is what the gear button wants.
   function makeDraggable(el, opts) {
-    const { onTap, posKey, moveEl, keepVisiblePx } = opts || {};
+    const { onTap, posKey, moveEl, keepVisiblePx, ignore } = opts || {};
     const box = moveEl || el;
     let dragging = false;
     let moved = false;
     let startX = 0, startY = 0, originLeft = 0, originTop = 0, pid = null;
 
     el.addEventListener('pointerdown', (e) => {
+      // A control inside the handle (the coach's Hide) must keep its own
+      // click. Starting a drag there took pointer capture, and desktop Chrome
+      // then delivers the click to the capturing handle instead — Hide did
+      // nothing and the panel was stuck open (v1.109.0).
+      if (ignore && e.target && e.target.closest && e.target.closest(ignore)) return;
       dragging = true;
       moved = false;
       pid = e.pointerId;
@@ -17144,6 +17189,8 @@
       isLeaveControl,
       foldGuardHandler,
       shortcutKeyHandler,
+      makeDraggable,
+      get lastKeyOutcome() { return lastKeyOutcome; },
       shortcutButton,
       FOLD_ARM_MS,
       FOLD_MIN_GAP_MS,
@@ -17549,7 +17596,8 @@
     // the setting and wrapped in try/catch — see foldGuardHandler.
     document.addEventListener('click', foldGuardHandler, true);
     // Keyboard shortcuts — see shortcutKeyHandler. Gated on its setting.
-    document.addEventListener('keydown', shortcutKeyHandler);
+    // Window, capture phase: runs before any page handler can stop the event.
+    window.addEventListener('keydown', shortcutKeyHandler, true);
     // Counts taps on the HUD's own controls — see usageTapHandler. Capture and
     // passive, after the fold guard, and it never cancels anything.
     document.addEventListener('click', usageTapHandler, { capture: true, passive: true });

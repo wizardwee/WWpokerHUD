@@ -9,6 +9,21 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.109.0
+The coach's Hide works on desktop; F and C say what they did.
+
+- Reported: the coach panel stuck open on desktop Chrome. The header is the
+  panel's drag handle and took pointer capture on every pointerdown, Hide
+  included; Chrome then delivers the click to the capturing header, so Hide's
+  handler never ran. `makeDraggable` takes an `ignore` selector and the coach
+  passes `.tph-coach-hide`. `test/coach-hide.test.js`.
+- Reported: "pressing it doesn't seem to work" for the F/C shortcuts, with
+  nothing on screen to tell off / no button / button ignored apart. Every
+  recognised press now shows a `pointer-events: none` toast saying which, and
+  the deep scan prints the last one. The off message shows once per page.
+- The keydown listener is on `window`, capture phase, so a page handler
+  cannot stop it first.
+
 ## 1.108.0
 Keyboard shortcuts: F folds, C calls (or checks)
 
