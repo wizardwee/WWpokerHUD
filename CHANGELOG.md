@@ -9,6 +9,23 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.106.0
+GitHub sign-in no longer loops back to Connect
+
+Reported: "I have connected it, but it still asks me to connect."
+
+- **The approval could be lost.** Approving the device code means leaving
+  Torn PDA for a browser, and PDA can reload the page on the way back. The
+  HUD waited for GitHub in memory only, so after a reload nothing collected
+  the approval. The pending sign-in is now stored on the device (never in a
+  backup) and resumed at load until the code expires; a dropped request
+  retries instead of ending the wait.
+- **A failed sync offered Connect again.** The button followed the last sync
+  result, so any sync error read as "not signed in" and tapping it started a
+  whole new sign-in. It now follows whether the device has a GitHub sign-in:
+  "Re-sync now" with the error shown beside it.
+- The code stays on screen while the HUD waits for approval.
+
 ## 1.105.0
 Gist sync says when it fails, and the update can land
 

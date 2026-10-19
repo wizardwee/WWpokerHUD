@@ -40,7 +40,10 @@ const t = runner('gist-sync');
     T.syncStatusText().includes('ABCD-1234') && T.syncStatusText().includes('github.com/login/device'));
 
   T.GistSync.status = 'polling';
-  t.eq('polling is a plain wait message', T.syncStatusText(), 'Waiting for authorization…');
+  t.ok('polling keeps the code on screen (v1.106.0)',
+    T.syncStatusText().includes('ABCD-1234') && /waiting for approval/.test(T.syncStatusText()));
+  T.GistSync.userCode = null;
+  t.eq('with no code yet it is a plain wait message', T.syncStatusText(), 'Waiting for authorization…');
 
   T.GistSync.status = 'error';
   T.GistSync.error = 'boom';

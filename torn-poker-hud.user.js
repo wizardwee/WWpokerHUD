@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.105.0
+// @version      1.106.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,12 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.106.0 - GitHub sign-in no longer loops back to Connect.
+ *            - Approving in your browser could be lost if Torn PDA reloaded
+ *              the page when you came back. The HUD now remembers the
+ *              pending sign-in and collects it after a reload.
+ *            - Once signed in, the button says Re-sync now even after a
+ *              failed sync, and the error shows beside it.
  * 1.105.0 - Gist sync says when it fails, and the update can land.
  *            - The backup update went out as the wrong kind of request, and
  *              GitHub refused it; nothing checked the answer, so the status
@@ -30,16 +36,6 @@
  *            - Without the app's native storage it still stops at 500.
  *            - Saving stays cheap at that size: a hand saves in ~8ms, and the
  *              once-a-minute check reads 500 hands per pass, not all of them.
- * 1.103.0 - Your showdowns, per-street fold reads, and a longer history.
- *            - Your showdowns now count whether you win or lose. Before, only
- *              the ones you lost were recorded, so "won at showdown" read 1%
- *              and the HUD told you to fold more rivers. Your old showdown
- *              figures restart once, from this version.
- *            - "Folds X% of the turn" is now out of the bets they faced, not
- *              every action. Bars re-measured from the pool: under 35% means
- *              don't bluff, over 70% means barrel.
- *            - Settings > Hand log: keep 200 / 500 / 1000 / 2000 hands
- *              (above 500 needs the app's native storage).
  */
 
 /*
@@ -81,7 +77,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.105.0';
+  const HUD_VERSION = '1.106.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -2245,7 +2241,7 @@
   // user-facing Copy button and the Gist upload, so anything left in here would
   // be written into the gist and into any exported JSON that gets pasted
   // somewhere public. Strip secrets at the single choke point.
-  const LOCAL_ONLY_SETTINGS = ['githubToken', 'tornApiKey', 'tornStatsApiKey'];
+  const LOCAL_ONLY_SETTINGS = ['githubToken', 'githubPending', 'tornApiKey', 'tornStatsApiKey'];
 
   function sanitizedStore() {
     const settings = { ...STORE.settings };
@@ -2501,23 +2497,64 @@
         return;
       }
 
-      this.userCode = json.user_code;
-      this.verificationUri = json.verification_uri;
+      // Persisted (v1.106.0). Approving means leaving Torn PDA for a browser,
+      // and PDA can reload the page on the way back — an in-memory poll died
+      // there, the approval was never collected, and the panel went back to
+      // "Connect". resumeDeviceFlow picks it up again at init.
+      STORE.settings.githubPending = {
+        deviceCode: json.device_code,
+        userCode: json.user_code,
+        uri: json.verification_uri,
+        interval: json.interval || 5,
+        expiresAt: Date.now() + (json.expires_in || 900) * 1000,
+      };
+      saveStore();
+      this.resumeDeviceFlow();
+    },
+
+    // Poll for the token of a pending device flow, if one is still live.
+    // Returns whether it started polling.
+    resumeDeviceFlow() {
+      const pend = STORE.settings.githubPending;
+      const clientId = STORE.settings.githubClientId;
+      if (!pend || !clientId) return false;
+      if (Date.now() > pend.expiresAt) {
+        delete STORE.settings.githubPending;
+        saveStore();
+        return false;
+      }
+      this.userCode = pend.userCode;
+      this.verificationUri = pend.uri;
+      this.status = 'polling';
+      const token = this.pollToken = {};   // a newer flow retires this one
+      let intervalMs = pend.interval * 1000;
       renderSettingsPanel();
 
-      this.status = 'polling';
-      const intervalMs = (json.interval || 5) * 1000;
-      const deviceCode = json.device_code;
-
       const poll = async () => {
-        if (this.status !== 'polling') return;
-        const { json: tokenJson } = await pdaFetchJson('POST', 'https://github.com/login/oauth/access_token', {
-          headers: { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: `client_id=${encodeURIComponent(clientId)}&device_code=${encodeURIComponent(deviceCode)}&grant_type=urn:ietf:params:oauth:grant-type:device_code`,
-        });
+        if (this.pollToken !== token || this.status !== 'polling') return;
+        if (Date.now() > pend.expiresAt) {
+          delete STORE.settings.githubPending;
+          this.status = 'error';
+          this.error = 'The code expired before it was approved — tap Connect for a new one.';
+          saveStore();
+          renderSettingsPanel();
+          return;
+        }
+        let tokenJson = null;
+        try {
+          ({ json: tokenJson } = await pdaFetchJson('POST', 'https://github.com/login/oauth/access_token', {
+            headers: { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: `client_id=${encodeURIComponent(clientId)}&device_code=${encodeURIComponent(pend.deviceCode)}&grant_type=urn:ietf:params:oauth:grant-type:device_code`,
+          }));
+        } catch (e) {
+          // A dropped request is not a refusal: keep polling until expiry.
+          setTimeout(poll, intervalMs);
+          return;
+        }
 
         if (tokenJson && tokenJson.access_token) {
           STORE.settings.githubToken = tokenJson.access_token;
+          delete STORE.settings.githubPending;
           this.status = 'connected';
           saveStore();
           renderSettingsPanel();
@@ -2526,16 +2563,20 @@
         }
 
         if (tokenJson && (tokenJson.error === 'authorization_pending' || tokenJson.error === 'slow_down')) {
+          if (tokenJson.error === 'slow_down') intervalMs += 5000;
           setTimeout(poll, intervalMs);
           return;
         }
 
+        delete STORE.settings.githubPending;
         this.status = 'error';
-        this.error = (tokenJson && tokenJson.error_description) || 'Authorization failed or expired.';
+        this.error = (tokenJson && (tokenJson.error_description || tokenJson.error)) || 'Authorization failed or expired.';
+        saveStore();
         renderSettingsPanel();
       };
 
       setTimeout(poll, intervalMs);
+      return true;
     },
 
     authHeaders() {
@@ -15513,7 +15554,7 @@
       ${exportActionsHtml('ledger', `(${(STORE.plLedger || []).length})`)}
       <h4>GitHub Gist sync</h4>
       <label>OAuth App Client ID: <input type="text" class="tph-client-id" value="${escapeHtml(STORE.settings.githubClientId)}" style="width:70%"></label><br>
-      <button class="tph-connect">${GistSync.status === 'connected' ? 'Re-sync now' : 'Connect'}</button>
+      <button class="tph-connect">${STORE.settings.githubToken ? 'Re-sync now' : 'Connect'}</button>
       <div class="tph-sync-status">${escapeHtml(syncStatusText())}</div>
       ${gistUrl() ? '<button class="tph-copy-gist-link">Copy gist link</button>' : ''}
       ${storageSettingsHtml()}
@@ -15883,7 +15924,10 @@
       saveStore();
     });
     panel.querySelector('.tph-connect').addEventListener('click', () => {
-      if (GistSync.status === 'connected') GistSync.syncNow();
+      // By the token, not the status (v1.106.0): a failed sync set status to
+      // 'error', which offered Connect and started a whole new sign-in for a
+      // device that was already signed in.
+      if (STORE.settings.githubToken) GistSync.syncNow();
       else GistSync.startDeviceFlow();
     });
     // Only rendered once a gist exists (see gistUrl() above). A ~40-char URL,
@@ -15951,7 +15995,13 @@
     if (GistSync.status === 'waiting-for-user') {
       return `Open ${GistSync.verificationUri} on this phone's regular browser and enter code: ${GistSync.userCode}`;
     }
-    if (GistSync.status === 'polling') return 'Waiting for authorization…';
+    // The code stays on screen while polling: it is still what you need to
+    // type, and the panel can be re-rendered (or reloaded) before you have.
+    if (GistSync.status === 'polling') {
+      return GistSync.userCode
+        ? `Enter code ${GistSync.userCode} at ${GistSync.verificationUri} in your regular browser, then come back — waiting for approval…`
+        : 'Waiting for authorization…';
+    }
     if (GistSync.status === 'connected') {
       // The connect flow never surfaced the gist itself anywhere — "connected"
       // told you sync was happening but not where the data actually went.
@@ -17436,6 +17486,9 @@
     if (STORE.settings.githubToken && STORE.settings.gistId) {
       GistSync.status = 'connected';
       GistSync.syncNow();
+    } else if (!STORE.settings.githubToken) {
+      // A sign-in approved while this page was away (see resumeDeviceFlow).
+      GistSync.resumeDeviceFlow();
     }
   }
 

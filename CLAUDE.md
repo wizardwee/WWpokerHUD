@@ -2855,6 +2855,16 @@ file is read from `raw_url`, and a good sync resets the status to connected.
 api.github.com is allowed from torn.com in the PDA webview — the status line
 after one Re-sync settles it.
 
+**Sign-in kept asking to Connect (v1.106.0).** Two faults. The button read
+`GistSync.status === 'connected'`, so any sync error offered Connect and
+restarted sign-in on a device that already had a token — it now reads
+`STORE.settings.githubToken`. And the device-flow poll lived in memory only;
+approving means leaving PDA for a browser, PDA can reload the page on return,
+and the approval was never collected. The pending flow is now stored as
+`settings.githubPending` (in `LOCAL_ONLY_SETTINGS`), `resumeDeviceFlow()` picks
+it up at init until it expires, a dropped poll request retries instead of
+ending the poll, and the status line keeps the code visible while polling.
+
 **Known cost, not solved: the gist backup.** `exportJson` is pretty-printed
 (indent 2) and carries every hand — ~9 MB at 2000 hands, ~18 MB at 5000, vs
 4.5 MB at 500. That may exceed what a gist PATCH through `pdaFetchJson`

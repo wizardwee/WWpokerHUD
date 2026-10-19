@@ -114,5 +114,51 @@ const gistReply = (content, extra) => ({
     t.eq('a create with no id is an error', T.GistSync.status, 'error');
   }
 
+  // --- Sign-in (v1.106.0): survives a reload, and the button follows the token -
+  const flush = async (T) => {
+    for (let i = 0; i < 6; i++) { T._sandbox.runTimers(); await new Promise((r) => setImmediate(r)); }
+  };
+  {
+    let approved = false;
+    const { T } = rig({ reply: (m, url) => {
+      if (/device\/code/.test(url)) return { status: 200, body: { device_code: 'dc', user_code: 'UC-1', verification_uri: 'https://github.com/login/device', interval: 5, expires_in: 900 } };
+      if (/access_token/.test(url)) return { status: 200, body: approved ? { access_token: 'newtok' } : { error: 'authorization_pending' } };
+      if (m === 'PATCH') return { status: 200, body: { id: 'g1' } };
+      return gistReply('');
+    } });
+    T.STORE.settings.githubToken = '';
+    T.STORE.settings.githubClientId = 'cid';
+    await T.GistSync.startDeviceFlow();
+    t.eq('the pending flow is stored', T.STORE.settings.githubPending && T.STORE.settings.githubPending.userCode, 'UC-1');
+    t.ok('and never exported', !T.exportJson().includes('"dc"'));
+    // The page reloads while you approve: the in-memory poll is gone, and a
+    // fresh GistSync resumes from the stored flow.
+    T.GistSync.pollToken = null;
+    T.GistSync.status = 'idle';
+    approved = true;
+    t.ok('resume picks the flow up', T.GistSync.resumeDeviceFlow());
+    await flush(T);
+    t.eq('the token is collected after the reload', T.STORE.settings.githubToken, 'newtok');
+    t.ok('the pending flow is cleared', !T.STORE.settings.githubPending);
+    t.eq('and the first sync runs', T.GistSync.status, 'connected');
+  }
+  {
+    const { T } = rig({ reply: () => ({ status: 200, body: { error: 'authorization_pending' } }) });
+    T.STORE.settings.githubToken = '';
+    T.STORE.settings.githubClientId = 'cid';
+    T.STORE.settings.githubPending = { deviceCode: 'x', userCode: 'U', uri: 'u', interval: 5, expiresAt: Date.now() - 1 };
+    t.ok('an expired flow does not resume', !T.GistSync.resumeDeviceFlow());
+    t.ok('and is cleared', !T.STORE.settings.githubPending);
+  }
+  {
+    // A signed-in device whose sync failed is offered Re-sync, not Connect.
+    const { T } = rig({ reply: () => ({ status: 500, body: {} }) });
+    await T.GistSync.syncNow();
+    t.eq('status is error', T.GistSync.status, 'error');
+    t.ok('but the button still reads Re-sync now', /tph-connect">Re-sync now/.test(T.settingsPanelHtml()));
+    T.STORE.settings.githubToken = '';
+    t.ok('with no token it reads Connect', /tph-connect">Connect/.test(T.settingsPanelHtml()));
+  }
+
   process.exit(t.report());
 })();
