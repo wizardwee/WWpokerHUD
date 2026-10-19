@@ -3062,6 +3062,17 @@ is attributed.
   in `LOCAL_ONLY_SETTINGS`.
 - **The coach is advisory only.** It must never click, auto-act, or play. Keep
   it text-only.
+- **Keyboard shortcuts are the one exception that presses a game button
+  (v1.108.0), by the owner's decision.** F folds, C calls/checks, off by
+  default. Narrowed, not opened: one non-repeat keystroke → at most one press
+  of Torn's own button (Torn's rule: every action manually initiated by a
+  keystroke or click), turn buttons only (never pre-action queue buttons),
+  never while typing or with a modifier, and the press is an ordinary click so
+  the fold guard still applies (F twice). `test/key-shortcuts.test.js` drives
+  the real handler through the real guard. **Do not extend it** — no raise or
+  bet sizing by key, no chained presses, nothing timer-driven — without the
+  owner asking. Unconfirmed on the device: whether Torn's buttons accept a
+  script-issued (untrusted) click.
 - **Never come between the user and the table.** The turn-cue overlay covers the
   whole viewport and is `pointer-events: none` — one tap swallowed on a fold or
   call button is worse than any cue is good. The fold guard is the single

@@ -9,6 +9,31 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.108.0
+Keyboard shortcuts: F folds, C calls (or checks)
+
+Asked for directly, for playing on desktop as well as in Torn PDA, with the
+fold guard kept.
+
+- **F** folds and **C** calls — or checks, when there is nothing to call.
+  Settings ▸ Fold guard ▸ "Keyboard: F folds, C calls or checks". Off by
+  default.
+- **The fold guard still applies.** The key presses Torn's own Fold button,
+  so it meets the same guard a tap does: the first F shows "Press F again (or
+  tap Fold) to confirm", and a second F within 4 seconds folds.
+- **One keystroke, one press**, in line with Torn's rule that every action is
+  started by a keystroke or click. Holding a key down (auto-repeat) presses
+  nothing more, so a held F cannot confirm its own fold.
+- **Your turn only.** The pre-action buttons that queue a decision while
+  others act ("Check / Fold", "Call Any") are never pressed by a key.
+- Keys do nothing while you are typing in a box, or with Ctrl, Alt or Cmd
+  held.
+
+This is the first time the HUD presses a game button, and it does so only on
+your keystroke. Not yet confirmed at a live table: whether Torn's buttons
+accept a key-triggered press. If F or C does nothing on your turn, that is
+the thing to report.
+
 ## 1.107.0
 A sign-in GitHub rejects is forgotten, so you can sign in again
 

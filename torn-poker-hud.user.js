@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.107.0
+// @version      1.108.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,11 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.108.0 - Keyboard shortcuts: F folds, C calls (or checks).
+ *            - Turn on in Settings > Fold guard. Off by default.
+ *            - With the fold guard on, F has to be pressed twice, same as a tap.
+ *            - Your turn only, never while typing in a box, never with
+ *              Ctrl/Alt/Cmd, and holding a key down presses nothing extra.
  * 1.107.0 - A sign-in GitHub rejects is forgotten, so you can sign in again.
  *            - Your saved GitHub sign-in had stopped working (HTTP 401), and
  *              the button only offered Re-sync. It now clears the dead
@@ -28,12 +33,6 @@
  *              pending sign-in and collects it after a reload.
  *            - Once signed in, the button says Re-sync now even after a
  *              failed sync, and the error shows beside it.
- * 1.105.0 - Gist sync says when it fails, and the update can land.
- *            - The backup update went out as the wrong kind of request, and
- *              GitHub refused it; nothing checked the answer, so the status
- *              line still said "Last sync: now". Your gist stopped at 3 Sep.
- *            - Every sync step now shows GitHub's error if one is refused.
- *            - A backup over ~1MB is now read whole when merging.
  */
 
 /*
@@ -75,7 +74,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.107.0';
+  const HUD_VERSION = '1.108.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -590,6 +589,7 @@
     turnSound: false,   // opt-in: a synthesised two-note chime
     foldGuard: true,    // tap Fold twice to confirm — see foldGuardHandler
     leaveGuard: true,   // tap Leave twice to confirm — same handler
+    keyShortcuts: false, // desktop keyboard: F folds, C calls/checks — see shortcutKeyHandler
     heroName: '',      // YOUR Torn username. Without it P/L and position can't be attributed.
     // Monte Carlo samples per equity estimate. Exposed in Settings because
     // this is by far the most expensive thing the script does, and the phones
@@ -13380,7 +13380,9 @@
     const el = document.createElement('div');
     el.className = 'tph-fold-prompt';
     const label = controlLabel(btn) || kind || 'fold';
-    el.innerHTML = `<b>Tap “${escapeHtml(label)}” again to confirm</b>`
+    el.innerHTML = (guardViaKey
+      ? `<b>Press F again (or tap “${escapeHtml(label)}”) to confirm</b>`
+      : `<b>Tap “${escapeHtml(label)}” again to confirm</b>`)
       + `<span class="tph-fold-sub">misclick guard · expires in ${FOLD_ARM_MS / 1000}s</span>`;
     document.body.appendChild(el);
     pinTextColor(el);
@@ -13388,6 +13390,66 @@
 
   function hideFoldPrompt() {
     document.querySelectorAll('.tph-fold-prompt').forEach((el) => el.remove());
+  }
+
+  // --- Keyboard shortcuts (v1.108.0) ------------------------------------------
+  //
+  // F folds, C calls (or checks when there is nothing to call). Asked for by
+  // the user, who plays on desktop as well as in Torn PDA. This is the one
+  // place the HUD presses a game button, and it is a deliberate, owner-made
+  // change to the "never acts for you" rule — narrowed, not dropped:
+  //
+  // - ONE KEYSTROKE, ONE PRESS. A held key's auto-repeat is ignored, so
+  //   holding F cannot arm the guard and then confirm it. Nothing loops, and
+  //   nothing fires without a key — Torn's script rule is that every action
+  //   is manually initiated by a keystroke or click.
+  // - THE FOLD GUARD STILL APPLIES. The press is an ordinary click on Torn's
+  //   own button, so it reaches foldGuardHandler like a tap does: the first F
+  //   arms, a second F (or a tap) inside FOLD_ARM_MS folds.
+  // - YOUR TURN ONLY. findTurnButtons excludes the pre-action queue buttons
+  //   ("Check / Fold", "Call Any"), so a key never queues a decision.
+  // - NEVER WHILE TYPING, never with Ctrl/Alt/Cmd held, off by default, and
+  //   it fails silent: a key that finds no button does nothing.
+  //
+  // Unconfirmed on the device: whether Torn's buttons accept a script-issued
+  // click (an untrusted event). If F appears to do nothing on your turn, that
+  // is the question, and the deep scan's FEATURE USE block counts key presses.
+  const SHORTCUT_KEYS = { f: 'fold', c: 'call' };
+  let guardViaKey = false; // set only for the synchronous length of a key's click
+
+  function isTypingTarget(el) {
+    if (!el) return false;
+    const tag = String(el.tagName || '').toUpperCase();
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+    return !!(el.isContentEditable || (el.getAttribute && el.getAttribute('contenteditable') === 'true'));
+  }
+
+  // The button a shortcut presses, or null. Call beats Check: when both show,
+  // C means "stay in", and calling is what keeps you in against a bet.
+  function shortcutButton(kind) {
+    const btns = findTurnButtons();
+    const by = (re) => btns.find((b) => re.test((b.textContent || '').trim())) || null;
+    if (kind === 'fold') return by(/^fold\b/i);
+    if (kind === 'call') return by(/^call\b/i) || by(/^check\b/i);
+    return null;
+  }
+
+  function shortcutKeyHandler(e) {
+    try {
+      if (!STORE.settings.keyShortcuts) return;
+      if (!e || e.repeat || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
+      const kind = SHORTCUT_KEYS[String(e.key || '').toLowerCase()];
+      if (!kind || isTypingTarget(e.target)) return;
+      const btn = shortcutButton(kind);
+      if (!btn) return;
+      e.preventDefault();
+      guardViaKey = true;
+      try { btn.click(); } finally { guardViaKey = false; }
+      noteUse('event:key-' + kind);
+    } catch (err) {
+      guardViaKey = false;
+      console.warn('[TornPokerHUD] keyboard shortcut error, ignored', err);
+    }
   }
 
   // Pure decision, pulled out of renderTurnCue so the timing logic can be
@@ -15500,9 +15562,10 @@
         Sound and buzz need one tap on the page first — use Test. iPhones can't vibrate.</div>
       <h4>Fold guard</h4>
       <label><input type="checkbox" class="tph-foldguard-toggle" ${STORE.settings.foldGuard ? 'checked' : ''}> Tap Fold twice to confirm</label><br>
-      <label><input type="checkbox" class="tph-leaveguard-toggle" ${STORE.settings.leaveGuard ? 'checked' : ''}> Tap Leave twice to confirm</label>
-      <div style="opacity:.7;margin:2px 0 10px">Stops a misclick. Never acts for you; confirm within
-        ${FOLD_ARM_MS / 1000}s. If anything fails, the tap goes straight through.</div>
+      <label><input type="checkbox" class="tph-leaveguard-toggle" ${STORE.settings.leaveGuard ? 'checked' : ''}> Tap Leave twice to confirm</label><br>
+      <label><input type="checkbox" class="tph-keys-toggle" ${STORE.settings.keyShortcuts ? 'checked' : ''}> Keyboard: F folds, C calls or checks</label>
+      <div style="opacity:.7;margin:2px 0 10px">Stops a misclick; confirm within ${FOLD_ARM_MS / 1000}s. With the
+        guard on, F needs pressing twice. Keys work on your turn only, never while typing.</div>
       <h4>Coach</h4>
       <label><input type="checkbox" class="tph-coach-toggle" ${STORE.settings.coachHidden ? '' : 'checked'}> Show coach panel</label><br>
       <label><input type="checkbox" class="tph-tableannounce-toggle" ${STORE.settings.tableAnnounce !== false ? 'checked' : ''}> Summary message when you join a new table</label><br>
@@ -15811,6 +15874,10 @@
       STORE.settings.foldGuard = e.target.checked;
       saveStore();
       if (!e.target.checked) disarmGuard();
+    });
+    panel.querySelector('.tph-keys-toggle').addEventListener('change', (e) => {
+      STORE.settings.keyShortcuts = e.target.checked;
+      saveStore();
     });
     panel.querySelector('.tph-leaveguard-toggle').addEventListener('change', (e) => {
       STORE.settings.leaveGuard = e.target.checked;
@@ -17076,6 +17143,8 @@
       isFoldControl,
       isLeaveControl,
       foldGuardHandler,
+      shortcutKeyHandler,
+      shortcutButton,
       FOLD_ARM_MS,
       FOLD_MIN_GAP_MS,
       get guardArmedAt() { return guardArmedAt; },
@@ -17479,6 +17548,8 @@
     // does and can stop it reaching the game. Everything it does is gated on
     // the setting and wrapped in try/catch — see foldGuardHandler.
     document.addEventListener('click', foldGuardHandler, true);
+    // Keyboard shortcuts — see shortcutKeyHandler. Gated on its setting.
+    document.addEventListener('keydown', shortcutKeyHandler);
     // Counts taps on the HUD's own controls — see usageTapHandler. Capture and
     // passive, after the fold guard, and it never cancels anything.
     document.addEventListener('click', usageTapHandler, { capture: true, passive: true });
