@@ -9,6 +9,34 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.103.0
+Your showdowns, per-street fold reads, and a longer hand history
+
+Found by analysing a real backup while working out how to beat one regular.
+
+- **Your showdowns were almost all losses.** The seat poll never reads your
+  cards (they are face up all hand), and the log's reveal line named you only
+  in pots you lost — 29 of 29 stored hands. So your record showed 856
+  showdowns won 1% of the time on a winning player, and the leak plan said
+  "fold more rivers" and "call down more". Now every showdown you reach is
+  banked from your own cards, won or lost, using the same rule History uses to
+  print your cards among the reveals. The old figures cannot be corrected (no
+  record says which were won), so your showdown record — shown hands, W$SD,
+  WTSD, bluff/slowplay reads — restarts once. WTSD reads over hands since the
+  restart. Opponents are untouched.
+- **Per-street fold rates were over every action.** "Folds 14% of turn
+  decisions" counted checks and bets, where folding wasn't possible; that
+  player actually folded 37% of the turn bets they faced, and the HUD said
+  never to bluff them. The rate is now fold-to-a-bet. The bars were
+  re-measured from the pool (56/50/57% on flop/turn/river, SD ~13): under 35%
+  (where even a half-pot bluff loses) reads "no bluffs", over 70% "barrel",
+  with at least 15 bets faced. The Stats tab shows bets faced beside it.
+- **History length is a setting.** Settings ▸ Hand log: 200 / 500 / 1000 /
+  2000 hands, at ~1.4 KB each. Above 500 needs the app's native storage.
+  Notable hands keep their 300-hand headroom over it. 2000 is the top because
+  the once-a-minute storage check hashes every hand (measured 74ms at 500,
+  92ms at 2000, 298ms at 5000); a settled hand now hashes only itself.
+
 ## 1.102.0
 Two new stats on the Stats tab: 4-Bet+ and fold to flop c-bet in a 3-bet+ pot
 

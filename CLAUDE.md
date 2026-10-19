@@ -460,7 +460,7 @@ Measured, not guessed:
 | The script itself | 340 KB, fetched once — **not** a runtime concern |
 | A fresh 1-hand player record | **562 bytes** |
 | A long-tracked player record | **1,076 bytes** |
-| Hand history at `historyLimit: 200` | ~266 KB, **capped** |
+| Hand history at `historyLimit: 200` | ~266 KB, **capped** (choosable up to 2000 since v1.103.0, ~2.8 MB) |
 
 The number that matters: **a one-hand record costs half what a five-hundred-hand
 record costs.** Any prune should therefore go after thin records before old
@@ -1342,8 +1342,9 @@ no raise in between — are the fold-to-barrel sample.
 
 **Won at showdown needs no collection**: it is won/seen summed over
 `p.shownHands`. It inherits that sample's bias — a loser who mucks unseen is
-not counted — and hero's record reads `—`, because hero is never harvested into
-`shownHands`. So the W$SD leak text can never fire for hero today.
+not counted. **The note that stood here — "hero's record reads `—`" — was
+wrong**: the log reveal DID feed hero's record, but only in pots hero lost, so
+it read 1% and the leak fired. See "Hero's showdowns" below (v1.103.0).
 
 **Table softness** (`tableSoftness` / `tableSoftnessHtml`) is one line under
 the coach's advice. Only players at `minHands` count toward the verdict, the
@@ -2788,6 +2789,46 @@ cannot throw out of a fetch handler.
 **Apply it to any other API string this file starts reading.** Faction name is
 the only one read today; `spouse_name`, `faction_tag` and the rest carry the
 same escaping.
+
+## Hero's showdowns, per-street folds, and history length (v1.103.0)
+
+Three fixes from analysing a real backup. Each was a stat that looked fine and
+read wrong.
+
+**Hero's showdowns were almost all losses.** The seat poll skips hero and the
+log's reveal line named hero only in pots hero LOST (29 of 29 stored). W$SD
+read 1% over 856 showdowns for a +14bb/100 player, and the leak plan said
+"fold more rivers". `applyHandResults` now banks hero's own cards whenever
+`reachedShowdown(hand, heroXid)` — someone else revealed, hero never folded —
+the SAME predicate `heroCardsPlacement` uses, so History and the counter
+cannot disagree. `repairHeroShowdowns()` (init, flag `heroSdRepaired`)
+restarts hero's `shownHands`/`sdRecent`/`texture`/`wtsd`, because no stored
+field says which old showdowns were won; `p.sdSince` makes WTSD read over the
+hands since the restart, and the WTSD rule gates on `wtsdSample`, not lifetime
+hands. Opponents are untouched — the seat poll reads them win or lose.
+
+**Per-street fold was over every action.** `streetRates.foldPct` divided by
+checks and bets too, spots where no fold was possible, so a 37% turn folder
+read "folds 14% of turn decisions" → "no turn bluffs". It is now over `faced`
+(the denominator `rr` already used). The bars were re-measured, not carried
+over: pool fold-to-bet is 56/50/57% flop/turn/river (SD ~13), so
+`STREET_FOLD_HIGH` 70 / `STREET_FOLD_LOW` 35 / `STREET_FOLD_MIN` 15. 35 is
+also just above a half-pot bluff's 33% break-even, which is what makes "no
+bluffs" true below it.
+
+**Still open, flagged not fixed: WTSD's bars.** `wtsd` is per hand DEALT
+(pool median 13.8%), but the rule's 18/40 bars and "of hands played" copy
+read like the per-flop-seen definition. "<18 — gives up a lot, barrel more"
+fires for most of the pool. Re-measure before moving it.
+
+**History length is a setting** (Settings ▸ Hand log): 200/500/1000/2000,
+above `HISTORY_LIMIT_LOCAL_MAX` (500) only on the native backend.
+`historyCeiling(limit)` keeps pinned hands' old 300-hand headroom. Both
+helpers sit above `bootStore()` — `mergeHands` is on the load path. 2000 is
+the top on COST: the reconcile hashes every hand, measured 74 / 92 / 298 ms at
+500 / 2000 / 5000. `handShardMemo` (WeakMap on the hand object, carries
+`fav`) means a settled hand hashes only itself; the reconcile ignores the memo,
+same rule as `ledgerChunkMemo`.
 
 ## Feature use is counted on the device (v1.92.0)
 

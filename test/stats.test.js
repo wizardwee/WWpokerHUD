@@ -115,7 +115,17 @@ t.near('flop aggression is high', sr.byStreet.flop.afq, (100 * 40) / 45);
 t.near('turn aggression is low', sr.byStreet.turn.afq, (100 * 2) / 10);
 t.ok('the split reveals a gap the aggregate hides', sr.byStreet.flop.afq - sr.byStreet.turn.afq > 20);
 t.eq('flop action count', sr.byStreet.flop.actions, 50);
-t.near('turn fold frequency', sr.byStreet.turn.foldPct, 50);
+// Fold frequency is fold / bets FACED (v1.103.0): the turn faced 8 calls +
+// 20 folds = 28 bets, and its 10 checks and 2 bets are not spots where a fold
+// was possible. Over every action it read 50% — the old, wrong denominator.
+t.near('turn fold frequency is over bets faced', sr.byStreet.turn.foldPct, (100 * 20) / 28);
+t.eq('turn bets faced', sr.byStreet.turn.faced, 28);
+{
+  // A player who checks a lot cannot be made to look sticky by it.
+  const checker = T.computeRates(player({ hands: 100, streetActions: {
+    flop: street({}), turn: street({ check: 80, bet: 5, call: 9, fold: 6 }), river: street({}) } }));
+  t.near('checks do not dilute the fold rate', checker.byStreet.turn.foldPct, 40);
+}
 
 // The aggregate that used to be the only number available.
 t.ok('aggregate AFq sits between the streets',

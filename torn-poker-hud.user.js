@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.102.0
+// @version      1.103.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,16 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.103.0 - Your showdowns, per-street fold reads, and a longer history.
+ *            - Your showdowns now count whether you win or lose. Before, only
+ *              the ones you lost were recorded, so "won at showdown" read 1%
+ *              and the HUD told you to fold more rivers. Your old showdown
+ *              figures restart once, from this version.
+ *            - "Folds X% of the turn" is now out of the bets they faced, not
+ *              every action. Bars re-measured from the pool: under 35% means
+ *              don't bluff, over 70% means barrel.
+ *            - Settings > Hand log: keep 200 / 500 / 1000 / 2000 hands
+ *              (above 500 needs the app's native storage).
  * 1.102.0 - Two new stats on the Stats tab: 4-Bet+ and Fold v CB 3B+.
  *            - 4-Bet+: how often they re-raise again (4-bet, 5-bet...) when
  *              facing a 3-bet or bigger. Once per player per hand.
@@ -30,12 +40,6 @@
  *            - Red dashed box: a TAG, LAG or Nit, to avoid.
  *            - The dashed "folds to aggression" box is gone; those reads stay
  *              in the coach and the Exploit tab.
- * 1.100.0 - The Range tab highlights each player's last 50 showdowns.
- *            - Gold chips are hands they showed within their last 50
- *              showdowns, in the same Opened / 3-bet / 4-bet / Called groups;
- *              each group says how many are recent.
- *            - Seeded once from the hands your history still holds, then kept
- *              up live. Older showdowns had no date, so they stay unhighlighted.
  */
 
 /*
@@ -77,7 +81,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.102.0';
+  const HUD_VERSION = '1.103.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -471,6 +475,35 @@
   // off the screen. Anything the load path can reach must be declared above
   // bootStore().
   const HISTORY_PINNED_CEILING = 500;
+
+  // How many recent hands History keeps, chosen in Settings ▸ Hand log
+  // (v1.103.0). It used to be fixed at 200, which is too few to study one
+  // opponent from: 500 stored hands held 10 contested pots against the player
+  // the request was about. ~1.4KB a hand, so 2000 is ~2.8MB — offered only on
+  // the PDA_storage backend (20MB, real figure in the scan); localStorage
+  // shares ~5MB with torn.com and stops at HISTORY_LIMIT_LOCAL_MAX.
+  //
+  // 2000 is the top on cost, not space. The 60s reconcile hashes every stored
+  // hand: measured through the real save path with 900 players, a full pass
+  // is 74ms at 500 hands, 92ms at 2000 and 298ms at 5000 — the last is the
+  // per-minute stall v1.76.0 was about. Per-hand saves are memoised
+  // (handShardMemo) and do not grow with the history.
+  //
+  // Pinned (notable) hands keep the same headroom over the limit they always
+  // had — 300 at the default 200, hence the old ceiling of 500.
+  //
+  // Up here for the same load-path reason as HISTORY_PINNED_CEILING:
+  // loadStore -> reclaimLegacyBlob -> mergeHands reaches both.
+  const HISTORY_LIMIT_CHOICES = [200, 500, 1000, 2000];
+  const HISTORY_LIMIT_LOCAL_MAX = 500;
+  const HISTORY_PINNED_HEADROOM = 300;
+  function historyLimitOf(settings) {
+    const n = Math.floor(Number(settings && settings.historyLimit)) || 200;
+    return Math.max(50, Math.min(HISTORY_LIMIT_CHOICES[HISTORY_LIMIT_CHOICES.length - 1], n));
+  }
+  function historyCeiling(limit) {
+    return Math.max(HISTORY_PINNED_CEILING, limit + HISTORY_PINNED_HEADROOM);
+  }
 
   // Hands YOU starred (v1.79.0). Exempt from both historyLimit and the pinned
   // ceiling in trimHandHistory — a hand you chose to keep must never be
@@ -1230,8 +1263,7 @@
     const oldHands = Array.isArray(old && old.hands) ? old.hands : [];
     if (oldHands.length) {
       const before = (store.hands || []).length;
-      const merged = mergeHands(store.hands || [], oldHands,
-        (store.settings && store.settings.historyLimit) || 200);
+      const merged = mergeHands(store.hands || [], oldHands, historyLimitOf(store.settings));
       // A RECOVERY MUST NEVER LOSE DATA. mergeHands re-applies the history
       // trim, and trimming a list that is already over the limit for a good
       // reason (pinned hands ride past it, up to HISTORY_PINNED_CEILING) can
@@ -1495,7 +1527,20 @@
       const entries = handShardEntries(STORE.hands);
       const live = new Set(entries.map((e) => e.key));
       onDisk().forEach((k) => { if (k.indexOf(SHARD_HAND) === 0 && !live.has(k)) drop(k, undo); });
-      entries.forEach((e) => want(e.key, e.value, undo));
+      // Memoised per hand OBJECT outside the reconcile (v1.103.0), so a
+      // settled hand hashes the one new record instead of re-serialising the
+      // whole history — which at 2000 hands was most of the cost of every
+      // save. A stored hand is only changed in place by the star toggle, and
+      // the memo carries `fav` so that change misses it. Anything else that
+      // edits a hand in place is what the reconcile is for: it ignores the
+      // memo and hashes every hand, the same rule ledgerChunkMemo follows.
+      entries.forEach((e) => {
+        const m = full ? null : handShardMemo.get(e.value);
+        const fav = !!e.value.fav;
+        const hash = (m && m.fav === fav) ? m.hash : contentHash(JSON.stringify(e.value));
+        handShardMemo.set(e.value, { hash, fav });
+        want(e.key, e.value, undo, hash);
+      });
     }
 
     if (dirtyPl || full || legacySectionsPending) {
@@ -1541,6 +1586,9 @@
   // to find the one that changed. NOT trusted by the reconcile, which hashes
   // every chunk — that is the check this cache would otherwise be skipping.
   const ledgerChunkMemo = new Map();
+  // Keyed by the stored hand object itself, so a hand that leaves the history
+  // leaves the memo with it. See the hands block in buildFlushPlan.
+  const handShardMemo = new WeakMap();
 
   // The last pass, and the last reconcile, for the deep scan: what was
   // written, what was skipped as already on disk, what was removed. The only
@@ -2299,7 +2347,7 @@
       ...local,
       version: local.version,
       players: { ...local.players },
-      hands: mergeHands(local.hands || [], remote.hands || [], local.settings.historyLimit),
+      hands: mergeHands(local.hands || [], remote.hands || [], historyLimitOf(local.settings)),
       hero: local.hero,
       session: local.session, // session is per-device; never taken from remote
       // Same call as session, for the same reason: a "session" is a physical
@@ -2392,7 +2440,8 @@
       if (h.fav && !out[i].fav) out[i] = Object.assign({}, out[i], { fav: true });
     });
     const merged = out.sort((x, y) => y.t - x.t);
-    return trimHandHistory(merged, limit || 200, HISTORY_PINNED_CEILING);
+    const lim = limit || 200;
+    return trimHandHistory(merged, lim, historyCeiling(lim));
   }
 
   // ===========================================================================
@@ -5789,6 +5838,22 @@
       }
     }
 
+    // Hero's own showdown (v1.103.0). The seat poll never reads hero (your
+    // cards are face up all hand) and the log's reveal line names hero only
+    // some of the time — in a real backup, in 29 of 29 stored hands it did,
+    // hero LOST. So hero's showdowns were almost all losses: W$SD read 1% over
+    // 856 showdowns on a winning player, and the leak plan told them to fold
+    // more rivers. Hero's cards are known all hand, so every showdown hero
+    // reaches is banked from them, won or lost, unbiased.
+    if (!heroUnresolved() && hand.shownCards && Array.isArray(hand.heroCards)
+        && hand.heroCards.length === 2 && !hand.shownCards[heroXid] && reachedShowdown(hand, heroXid)) {
+      hand.shownCards[heroXid] = hand.heroCards;
+      if (hand.countedShowdown && !inSet(hand.countedShowdown, heroXid)) {
+        hand.countedShowdown.add(heroXid);
+        getPlayer(heroXid).wtsd += 1;
+      }
+    }
+
     // Banked here, after winners are known, so `won` is right and so a hand
     // that never reached settlement doesn't pollute the range.
     Object.keys(hand.shownCards || {}).forEach((xid) => {
@@ -5852,6 +5917,32 @@
     return kept;
   }
 
+  // The choices Settings offers (v1.103.0). The larger ones need the native
+  // backend — see HISTORY_LIMIT_CHOICES. The current value is always listed,
+  // so a store carried over from the other backend never shows a blank box.
+  function historyLimitChoices() {
+    const cur = historyLimitOf(STORE.settings);
+    const list = HISTORY_LIMIT_CHOICES.filter((n) => pdaBackend || n <= HISTORY_LIMIT_LOCAL_MAX);
+    if (list.indexOf(cur) < 0) list.push(cur);
+    return list.sort((a, b) => a - b);
+  }
+  function historyLimitOptionsHtml() {
+    const cur = historyLimitOf(STORE.settings);
+    return historyLimitChoices()
+      .map((n) => `<option value="${n}"${n === cur ? ' selected' : ''}>${n}</option>`).join('');
+  }
+  // Trims at once rather than on the next hand, so the storage figure in the
+  // same panel moves when the setting does.
+  function setHistoryLimit(value) {
+    const n = Math.floor(Number(value));
+    if (historyLimitChoices().indexOf(n) < 0) return false;
+    STORE.settings.historyLimit = n;
+    STORE.hands = trimHandHistory(STORE.hands || [], n, historyCeiling(n));
+    dirtyHands = true;
+    saveStore();
+    return true;
+  }
+
   // Keep one global newest-first list rather than a per-player copy: a hand
   // involves several players, and the History tab just filters this list.
   function recordHandHistory(hand) {
@@ -5883,8 +5974,8 @@
       bb: hand.bbAmount || 0,
       pinned: isNotableHand(hand),
     });
-    const limit = STORE.settings.historyLimit || 200;
-    STORE.hands = trimHandHistory(STORE.hands, limit, HISTORY_PINNED_CEILING);
+    const limit = historyLimitOf(STORE.settings);
+    STORE.hands = trimHandHistory(STORE.hands, limit, historyCeiling(limit));
     // Marked at the write site. Until v1.83.1 only the 60s reconcile wrote
     // this shard, so a page closed inside that window lost the hand.
     dirtyHands = true;
@@ -5970,9 +6061,22 @@
     const hx = String(heroXid);
     const shown = h.shown || {};
     if (Object.keys(shown).some((x) => String(x) === hx)) return null;
-    const folded = (h.actions || []).some((a) => String(a.x) === hx && a.a === 'fold');
-    const showdown = Object.keys(shown).length > 0;
-    return { where: (showdown && !folded) ? 'showdown' : 'line', cards };
+    return { where: reachedShowdown(h, hx) ? 'showdown' : 'line', cards };
+  }
+
+  // Did `xid` reach a showdown in this hand? Someone ELSE revealed, and they
+  // never folded. Works on a live hand and a stored record alike — both carry
+  // `shown` and `actions` in the same shape.
+  //
+  // The one definition for hero's showdowns (v1.103.0): the History tab places
+  // hero's cards with it, and settlement banks hero's showdown with it, so the
+  // card you see printed among the reveals and the W$SD counter cannot
+  // disagree about whether you were there.
+  function reachedShowdown(h, xid) {
+    if (!h) return false;
+    const x = String(xid);
+    if (!Object.keys(h.shown || {}).some((k) => String(k) !== x)) return false;
+    return !(h.actions || []).some((a) => String(a.x) === x && a.a === 'fold');
   }
 
   // Star / unstar a stored hand (v1.79.0). Returns false only when starring
@@ -6402,7 +6506,7 @@
   function playerHistoryExport(xid) {
     const hands = handsInvolving(xid);
     const p = STORE.players[xid];
-    const limit = STORE.settings.historyLimit || 200;
+    const limit = historyLimitOf(STORE.settings);
     const header = [
       `Torn Poker HUD — hand history vs ${playerDisplayName(xid)} (xid ${xid})`,
       `Exported ${new Date().toISOString()}`,
@@ -6538,7 +6642,7 @@
   // clipboard and the tab cannot drift into three descriptions of one hand.
   function fullHistoryExport() {
     const hands = STORE.hands || [];
-    const limit = STORE.settings.historyLimit || 200;
+    const limit = historyLimitOf(STORE.settings);
     const header = [
       'Torn Poker HUD — full hand log',
       `Exported ${new Date().toISOString()}`,
@@ -7239,6 +7343,11 @@
   }
 
   const POSTFLOP_STREETS = ['flop', 'turn', 'river'];
+  // Fold-to-a-bet bars per street, and the bets faced before either is read.
+  // Measured off the pool — see the folding block in buildExploitPlan.
+  const STREET_FOLD_HIGH = 70;
+  const STREET_FOLD_LOW = 35;
+  const STREET_FOLD_MIN = 15;
 
   // Aggression and fold frequency for ONE street.
   //
@@ -7263,7 +7372,13 @@
     const faced = sa.raise + sa.call + sa.fold;
     return {
       afq: pct(agg, agg + passive),
-      foldPct: pct(sa.fold, total),
+      // Fold when BET INTO, over the same `faced` as rr (v1.103.0). It was
+      // fold / every action on the street, checks and bets included — spots
+      // where folding was not possible. That read a player who folds 37% of
+      // the turn bets they face as "folds 14% of turn decisions" and told
+      // hero never to bluff them. A fold rate is only a fold rate against the
+      // spots where a fold was available.
+      foldPct: pct(sa.fold, faced),
       rr: pct(sa.raise, faced),
       faced,
       actions: total,
@@ -7555,7 +7670,11 @@
       // Derived from streetActions, which has always held it — see streetRates.
       postflopRR: pct(rrMade, rrFaced),
       rrSample: rrFaced,
-      wtsd: pct(p.wtsd, p.hands),
+      // Over hands since hero's showdown record was restarted (sdSince, see
+      // repairHeroShowdowns); every other record has no sdSince and reads
+      // over all its hands, as before.
+      wtsd: pct(p.wtsd, Math.max(0, (p.hands || 0) - (p.sdSince || 0))),
+      wtsdSample: Math.max(0, (p.hands || 0) - (p.sdSince || 0)),
       wsd: pct(sdWon, sdSeen),
       wsdSample: sdSeen,
       barrel: pct(bar.m || 0, bar.o || 0),
@@ -7735,6 +7854,38 @@
     STORE.sdRecentBackfilled = true;
     saveStore();
     return Object.keys(fill).filter((x) => fill[x]).length;
+  }
+
+  // Once, from init (v1.103.0) - same flag discipline as the backfills above.
+  // Hero's showdown record was built almost entirely from showdowns hero LOST
+  // (see the hero block in applyHandResults), and no stored field says which
+  // were which, so it cannot be corrected - only restarted. Cleared: the shown
+  // hands (W$SD and hero's Range tab), the recent-showdown window, the bet
+  // texture read at showdown (bluff and slowplay rates came from the same
+  // losing sample) and the WTSD count. `sdSince` records hero's hand count at
+  // the restart, so WTSD is measured over hands since then rather than over a
+  // lifetime denominator the cleared count never saw. Opponents are untouched:
+  // the seat poll reads their cards whether they win or lose.
+  function repairHeroShowdowns() {
+    if (STORE.heroSdRepaired) return false;
+    const hx = STORE.hero && STORE.hero.xid;
+    const p = hx ? STORE.players[hx] : null;
+    if (p) {
+      p.shownHands = {};
+      p.sdRecent = [];
+      p.wtsd = 0;
+      p.sdSince = p.hands || 0;
+      p.texture = {
+        drawBets: 0, drawSizes: [],
+        madeBets: 0, madeSizes: [],
+        bluffBets: 0, bluffSizes: [],
+        checkMade: 0,
+      };
+      markPlayerDirty(hx);
+    }
+    STORE.heroSdRepaired = true;
+    saveStore();
+    return !!p;
   }
 
   // Hand category of hole+board at a given point in the hand, {r,s} numeric
@@ -11004,7 +11155,7 @@
     }
 
     // --- Showdown -----------------------------------------------------------
-    if (r.wtsd != null && n >= 30) {
+    if (r.wtsd != null && r.wtsdSample >= 30) {
       if (r.wtsd > 40) {
         add(75, 'Showdown',
           `Goes to showdown ${fmtPct(r.wtsd)} of hands played — a station. `
@@ -11278,25 +11429,32 @@
     //
     // Tagged to its own street, so the advice arrives on the street it is
     // about rather than whenever this player happens to be the aggressor.
+    //
+    // Fold to a BET, since v1.103.0 — see streetRates. The bars are measured,
+    // not judged: over 288/201/113 tracked opponents with 15+ bets faced, the
+    // pool folds 56/50/57% on flop/turn/river (SD ~13 on each). 70 and 35
+    // sit about one spread out either side, and both mean something at the
+    // table. Above 70, any bet size shows a profit as a pure bluff; below 35,
+    // even a half-pot bluff (which needs 33%) loses.
     POSTFLOP_STREETS.forEach((st) => {
       const b = r.byStreet[st];
-      if (!b || b.foldPct == null || b.actions < 8) return;
-      if (b.foldPct > 60) {
+      if (!b || b.foldPct == null || b.faced < STREET_FOLD_MIN) return;
+      if (b.foldPct > STREET_FOLD_HIGH) {
         add(84, 'Fold',
-          `Folds ${fmtPct(b.foldPct)} of their ${st} decisions (${b.actions} actions) — `
+          `Folds ${fmtPct(b.foldPct)} of the ${st} bets they face (${b.faced}) — `
             + `they give up on the ${st} more than anyone should. Fire the ${st} whether or not you hit.`,
-          `You fold ${fmtPct(b.foldPct)} of your ${st} decisions (${b.actions} actions) — you give up on `
+          `You fold ${fmtPct(b.foldPct)} of the ${st} bets you face (${b.faced}) — you give up on `
             + `the ${st} more than you should. Bluff-catch or barrel through it more instead of folding on autopilot.`,
           `barrel the ${st}`, `stop over-folding the ${st}`, [st],
-          thresholdEdge(b.foldPct, 60, 90));
-      } else if (b.foldPct < 20) {
+          thresholdEdge(b.foldPct, STREET_FOLD_HIGH, 90));
+      } else if (b.foldPct < STREET_FOLD_LOW) {
         add(74, 'Fold',
-          `Almost never folds the ${st} — ${fmtPct(b.foldPct)} of ${b.actions} decisions. `
-            + `Bluffing the ${st} against them does not work; bet for value and give up your air.`,
-          `You almost never fold the ${st} — ${fmtPct(b.foldPct)} of ${b.actions} decisions. Sharp `
+          `Rarely folds the ${st} — ${fmtPct(b.foldPct)} of ${b.faced} bets faced. `
+            + `Even a half-pot bluff loses against that; bet for value and give up your air.`,
+          `You rarely fold the ${st} — ${fmtPct(b.foldPct)} of ${b.faced} bets faced. Sharp `
             + `opponents will stop bluffing the ${st} against you and just value-bet instead; find more folds there.`,
           `no ${st} bluffs`, `fold the ${st} more`, [st],
-          thresholdEdge(20 - b.foldPct, 0, 20));
+          thresholdEdge(STREET_FOLD_LOW - b.foldPct, 0, 20));
       }
     });
 
@@ -11784,12 +11942,12 @@
     }
     POSTFLOP_STREETS.forEach((st) => {
       const b = r.byStreet[st];
-      if (!b || b.foldPct == null || b.actions < 8) return;
-      if (b.foldPct > 60) {
-        add(post, `Folds ${fmtPct(b.foldPct)} of ${st} decisions (${b.actions} actions).`,
+      if (!b || b.foldPct == null || b.faced < STREET_FOLD_MIN) return;
+      if (b.foldPct > STREET_FOLD_HIGH) {
+        add(post, `Folds ${fmtPct(b.foldPct)} of the ${st} bets they face (${b.faced}).`,
           `Barrel the ${st} — they give it up more than anyone should.`);
-      } else if (b.foldPct < 20) {
-        add(post, `Folds only ${fmtPct(b.foldPct)} of ${st} decisions (${b.actions} actions).`,
+      } else if (b.foldPct < STREET_FOLD_LOW) {
+        add(post, `Folds only ${fmtPct(b.foldPct)} of the ${st} bets they face (${b.faced}).`,
           `Do not bluff the ${st}; bet for value and give up your air.`);
       }
     });
@@ -14334,10 +14492,10 @@
             <b>Bluff freq is a floor, not a rate</b> — it can only see a bluff that got called all the way to
             showdown, so a bluff that WORKED (took the pot uncontested) is invisible to it and the true
             frequency is at least this high.</td></tr>
-          <tr class="tph-stat-head"><td colspan="3"><b>By street</b> — aggr / fold</td></tr>
+          <tr class="tph-stat-head"><td colspan="3"><b>By street</b> — aggr / fold to a bet</td></tr>
           ${POSTFLOP_STREETS.map((st) => `<tr><td class="tph-stat-l">${st[0].toUpperCase() + st.slice(1)}</td>`
             + `<td class="tph-stat-v">${fmtPct(r.byStreet[st].afq)} / ${fmtPct(r.byStreet[st].foldPct)}</td>`
-            + `<td class="tph-stat-n"><span class="tph-stat-norm">${r.byStreet[st].actions} acts</span></td></tr>`).join('')}
+            + `<td class="tph-stat-n"><span class="tph-stat-norm">${r.byStreet[st].actions} acts · ${r.byStreet[st].faced} bets</span></td></tr>`).join('')}
           ${(() => {
             // By BOARD texture — how they act on the board in front of them,
             // not on boards in general. Flags overlap by design (a board can be
@@ -15270,6 +15428,8 @@
       <h4>Hand log</h4>
       <div class="tph-exp-lead">Every stored hand as readable text — ${(STORE.hands || []).length} hand(s).</div>
       ${exportActionsHtml('handlog', `(${(STORE.hands || []).length})`)}
+      <label>Keep the last <select class="tph-history-limit">${historyLimitOptionsHtml()}</select> hands</label>
+      <div class="tph-exp-lead">About 1.4 KB a hand${pdaBackend ? '' : `; up to ${HISTORY_LIMIT_LOCAL_MAX} without the app's native storage`}. Lowering it drops the oldest unstarred hands.</div>
       <h4>P/L ledger</h4>
       <div class="tph-exp-lead">Each hand's result as CSV, with a running total. ${(STORE.plLedger || []).length}
         of ${PL_LEDGER_CAP} rows kept; your lifetime total (${fmtSignedMoney(STORE.hero.netChips)}) is always exact.</div>
@@ -15358,7 +15518,7 @@
       // Starred hands named too (v1.79.0): they ride past both numbers, so a
       // count above the ceiling would otherwise read as the cap failing.
       + `<div class="tph-store-line">History: last `
-      + `${STORE.settings.historyLimit || 200} hands, notable up to ${HISTORY_PINNED_CEILING}, starred always. `
+      + `${historyLimitOf(STORE.settings)} hands, notable up to ${historyCeiling(historyLimitOf(STORE.settings))}, starred always. `
       + `Past ${STORAGE_WARN_PCT}%, cleanup drops players under ${PRUNE_THIN_HANDS} hands unseen for `
       + `${PRUNE_THIN_DAYS} days, then anyone unseen for ${PRUNE_MAX_DAYS} days, then the least recent down to `
       + `${PRUNE_PLAYER_CAP}. You are never dropped.`
@@ -15446,6 +15606,9 @@
       // the new name straight back to the old account's record.
       if (STORE.hero) STORE.hero.xid = null;
       saveStore();
+    });
+    panel.querySelector('.tph-history-limit').addEventListener('change', (e) => {
+      setHistoryLimit(e.target.value);
     });
     panel.querySelector('.tph-min-hands').addEventListener('change', (e) => {
       STORE.settings.minHands = parseInt(e.target.value, 10) || 20;
@@ -16989,6 +17152,17 @@
       NOTABLE_POT_BB_THRESHOLD,
       NOTABLE_PREFLOP_RAISE_BB,
       HISTORY_PINNED_CEILING,
+      repairHeroShowdowns,
+      STREET_FOLD_HIGH,
+      STREET_FOLD_LOW,
+      STREET_FOLD_MIN,
+      reachedShowdown,
+      historyLimitOf,
+      historyCeiling,
+      historyLimitChoices,
+      setHistoryLimit,
+      HISTORY_LIMIT_CHOICES,
+      HISTORY_LIMIT_LOCAL_MAX,
       nameToXidGuess,
       heroUnresolved,
       findHeroXid,
@@ -17120,6 +17294,9 @@
     backfillBoardTexture();
     backfillBarrels();
     backfillRecentShowdowns();
+    // After the seeding above, which would otherwise refill hero's window
+    // from the same biased reveals.
+    repairHeroShowdowns();
     // Discards affiliation timestamps written while the transport was broken,
     // so the badges do not stay dead for up to 24h after the fix. Once only.
     repairAffiliationCache();
