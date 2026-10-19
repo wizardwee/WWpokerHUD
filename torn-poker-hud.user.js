@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.111.0
+// @version      1.112.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,8 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.112.0 - Pool figures in the coach's reads are rounded.
+ *            - A read could say "vs a 48.21206434316353% pool".
  * 1.111.0 - Gist sync goes through Torn PDA, so the backup can update.
  *            - The update was sent from the page, which refuses it ("Failed
  *              to fetch"). It now uses Torn PDA's own PATCH call.
@@ -32,11 +34,6 @@
  *              "turn bets are real", "believe their raises", slowplaying.
  *            - Report wording fixed (VPIP and PFR now compared with the
  *              pool, rounded pool figures, no empty sizing line).
- * 1.109.0 - The coach's Hide works on desktop; F and C say what they did.
- *            - Hide was swallowed by the panel's drag handle on desktop
- *              Chrome, so the coach stayed open. Fixed.
- *            - Each F or C press now shows a short message: shortcuts off,
- *              no Fold/Call button showing, or which button it pressed.
  */
 
 /*
@@ -78,7 +75,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.111.0';
+  const HUD_VERSION = '1.112.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -11202,10 +11199,10 @@
     if (r.foldToCbet != null && p.foldToCbetOpp >= 8) {
       if (s.foldToCbet > POOL_AVG.foldToCbet + POOL_SPREAD.foldToCbet) {
         add('bet', 100, 'C-bet',
-          `Folds to c-bets ${fmtPct(r.foldToCbet)} vs a ${POOL_AVG.foldToCbet}% pool `
+          `Folds to c-bets ${fmtPct(r.foldToCbet)} vs a ${Math.round(POOL_AVG.foldToCbet)}% pool `
             + `(${p.foldToCbetOpp} spots). C-bet every flop you take the lead in, any two cards. `
             + 'This is the single most profitable adjustment against them.',
-          `You fold to c-bets ${fmtPct(r.foldToCbet)} vs a ${POOL_AVG.foldToCbet}% pool `
+          `You fold to c-bets ${fmtPct(r.foldToCbet)} vs a ${Math.round(POOL_AVG.foldToCbet)}% pool `
             + `(${p.foldToCbetOpp} spots) — you are over-folding to flop pressure. Start defending more `
             + 'of your range, especially in position; anyone paying attention is printing off you right now.',
           'fire every flop', 'defend flops more', ['flop', 'lead'],
@@ -11231,9 +11228,9 @@
     if (r.cbet != null && p.cbetOpp >= 8) {
       if (s.cbet > PA.cbet + POOL_SPREAD.cbet) {
         add('theirs', 82, 'C-bettor',
-          `C-bets ${fmtPct(r.cbet)} vs a ${PA.cbet}% pool (${p.cbetOpp} spots) — much of it is air. `
+          `C-bets ${fmtPct(r.cbet)} vs a ${Math.round(PA.cbet)}% pool (${p.cbetOpp} spots) — much of it is air. `
             + 'Float in position, and raise their flop bet with pairs and draws.',
-          `You c-bet ${fmtPct(r.cbet)} vs a ${PA.cbet}% pool (${p.cbetOpp} spots) — often enough that `
+          `You c-bet ${fmtPct(r.cbet)} vs a ${Math.round(PA.cbet)}% pool (${p.cbetOpp} spots) — often enough that `
             + 'good players will float and raise you light. Check back more boards that miss you.',
           'float or raise it', 'check back more', ['facing'],
           spreadEdge(s.cbet, PA.cbet, POOL_SPREAD.cbet));
@@ -11325,9 +11322,9 @@
     if (r.foldTo3Bet != null && p.foldTo3BetOpp >= 6) {
       if (s.foldTo3Bet > PA.foldTo3Bet + POOL_SPREAD.foldTo3Bet) {
         add('pre', 85, '3-bet',
-          `Folds to 3-bets ${fmtPct(r.foldTo3Bet)} vs a ${PA.foldTo3Bet}% pool `
+          `Folds to 3-bets ${fmtPct(r.foldTo3Bet)} vs a ${Math.round(PA.foldTo3Bet)}% pool `
             + `(${p.foldTo3BetOpp} spots). 3-bet their opens light, especially in position.`,
-          `You fold to 3-bets ${fmtPct(r.foldTo3Bet)} vs a ${PA.foldTo3Bet}% pool `
+          `You fold to 3-bets ${fmtPct(r.foldTo3Bet)} vs a ${Math.round(PA.foldTo3Bet)}% pool `
             + `(${p.foldTo3BetOpp} spots) — you're giving up your opens too easily. Good players will start `
             + '3-betting you light and taking the pot uncontested; 4-bet or continue more instead of folding.',
           '3-bet them light', 'defend your opens', ['preflop'],
@@ -11353,9 +11350,9 @@
     // be absent meaningfully.
     if (r.threeBet != null && n >= 30 && s.threeBet > PA.threeBet + POOL_SPREAD.threeBet) {
       add('pre', 72, '3-bettor',
-        `3-bets ${fmtPct(r.threeBet)} of hands vs a ${PA.threeBet}% pool — wider than value. `
+        `3-bets ${fmtPct(r.threeBet)} of hands vs a ${PA.threeBet.toFixed(1)}% pool — wider than value. `
           + "Don't fold your good opens to them; 4-bet your strongest hands and call more in position.",
-        `You 3-bet ${fmtPct(r.threeBet)} of hands vs a ${PA.threeBet}% pool — wide enough that observant `
+        `You 3-bet ${fmtPct(r.threeBet)} of hands vs a ${PA.threeBet.toFixed(1)}% pool — wide enough that observant `
           + 'players will start 4-betting you light. Make sure your 3-bets can stand a 4-bet.',
         "don't fold to their 3-bet", 'watch your 3-bet width', ['preflop', 'facing'],
         spreadEdge(s.threeBet, PA.threeBet, POOL_SPREAD.threeBet));

@@ -217,4 +217,16 @@ function T0() { return T0.T || (T0.T = load()); }
   });
 }
 
+// --- Pool figures in the reads are rounded (v1.112.0) -------------------------
+// A stake-blended anchor printed "vs a 48.21206434316353% pool" on the coach.
+{
+  const T = fresh();
+  const p = Object.assign(T.emptyPlayer('b', 'Blaze'), { hands: 2242, vpip: 648, pfr: 146,
+    foldTo3BetMade: 84, foldTo3BetOpp: 95, cbetMade: 200, cbetOpp: 300, foldToCbetMade: 100, foldToCbetOpp: 120,
+    tables: { 10000000: 1587, 25000000: 622, 2500000: 23 } });
+  const text = T.buildExploitPlan(p).map((e) => e.text).join(' ');
+  t.ok('a 3-bet read fires on the fixture', /3-bets/.test(text));
+  t.ok('no long decimals in any read', !/\d\.\d{3,}/.test(text));
+}
+
 process.exit(t.report());

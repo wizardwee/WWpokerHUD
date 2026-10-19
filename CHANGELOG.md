@@ -9,6 +9,15 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.112.0
+Pool figures in the coach's reads are rounded.
+
+- The stake-blended anchor (v1.65.0) is a weighted mean, so reads quoting it
+  printed "vs a 48.21206434316353% pool" — seen on a live opponent. v1.110.0
+  rounded the Report's figures but not the exploit plan's. The c-bet,
+  fold-to-c-bet and fold-to-3-bet quotes round; 3-bet keeps one decimal
+  (its pool is 1.5).
+
 ## 1.111.0
 Gist sync goes through Torn PDA, so the backup can update.
 
