@@ -45,7 +45,7 @@ function hand(i, players, actions) {
   t.ok('the header names the player', out.includes('Villain'));
   t.ok('and the xid, since names can be re-used or unknown', out.includes('555'));
   t.ok('the header states the store-wide cap so the file cannot read as complete',
-    /most recent 200 hands/.test(out));
+    new RegExp('most recent ' + T.effectiveHistoryLimit() + ' hands').test(out));
   t.ok('their own actions are marked', out.includes('*Villain called'));
 }
 

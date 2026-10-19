@@ -9,6 +9,28 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.104.0
+History keeps 2000 hands by default, up to 5000
+
+Asked for directly: default 2000 hands, choosable up to 5000.
+
+- **Settings ▸ Hand log** now offers 200 / 500 / 1000 / 2000 / 5000, default
+  2000. Stored settings override defaults, so a store still on the old 200 is
+  moved to 2000 once (flag `historyDefaultRaised`); any other choice is left
+  alone. About 1.4 KB a hand: ~2.8 MB at 2000, ~7 MB at 5000.
+- **Without the app's native storage it still stops at 500**, whatever is
+  stored — localStorage shares ~5 MB with torn.com.
+- **The minute check no longer re-reads every hand.** It re-hashes a rotating
+  500-hand slice, so at 5000 it costs ~30ms instead of ~90ms; a hand changed
+  without being marked is still saved, within 10 minutes instead of 1. A
+  settled hand saves in ~8ms at 5000.
+- **Corrected figure:** v1.103.0 gave 298ms for hashing 5000 hands. That was
+  the test harness's slow `localStorage.key()` stub, now fixed; the script's
+  real cost was ~90ms.
+- **Known cost:** the gist backup carries every hand, pretty-printed — ~9 MB at
+  2000 and ~18 MB at 5000. Whether a gist upload that size goes through on the
+  device has not been measured.
+
 ## 1.103.0
 Your showdowns, per-street fold reads, and a longer hand history
 

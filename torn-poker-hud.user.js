@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.103.0
+// @version      1.104.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,12 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.104.0 - History keeps 2000 hands by default, up to 5000.
+ *            - Settings > Hand log now goes to 5000. A store on the old 200
+ *              default moves to 2000 once; any other choice is kept.
+ *            - Without the app's native storage it still stops at 500.
+ *            - Saving stays cheap at that size: a hand saves in ~8ms, and the
+ *              once-a-minute check reads 500 hands per pass, not all of them.
  * 1.103.0 - Your showdowns, per-street fold reads, and a longer history.
  *            - Your showdowns now count whether you win or lose. Before, only
  *              the ones you lost were recorded, so "won at showdown" read 1%
@@ -35,11 +41,6 @@
  *              that was 3-bet or more preflop.
  *            - Both count from this version on (no backfill), show their spot
  *              count, and have no pool figure yet, so no tick or verdict.
- * 1.101.0 - Seat boxes now mean target or avoid.
- *            - Green box: a fish or station (or your 📞 tag), to target.
- *            - Red dashed box: a TAG, LAG or Nit, to avoid.
- *            - The dashed "folds to aggression" box is gone; those reads stay
- *              in the coach and the Exploit tab.
  */
 
 /*
@@ -81,7 +82,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.103.0';
+  const HUD_VERSION = '1.104.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -479,26 +480,32 @@
   // How many recent hands History keeps, chosen in Settings ▸ Hand log
   // (v1.103.0). It used to be fixed at 200, which is too few to study one
   // opponent from: 500 stored hands held 10 contested pots against the player
-  // the request was about. ~1.4KB a hand, so 2000 is ~2.8MB — offered only on
-  // the PDA_storage backend (20MB, real figure in the scan); localStorage
-  // shares ~5MB with torn.com and stops at HISTORY_LIMIT_LOCAL_MAX.
+  // the request was about. ~1.4KB a hand, so 2000 is ~2.8MB and 5000 ~7MB.
+  // Default 2000, up to 5000, by request (v1.104.0) — on the PDA_storage
+  // backend only (20MB, real figure in the scan); localStorage shares ~5MB
+  // with torn.com, so there the effective limit stops at
+  // HISTORY_LIMIT_LOCAL_MAX whatever is stored (effectiveHistoryLimit).
   //
-  // 2000 is the top on cost, not space. The 60s reconcile hashes every stored
-  // hand: measured through the real save path with 900 players, a full pass
-  // is 74ms at 500 hands, 92ms at 2000 and 298ms at 5000 — the last is the
-  // per-minute stall v1.76.0 was about. Per-hand saves are memoised
-  // (handShardMemo) and do not grow with the history.
+  // The cost is the save path, not the space. Measured at 5000 hands with 900
+  // players: a settled hand saves in ~8ms (memoised, handShardMemo), and the
+  // 60s reconcile takes ~30ms because it re-hashes a rotating
+  // HAND_RECONCILE_SLICE — hashing every hand was ~90ms a minute. (v1.103.0
+  // quoted 298ms; that was the test harness's O(n) key() stub, since fixed.)
   //
   // Pinned (notable) hands keep the same headroom over the limit they always
   // had — 300 at the default 200, hence the old ceiling of 500.
   //
   // Up here for the same load-path reason as HISTORY_PINNED_CEILING:
   // loadStore -> reclaimLegacyBlob -> mergeHands reaches both.
-  const HISTORY_LIMIT_CHOICES = [200, 500, 1000, 2000];
+  const HISTORY_LIMIT_CHOICES = [200, 500, 1000, 2000, 5000];
+  const HISTORY_LIMIT_DEFAULT = 2000;
   const HISTORY_LIMIT_LOCAL_MAX = 500;
   const HISTORY_PINNED_HEADROOM = 300;
+  // The stored choice, clamped. Knows nothing about the backend, because the
+  // load path calls it before one may be chosen — runtime callers use
+  // effectiveHistoryLimit, which does.
   function historyLimitOf(settings) {
-    const n = Math.floor(Number(settings && settings.historyLimit)) || 200;
+    const n = Math.floor(Number(settings && settings.historyLimit)) || HISTORY_LIMIT_DEFAULT;
     return Math.max(50, Math.min(HISTORY_LIMIT_CHOICES[HISTORY_LIMIT_CHOICES.length - 1], n));
   }
   function historyCeiling(limit) {
@@ -537,7 +544,7 @@
                          // way" and "the whole read"
     coachHidden: false,  // collapsed to a pill so it stops covering the table
     showBadges: true,    // per-seat tendency labels; off = table completely clear
-    historyLimit: 200, // how many recent hands to keep for the History tab
+    historyLimit: 2000, // recent hands kept for History — see HISTORY_LIMIT_CHOICES
     // 'session' reads the last `sessionWindow` hands; 'lifetime' reads
     // everything. Session is the default because how someone is playing NOW
     // beats their long-run average — a nit who has just started 3-betting
@@ -1527,15 +1534,25 @@
       const entries = handShardEntries(STORE.hands);
       const live = new Set(entries.map((e) => e.key));
       onDisk().forEach((k) => { if (k.indexOf(SHARD_HAND) === 0 && !live.has(k)) drop(k, undo); });
-      // Memoised per hand OBJECT outside the reconcile (v1.103.0), so a
-      // settled hand hashes the one new record instead of re-serialising the
-      // whole history — which at 2000 hands was most of the cost of every
-      // save. A stored hand is only changed in place by the star toggle, and
-      // the memo carries `fav` so that change misses it. Anything else that
-      // edits a hand in place is what the reconcile is for: it ignores the
-      // memo and hashes every hand, the same rule ledgerChunkMemo follows.
-      entries.forEach((e) => {
-        const m = full ? null : handShardMemo.get(e.value);
+      // Memoised per hand OBJECT (v1.103.0), so a settled hand hashes the one
+      // new record instead of re-serialising the whole history. A stored hand
+      // is only changed in place by the star toggle, and the memo carries
+      // `fav` so that change misses it.
+      //
+      // The reconcile is the net for any other in-place edit, and since
+      // v1.104.0 it ignores the memo for a rotating HAND_RECONCILE_SLICE of
+      // hands per pass rather than all of them — so every hand is re-hashed
+      // within ceil(n / slice) minutes (10 at 5000) instead of one. The bound
+      // moved from "a reconcile" to "a few", it did not go away; hashing all
+      // 5000 every minute measured ~90ms against ~30ms. Ledger chunks still
+      // rehash in full: there are 40 of them at the cap.
+      const n = entries.length;
+      const slice = Math.min(n, HAND_RECONCILE_SLICE);
+      const from = n ? handReconcileCursor % n : 0;
+      if (full) handReconcileCursor = n ? (from + slice) % n : 0;
+      entries.forEach((e, i) => {
+        const inSlice = full && ((i - from + n) % n) < slice;
+        const m = inSlice ? null : handShardMemo.get(e.value);
         const fav = !!e.value.fav;
         const hash = (m && m.fav === fav) ? m.hash : contentHash(JSON.stringify(e.value));
         handShardMemo.set(e.value, { hash, fav });
@@ -1589,6 +1606,9 @@
   // Keyed by the stored hand object itself, so a hand that leaves the history
   // leaves the memo with it. See the hands block in buildFlushPlan.
   const handShardMemo = new WeakMap();
+  // Hands the reconcile re-hashes per pass, and where the next pass starts.
+  const HAND_RECONCILE_SLICE = 500;
+  let handReconcileCursor = 0;
 
   // The last pass, and the last reconcile, for the deep scan: what was
   // written, what was skipped as already on disk, what was removed. The only
@@ -2347,7 +2367,7 @@
       ...local,
       version: local.version,
       players: { ...local.players },
-      hands: mergeHands(local.hands || [], remote.hands || [], historyLimitOf(local.settings)),
+      hands: mergeHands(local.hands || [], remote.hands || [], effectiveHistoryLimit(local.settings)),
       hero: local.hero,
       session: local.session, // session is per-device; never taken from remote
       // Same call as session, for the same reason: a "session" is a physical
@@ -5917,17 +5937,37 @@
     return kept;
   }
 
+  // Once, from init (v1.104.0): a store still on the old default of 200 moves
+  // to the new one. Stored settings override defaults, so without this every
+  // existing install would stay at 200. 200 picked by hand in v1.103.0 (out
+  // for under a day) is indistinguishable and moves too; the setting is one
+  // tap to put back.
+  function raiseHistoryDefault() {
+    if (STORE.historyDefaultRaised) return false;
+    const raised = STORE.settings.historyLimit === 200;
+    if (raised) STORE.settings.historyLimit = HISTORY_LIMIT_DEFAULT;
+    STORE.historyDefaultRaised = true;
+    saveStore();
+    return raised;
+  }
+
   // The choices Settings offers (v1.103.0). The larger ones need the native
   // backend — see HISTORY_LIMIT_CHOICES. The current value is always listed,
   // so a store carried over from the other backend never shows a blank box.
+  // The limit actually applied: the stored choice, held to what the backend
+  // can afford. Runtime only — it reads pdaBackend.
+  function effectiveHistoryLimit(settings) {
+    const n = historyLimitOf(settings || STORE.settings);
+    return pdaBackend ? n : Math.min(n, HISTORY_LIMIT_LOCAL_MAX);
+  }
   function historyLimitChoices() {
-    const cur = historyLimitOf(STORE.settings);
+    const cur = effectiveHistoryLimit();
     const list = HISTORY_LIMIT_CHOICES.filter((n) => pdaBackend || n <= HISTORY_LIMIT_LOCAL_MAX);
     if (list.indexOf(cur) < 0) list.push(cur);
     return list.sort((a, b) => a - b);
   }
   function historyLimitOptionsHtml() {
-    const cur = historyLimitOf(STORE.settings);
+    const cur = effectiveHistoryLimit();
     return historyLimitChoices()
       .map((n) => `<option value="${n}"${n === cur ? ' selected' : ''}>${n}</option>`).join('');
   }
@@ -5974,7 +6014,7 @@
       bb: hand.bbAmount || 0,
       pinned: isNotableHand(hand),
     });
-    const limit = historyLimitOf(STORE.settings);
+    const limit = effectiveHistoryLimit();
     STORE.hands = trimHandHistory(STORE.hands, limit, historyCeiling(limit));
     // Marked at the write site. Until v1.83.1 only the 60s reconcile wrote
     // this shard, so a page closed inside that window lost the hand.
@@ -6506,7 +6546,7 @@
   function playerHistoryExport(xid) {
     const hands = handsInvolving(xid);
     const p = STORE.players[xid];
-    const limit = historyLimitOf(STORE.settings);
+    const limit = effectiveHistoryLimit();
     const header = [
       `Torn Poker HUD — hand history vs ${playerDisplayName(xid)} (xid ${xid})`,
       `Exported ${new Date().toISOString()}`,
@@ -6642,7 +6682,7 @@
   // clipboard and the tab cannot drift into three descriptions of one hand.
   function fullHistoryExport() {
     const hands = STORE.hands || [];
-    const limit = historyLimitOf(STORE.settings);
+    const limit = effectiveHistoryLimit();
     const header = [
       'Torn Poker HUD — full hand log',
       `Exported ${new Date().toISOString()}`,
@@ -15518,7 +15558,7 @@
       // Starred hands named too (v1.79.0): they ride past both numbers, so a
       // count above the ceiling would otherwise read as the cap failing.
       + `<div class="tph-store-line">History: last `
-      + `${historyLimitOf(STORE.settings)} hands, notable up to ${historyCeiling(historyLimitOf(STORE.settings))}, starred always. `
+      + `${effectiveHistoryLimit()} hands, notable up to ${historyCeiling(effectiveHistoryLimit())}, starred always. `
       + `Past ${STORAGE_WARN_PCT}%, cleanup drops players under ${PRUNE_THIN_HANDS} hands unseen for `
       + `${PRUNE_THIN_DAYS} days, then anyone unseen for ${PRUNE_MAX_DAYS} days, then the least recent down to `
       + `${PRUNE_PLAYER_CAP}. You are never dropped.`
@@ -17160,6 +17200,10 @@
       historyLimitOf,
       historyCeiling,
       historyLimitChoices,
+      effectiveHistoryLimit,
+      raiseHistoryDefault,
+      HISTORY_LIMIT_DEFAULT,
+      HAND_RECONCILE_SLICE,
       setHistoryLimit,
       HISTORY_LIMIT_CHOICES,
       HISTORY_LIMIT_LOCAL_MAX,
@@ -17294,6 +17338,7 @@
     backfillBoardTexture();
     backfillBarrels();
     backfillRecentShowdowns();
+    raiseHistoryDefault();
     // After the seeding above, which would otherwise refill hero's window
     // from the same biased reveals.
     repairHeroShowdowns();

@@ -141,16 +141,20 @@ function stubElement() {
 
 function stubStorage() {
   const map = new Map();
+  // key(i) is O(1) in a browser. Copying the key list on every call made the
+  // script's own enumeration O(n^2) here — 2.8s of a 5000-hand profile was
+  // this stub — so the list is cached and dropped only when keys change.
+  let keyList = null;
   return {
     getItem: (k) => (map.has(k) ? map.get(k) : null),
-    setItem: (k, v) => { map.set(k, String(v)); },
-    removeItem: (k) => { map.delete(k); },
-    clear: () => map.clear(),
+    setItem: (k, v) => { if (!map.has(k)) keyList = null; map.set(k, String(v)); },
+    removeItem: (k) => { if (map.has(k)) keyList = null; map.delete(k); },
+    clear: () => { keyList = null; map.clear(); },
     get length() { return map.size; },
     // Real localStorage API, not a test helper. The script enumerates its own
     // keys by prefix through length/key(i) rather than keeping an index key,
     // so without this the sharded loader sees a fresh install every time.
-    key: (i) => { const ks = Array.from(map.keys()); return i < ks.length ? ks[i] : null; },
+    key: (i) => { const ks = keyList || (keyList = Array.from(map.keys())); return i < ks.length ? ks[i] : null; },
     _map: map, // exposed so a test can assert on what was persisted
   };
 }

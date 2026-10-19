@@ -2821,14 +2821,30 @@ bluffs" true below it.
 read like the per-flop-seen definition. "<18 — gives up a lot, barrel more"
 fires for most of the pool. Re-measure before moving it.
 
-**History length is a setting** (Settings ▸ Hand log): 200/500/1000/2000,
-above `HISTORY_LIMIT_LOCAL_MAX` (500) only on the native backend.
-`historyCeiling(limit)` keeps pinned hands' old 300-hand headroom. Both
-helpers sit above `bootStore()` — `mergeHands` is on the load path. 2000 is
-the top on COST: the reconcile hashes every hand, measured 74 / 92 / 298 ms at
-500 / 2000 / 5000. `handShardMemo` (WeakMap on the hand object, carries
-`fav`) means a settled hand hashes only itself; the reconcile ignores the memo,
-same rule as `ledgerChunkMemo`.
+**History length is a setting** (Settings ▸ Hand log): 200/500/1000/2000/5000,
+**default 2000** (v1.104.0, by request). Above `HISTORY_LIMIT_LOCAL_MAX` (500)
+only on the native backend: `historyLimitOf` is the stored choice (load-path
+safe, no backend), `effectiveHistoryLimit` holds it to the backend at runtime
+— use the latter everywhere except the load path. `raiseHistoryDefault`
+(init, flag `historyDefaultRaised`) moves stores still on the old 200.
+`historyCeiling(limit)` keeps pinned hands' 300-hand headroom.
+
+Cost at 5000 hands / 900 players: settled hand ~8ms (`handShardMemo`, WeakMap
+on the hand object carrying `fav`), reconcile ~30ms. **The reconcile re-hashes
+a rotating `HAND_RECONCILE_SLICE` (500) of hands, not all** — all was ~90ms a
+minute. So an unmarked in-place edit to a hand lands within ceil(n/500)
+minutes, not one: a deliberate, bounded loosening of the reconcile rule for
+hands only (immutable after recording, except the star, which the memo
+tracks). Ledger chunks still rehash in full.
+
+**Measure with the harness, but know its stub.** `localStorage.key(i)` copied
+the whole key list per call, making enumeration O(n²): v1.103.0's "298ms at
+5000" and a 158ms per-hand save were that stub, not the script. Cached now.
+
+**Known cost, not solved: the gist backup.** `exportJson` is pretty-printed
+(indent 2) and carries every hand — ~9 MB at 2000 hands, ~18 MB at 5000, vs
+4.5 MB at 500. That may exceed what a gist PATCH through `pdaFetchJson`
+accepts; nobody has measured the limit on the device.
 
 ## Feature use is counted on the device (v1.92.0)
 
