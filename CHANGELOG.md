@@ -9,6 +9,42 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.110.0
+A plan for each player, and sharper reads behind it.
+
+Asked for after comparing the HUD's output for real opponents with a written
+analysis of them: the HUD had the data for most of that analysis but no rule
+to say it, several bars fired for most of the pool, and the report contradicted
+itself.
+
+- **Player summary.** `buildPlayerSummary(xid)` regroups the exploit plan into
+  up to five lines (Right now / Before the flop / Bet into them / Value, not
+  bluffs / Reading them), top three reads each by gain. It is the first section
+  of the Report, and the coach shows it as an expandable "Plan vs <player>"
+  line for the player its lead read is about (`settings.coachPlanOpen`,
+  remembered). Every rule now names its line as `add()`'s first argument;
+  `test/player-summary.test.js` fails on a rule without one.
+- **New reads**, each measured against the pool (3 Sep backup, 442 opponents
+  with 25+ hands, `STREET_POOL`): calls the flop but folds the turn (turn fold
+  15+ points over flop fold, stands down for the exact fold-to-barrel stat);
+  bets a lot or little when nobody has bet on the turn/river (pool ± one
+  spread); raises one street's bets (pool + one spread, stands down when the
+  whole-hand re-raise read fires); 3-bet showdowns read as light (half or more
+  outside `THREE_BET_RANGES.IP`, 4+ shown) or value (a fifth or fewer).
+- **Bars that fired for most players, re-measured:** street fold-to-bet high
+  bar is now the street's pool + one spread (69/63/70, was a flat 70); WTSD is
+  read per hand PLAYED (pool 31, bars 21/41 — it was per hand dealt against
+  bars meant for per hand played, so "barrel more" fired for most of the pool);
+  slowplay 33/67 around a 50% pool (was >40 and <10); turn aggression 77 (was
+  55, under the pool's 58); VPIP−PFR gap 57 (was 40, the pool's middle).
+- **Report fixes:** VPIP and PFR wording compared with the player's pool
+  anchor (fixed 20/30 bars called nearly everyone "very wide"); pool figures
+  rounded; the sizing line needs both medians; the 3-bet showdown line says
+  what the range means.
+- **Coach fatigue:** a read's showing in the current spot no longer counts
+  against itself, so the lead read cannot swap for a runner-up between the
+  first and second render of one spot.
+
 ## 1.109.0
 The coach's Hide works on desktop; F and C say what they did.
 

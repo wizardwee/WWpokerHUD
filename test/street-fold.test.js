@@ -55,9 +55,12 @@ const thin = playerWith({
 t.ok('under STREET_FOLD_MIN bets faced, no read',
   !T.buildExploitPlan(thin).some((e) => e.tag === 'Fold'));
 
-// The bars are measured (pool ~50-57% on every street, SD ~13). Pinned
-// against literals so a nudge has to be argued for here.
-t.eq('high bar', T.STREET_FOLD_HIGH, 70);
+// The bars are measured (pool 56/50/57% flop/turn/river, SD ~13): the high
+// bar is the street's pool plus one spread. Pinned against literals so a
+// nudge has to be argued for here.
+t.eq('flop high bar', T.streetFoldHigh('flop'), 69);
+t.eq('turn high bar', T.streetFoldHigh('turn'), 63);
+t.eq('river high bar', T.streetFoldHigh('river'), 70);
 t.eq('low bar', T.STREET_FOLD_LOW, 35);
 t.ok('the low bar is above a half-pot bluff\'s break-even (33%)', T.STREET_FOLD_LOW > 100 / 3);
 

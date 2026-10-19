@@ -2812,14 +2812,12 @@ checks and bets too, spots where no fold was possible, so a 37% turn folder
 read "folds 14% of turn decisions" → "no turn bluffs". It is now over `faced`
 (the denominator `rr` already used). The bars were re-measured, not carried
 over: pool fold-to-bet is 56/50/57% flop/turn/river (SD ~13), so
-`STREET_FOLD_HIGH` 70 / `STREET_FOLD_LOW` 35 / `STREET_FOLD_MIN` 15. 35 is
+`STREET_FOLD_HIGH` 70 (per street since v1.110.0: `streetFoldHigh`, 69/63/70) / `STREET_FOLD_LOW` 35 / `STREET_FOLD_MIN` 15. 35 is
 also just above a half-pot bluff's 33% break-even, which is what makes "no
 bluffs" true below it.
 
-**Still open, flagged not fixed: WTSD's bars.** `wtsd` is per hand DEALT
-(pool median 13.8%), but the rule's 18/40 bars and "of hands played" copy
-read like the per-flop-seen definition. "<18 — gives up a lot, barrel more"
-fires for most of the pool. Re-measure before moving it.
+**WTSD's bars: fixed in v1.110.0.** The rule now reads `wtsdPlayed`
+(showdowns per hand PLAYED, pool 31, bars 21/41); see the v1.110.0 section.
 
 **History length is a setting** (Settings ▸ Hand log): 200/500/1000/2000/5000,
 **default 2000** (v1.104.0, by request). Above `HISTORY_LIMIT_LOCAL_MAX` (500)
@@ -2876,6 +2874,41 @@ to Connect.
 (indent 2) and carries every hand — ~9 MB at 2000 hands, ~18 MB at 5000, vs
 4.5 MB at 500. That may exceed what a gist PATCH through `pdaFetchJson`
 accepts; nobody has measured the limit on the device.
+
+## The player summary, and bars measured off the pool (v1.110.0)
+
+Asked for after a hand-written analysis of real opponents was preferred to
+the HUD's output. Comparing the two found three things, each fixed:
+
+**A summary.** `buildPlayerSummary(xid)` regroups `buildExploitPlan` into
+`PLAN_LINES` (Right now / Before the flop / Bet into them / Value, not bluffs /
+Reading them), top three by gain. It is the Report's first section (so the
+copy and the screen agree, per "one source, two renderings") and the coach's
+expandable "Plan vs <player>" line, for the player the lead read is about
+(`coachPlanXid`, set in `buildCoachAdvice`). It cannot say anything the
+Exploit tab does not. **Every `add()` names its line as the first argument**
+(`'none'` keeps it out); the test scans for a rule without one.
+
+**Reads the data already held.** Flop-call/turn-fold, turn/river stab rate
+(`streetRates().stab`, bets over unbet spots), one street's raise rate, and
+what a 3-bet showdown range means (`threeBetRangeRead`). Each stands down
+where a better read says the same thing: the exact fold-to-barrel stat, the
+whole-hand re-raise read, the plain 3-bet list.
+
+**Fixed bars that sat at or below the pool's own middle**, so the read fired
+for most players: turn aggression (55 vs a 58 pool), VPIP−PFR gap (40 vs 37),
+slowplay (>40 vs 50), WTSD (per-played bars tested on per-dealt figures).
+`STREET_POOL` holds the per-street measurements; bars are pool ± one spread
+unless a bar means something absolute (35% fold = a half-pot bluff's
+break-even). **Before adding a bar, check what share of the pool it fires
+for** — the scratch check was firing counts over the backup, and "fires for
+half the pool" is the symptom every one of these had.
+
+**Coach fatigue fix found on the way:** a read's showing in the current spot
+counted against itself, so the lead read could swap for a runner-up between a
+spot's first and second render. `tipFatiguePenalty(xid, tag, spot)` excludes
+it; `test/coach-fatigue.test.js`'s same-spot test caught it once a new read
+narrowed the margin.
 
 ## Feature use is counted on the device (v1.92.0)
 

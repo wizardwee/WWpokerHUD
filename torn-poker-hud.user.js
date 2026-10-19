@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.109.0
+// @version      1.110.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,16 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.110.0 - A plan for each player, and sharper reads behind it.
+ *            - New Summary at the top of a player's Report, and a "Plan vs
+ *              <player>" line under the coach's advice: tap to open.
+ *            - New reads: calls flops but folds turns, bets a lot (or little)
+ *              when the turn or river is checked, raises one street, and
+ *              whether their 3-bets are light or value.
+ *            - Fixed reads that fired for most players: "barrel more",
+ *              "turn bets are real", "believe their raises", slowplaying.
+ *            - Report wording fixed (VPIP and PFR now compared with the
+ *              pool, rounded pool figures, no empty sizing line).
  * 1.109.0 - The coach's Hide works on desktop; F and C say what they did.
  *            - Hide was swallowed by the panel's drag handle on desktop
  *              Chrome, so the coach stayed open. Fixed.
@@ -28,10 +38,6 @@
  *            - With the fold guard on, F has to be pressed twice, same as a tap.
  *            - Your turn only, never while typing in a box, never with
  *              Ctrl/Alt/Cmd, and holding a key down presses nothing extra.
- * 1.107.0 - A sign-in GitHub rejects is forgotten, so you can sign in again.
- *            - Your saved GitHub sign-in had stopped working (HTTP 401), and
- *              the button only offered Re-sync. It now clears the dead
- *              sign-in and goes back to Connect.
  */
 
 /*
@@ -73,7 +79,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.109.0';
+  const HUD_VERSION = '1.110.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -540,6 +546,7 @@
                          // fixed size can't serve both "a thin strip out of the
                          // way" and "the whole read"
     coachHidden: false,  // collapsed to a pill so it stops covering the table
+    coachPlanOpen: false, // the coach's "Plan vs <player>" line, expanded
     showBadges: true,    // per-seat tendency labels; off = table completely clear
     historyLimit: 2000, // recent hands kept for History — see HISTORY_LIMIT_CHOICES
     // 'session' reads the last `sessionWindow` hands; 'lifetime' reads
@@ -7467,11 +7474,33 @@
   }
 
   const POSTFLOP_STREETS = ['flop', 'turn', 'river'];
-  // Fold-to-a-bet bars per street, and the bets faced before either is read.
-  // Measured off the pool — see the folding block in buildExploitPlan.
-  const STREET_FOLD_HIGH = 70;
+  // The pool per street, measured (v1.110.0) over the 3 Sep backup: 442
+  // opponents with 25+ hands, each per-street figure from those with 15+ spots
+  // of that kind. Mean and SD. `fold` and `raise` are over bets FACED, `stab`
+  // is bets over spots where nobody had bet yet (bet + check), `afq` is the
+  // street's aggression frequency (15+ actions).
+  const STREET_POOL = {
+    flop: { fold: 55.9, foldSd: 12.6, raise: 6.5, raiseSd: 5.7, stab: 25.2, stabSd: 13.8, afq: 52.0, afqSd: 21.0 },
+    turn: { fold: 50.2, foldSd: 13.1, raise: 8.4, raiseSd: 6.8, stab: 33.5, stabSd: 15.1, afq: 58.1, afqSd: 18.6 },
+    river: { fold: 56.6, foldSd: 13.3, raise: 15.5, raiseSd: 8.8, stab: 34.3, stabSd: 14.2, afq: 72.2, afqSd: 16.0 },
+  };
+  // Fold-to-a-bet bars. The HIGH bar is the street's own pool figure plus one
+  // spread (69 / 63 / 70) — a flat 70 missed a 63% turn folder against a 50%
+  // turn pool, the street they were most attackable on. The LOW bar stays a
+  // flat 35, because it means something absolute: a half-pot bluff needs 33%.
+  function streetFoldHigh(st) {
+    const sp = STREET_POOL[st];
+    return Math.round(sp.fold + sp.foldSd);
+  }
   const STREET_FOLD_LOW = 35;
+  // Bets faced (or unbet spots) before any per-street read is made.
   const STREET_FOLD_MIN = 15;
+  // Calls the flop, folds the turn: the turn fold rate this many points above
+  // the flop's. Pool mean difference -4.4, SD 14.3, so +15 is about the top
+  // tenth.
+  const FLOP_TURN_FOLD_GAP = 15;
+  // VPIP minus PFR above which a player is "a caller, not a raiser".
+  const PASSIVE_GAP_HIGH = 57;
 
   // Aggression and fold frequency for ONE street.
   //
@@ -7481,7 +7510,7 @@
   // different opponent from one who barrels three streets, and that was
   // invisible.
   function streetRates(sa) {
-    if (!sa) return { afq: null, foldPct: null, rr: null, faced: 0, actions: 0 };
+    if (!sa) return { afq: null, foldPct: null, rr: null, faced: 0, stab: null, unbet: 0, actions: 0 };
     const agg = sa.bet + sa.raise;
     const passive = sa.call;
     const total = agg + passive + sa.check + sa.fold;
@@ -7505,6 +7534,11 @@
       foldPct: pct(sa.fold, faced),
       rr: pct(sa.raise, faced),
       faced,
+      // Bets when nobody had bet yet: a lead, a c-bet, or a stab when it is
+      // checked to them. The other half of the street — the spots where
+      // check and bet were the only options.
+      stab: pct(sa.bet, sa.bet + sa.check),
+      unbet: sa.bet + sa.check,
       actions: total,
     };
   }
@@ -7716,6 +7750,31 @@
     return totals;
   }
 
+  // VPIP hands over which WTSD is counted — see computeRates' wtsdPlayed.
+  function wtsdVpipSince(p) {
+    const hands = p.hands || 0;
+    const since = Math.max(0, hands - (p.sdSince || 0));
+    if (!hands) return 0;
+    return (p.vpip || 0) * (since / hands);
+  }
+
+  // WTSD per hand played: pool 31.2, SD 10.2 (v1.110.0, same backup as
+  // STREET_POOL). The bars are one spread either side. The old 18/40 bars
+  // were set for this definition but tested against WTSD per hand DEALT
+  // (pool median 13.8), so "gives up a lot, barrel more" fired for most of
+  // the pool.
+  const WTSD_PLAYED_POOL = 31;
+  const WTSD_PLAYED_HIGH = 41;
+  const WTSD_PLAYED_LOW = 21;
+  const WTSD_PLAYED_MIN = 20;
+
+  // Slowplay rate (checks two pair+ instead of betting it): pool 50, SD 17,
+  // over players with 10+ spots. The old bars were >40 (below the pool's own
+  // middle, so most players read as trappers) and <10.
+  const TRAP_HIGH = 67;
+  const TRAP_LOW = 33;
+  const TRAP_MIN = 10;
+
   function computeRates(p) {
     // AFq here is (bet + raise) / (bet + raise + call). Folds are DELIBERATELY
     // excluded, and this is a settled decision — do not "fix" it.
@@ -7799,6 +7858,12 @@
       // over all its hands, as before.
       wtsd: pct(p.wtsd, Math.max(0, (p.hands || 0) - (p.sdSince || 0))),
       wtsdSample: Math.max(0, (p.hands || 0) - (p.sdSince || 0)),
+      // Showdowns per hand PLAYED (VPIP), the definition the WTSD rule and
+      // its copy mean (v1.110.0). Per hand dealt it mostly measures how tight
+      // someone is. After a showdown restart (sdSince) VPIP since then is not
+      // stored, so it is pro-rated by the share of hands since the restart.
+      wtsdPlayed: pct(p.wtsd, wtsdVpipSince(p)),
+      wtsdPlayedSample: Math.round(wtsdVpipSince(p)),
       wsd: pct(sdWon, sdSeen),
       wsdSample: sdSeen,
       barrel: pct(bar.m || 0, bar.o || 0),
@@ -10729,7 +10794,12 @@
     return { pct, gap, looksMade, made: tell.made, bluff: tell.bluff, madeN: tell.madeN, bluffN: tell.bluffN };
   }
 
+  // The player the coach's lead read is about, for the expandable plan line
+  // under the advice (v1.110.0). Set by buildCoachAdvice each render.
+  let coachPlanXid = null;
+
   function buildCoachAdvice() {
+    coachPlanXid = null;
     if (!currentHand) return null;
     const hand = currentHand;
     const heroCards = readHeroCards();
@@ -10925,6 +10995,7 @@
     // lands on mid-decision. A pair of equally loud lines is two things to
     // read in a spot where there is time for one.
     currentExploitTips(COACH_TIPS_SHOWN).forEach((tip, i) => {
+      if (i === 0) coachPlanXid = tip.xid;
       // The "new" marker sits BETWEEN the name and the read, so it is seen
       // while deciding whether to trust the line rather than as a footnote
       // after it has already been acted on. Hand count included because "new"
@@ -11026,6 +11097,28 @@
   //
   // `voice`: 'exploit' (default) or 'leak'. add() takes BOTH phrasings so
   // there is exactly one call site per rule, not two rules that could drift.
+  // What the hands shown after 3-betting say about the range (v1.110.0).
+  // "Standard" is THREE_BET_RANGES.IP, the chart this file already uses for
+  // a 3-bet. Light when at least half of 4+ shown fall outside it, value when
+  // a fifth or fewer do; anything between is left as a plain list.
+  const THREE_BET_READ_MIN = 4;
+  function threeBetRangeRead(shown3) {
+    if (!shown3 || !shown3.length) return null;
+    const std = parseRange(THREE_BET_RANGES.IP);
+    let n = 0;
+    let outside = 0;
+    const out = [];
+    shown3.forEach((e) => {
+      n += e.n;
+      if (!std.has(e.cls)) { outside += e.n; out.push(e.cls); }
+    });
+    if (n < THREE_BET_READ_MIN) return null;
+    const share = outside / n;
+    const kind = share >= 0.5 ? 'light' : share <= 0.2 ? 'value' : null;
+    if (!kind) return null;
+    return { kind, n, outside, outsideList: out.slice(0, 5).join(', ') + (out.length > 5 ? '…' : '') };
+  }
+
   function buildTendencyEntries(p, voice) {
     if (!p) return [];
     const r = computeRates(p);
@@ -11056,7 +11149,15 @@
     // constant. Omitted means EXPLOIT_EDGE_NEUTRAL (0.5): neither promoted nor
     // punished, same defaulting principle as an untagged `when`. It affects
     // only the live coach ranking; the Exploit/Leaks tab still orders by gain.
-    const add = (gain, tag, exploitText, leakText, exploitShort, leakShort, when, edge) => out.push({
+    //
+    // `plan` (first argument) is which line of the player summary the entry
+    // belongs to — see PLAN_LINES and buildPlayerSummary: 'pre' (before the
+    // flop), 'bet' (when to bet into them), 'value' (value, not bluffs),
+    // 'theirs' (reading their bets and raises), 'state' (right now), or
+    // 'none' (kept out of the summary). Required, so a new rule has to say
+    // where it goes; test/player-summary.test.js fails on a missing one.
+    const add = (plan, gain, tag, exploitText, leakText, exploitShort, leakShort, when, edge) => out.push({
+      plan,
       gain,
       tag,
       text: voice === 'leak' ? leakText : exploitText,
@@ -11069,7 +11170,7 @@
     // --- Postflop: the biggest lever against a passive pool ------------------
     if (r.foldToCbet != null && p.foldToCbetOpp >= 8) {
       if (s.foldToCbet > POOL_AVG.foldToCbet + POOL_SPREAD.foldToCbet) {
-        add(100, 'C-bet',
+        add('bet', 100, 'C-bet',
           `Folds to c-bets ${fmtPct(r.foldToCbet)} vs a ${POOL_AVG.foldToCbet}% pool `
             + `(${p.foldToCbetOpp} spots). C-bet every flop you take the lead in, any two cards. `
             + 'This is the single most profitable adjustment against them.',
@@ -11079,7 +11180,7 @@
           'fire every flop', 'defend flops more', ['flop', 'lead'],
           spreadEdge(s.foldToCbet, POOL_AVG.foldToCbet, POOL_SPREAD.foldToCbet));
       } else if (s.foldToCbet < POOL_AVG.foldToCbet - POOL_SPREAD.foldToCbet) {
-        add(95, 'C-bet',
+        add('value', 95, 'C-bet',
           `Folds to c-bets only ${fmtPct(r.foldToCbet)} (${p.foldToCbetOpp} spots). `
             + 'Stop bluffing flops. Bet for value and check your air — a c-bet here is lighting money on fire.',
           `You almost never fold to a c-bet (${fmtPct(r.foldToCbet)}, ${p.foldToCbetOpp} spots) — `
@@ -11098,7 +11199,7 @@
     // little above a flop-only figure — the wording says "c-bets", not "flop".
     if (r.cbet != null && p.cbetOpp >= 8) {
       if (s.cbet > PA.cbet + POOL_SPREAD.cbet) {
-        add(82, 'C-bettor',
+        add('theirs', 82, 'C-bettor',
           `C-bets ${fmtPct(r.cbet)} vs a ${PA.cbet}% pool (${p.cbetOpp} spots) — much of it is air. `
             + 'Float in position, and raise their flop bet with pairs and draws.',
           `You c-bet ${fmtPct(r.cbet)} vs a ${PA.cbet}% pool (${p.cbetOpp} spots) — often enough that `
@@ -11106,7 +11207,7 @@
           'float or raise it', 'check back more', ['facing'],
           spreadEdge(s.cbet, PA.cbet, POOL_SPREAD.cbet));
       } else if (s.cbet < PA.cbet - POOL_SPREAD.cbet) {
-        add(62, 'C-bettor',
+        add('theirs', 62, 'C-bettor',
           `Rarely c-bets (${fmtPct(r.cbet)}, ${p.cbetOpp} spots). When they do bet, it is a hand — `
             + 'fold your weak pairs. When they check, stab: they have given up.',
           `You rarely c-bet (${fmtPct(r.cbet)}, ${p.cbetOpp} spots) — your bets are easy to read and your `
@@ -11126,7 +11227,7 @@
     // is how the coach ends up repeating itself.
     const barrelRead = r.barrel != null && r.barrelOpp >= BARREL_MIN;
     if (barrelRead && r.barrel <= 35) {
-      add(90, 'Turn',
+      add('bet', 90, 'Turn',
         `Bets the flop, then bets the turn again only ${fmtPct(r.barrel)} of the time `
           + `(${r.barrelOpp} spots). Call their flop c-bet in position and bet when they check the turn.`,
         `After c-betting the flop you bet the turn again only ${fmtPct(r.barrel)} of the time `
@@ -11135,7 +11236,7 @@
         'float, stab turn', 'barrel more turns', ['postflop'],
         thresholdEdge(35 - r.barrel, 0, 30));
     } else if (barrelRead && r.barrel >= 70) {
-      add(70, 'Turn',
+      add('theirs', 70, 'Turn',
         `Bets the turn again ${fmtPct(r.barrel)} of the time after c-betting (${r.barrelOpp} spots) — `
           + 'a turn bet from them is not extra strength. Call down with real hands.',
         `You bet the turn again ${fmtPct(r.barrel)} of the time after c-betting (${r.barrelOpp} spots) — `
@@ -11146,7 +11247,7 @@
     }
     if (r.foldToBarrel != null && r.foldToBarrelOpp >= FOLD_BARREL_MIN) {
       if (r.foldToBarrel >= 60) {
-        add(88, 'Barrel',
+        add('bet', 88, 'Barrel',
           `Calls your flop c-bet, then folds to a turn bet ${fmtPct(r.foldToBarrel)} of the time `
             + `(${r.foldToBarrelOpp} spots). Keep betting the turn.`,
           `You call flop c-bets and then fold to the turn bet ${fmtPct(r.foldToBarrel)} of the time `
@@ -11155,7 +11256,7 @@
           'bet the turn again', 'call flops you keep', ['turn', 'lead'],
           thresholdEdge(r.foldToBarrel, 60, 85));
       } else if (r.foldToBarrel <= 25) {
-        add(78, 'Barrel',
+        add('value', 78, 'Barrel',
           `Once they call your flop c-bet they rarely fold the turn (${fmtPct(r.foldToBarrel)}, `
             + `${r.foldToBarrelOpp} spots). Bet the turn for value only.`,
           `Once you call a flop c-bet you rarely fold the turn (${fmtPct(r.foldToBarrel)}, `
@@ -11165,7 +11266,7 @@
       }
     }
     if (!barrelRead && f.afq != null && tn.afq != null && f.actions >= 8 && tn.actions >= 6 && f.afq - tn.afq > 20) {
-      add(90, 'Turn',
+      add('bet', 90, 'Turn',
         `Aggression collapses from ${fmtPct(f.afq)} on the flop to ${fmtPct(tn.afq)} on the turn. `
           + 'Float their flop bet in position and take it away on the turn when they check.',
         `Your aggression drops from ${fmtPct(f.afq)} on the flop to ${fmtPct(tn.afq)} on the turn — `
@@ -11175,21 +11276,24 @@
         'float, stab turn', 'follow through on turns', ['postflop'],
         thresholdEdge(f.afq - tn.afq, 20, 60));
     }
-    if (!barrelRead && tn.afq != null && tn.actions >= 6 && tn.afq > 55) {
-      add(70, 'Turn',
+    // Pool plus one spread (77). A flat 55 sat below the pool's own turn
+    // aggression (58), so this fired for over half the players tracked.
+    const turnAfqHigh = Math.round(STREET_POOL.turn.afq + STREET_POOL.turn.afqSd);
+    if (!barrelRead && tn.afq != null && tn.actions >= STREET_FOLD_MIN && tn.afq > turnAfqHigh) {
+      add('theirs', 70, 'Turn',
         `Keeps firing turns (${fmtPct(tn.afq)} aggression, ${tn.actions} actions) — `
           + 'their turn bets are not automatic bluffs; call down with real hands rather than floats.',
         `You keep firing turns (${fmtPct(tn.afq)} aggression, ${tn.actions} actions) — good opponents `
           + "will start calling you down lighter, since your turn bets stop meaning as much to them. Make "
           + 'sure the second barrel has a real hand or a real plan behind it.',
         'turn bets are real', 'barrel with a plan', ['turn'],
-        thresholdEdge(tn.afq, 55, 85));
+        thresholdEdge(tn.afq, turnAfqHigh, 95));
     }
 
     // --- Preflop ------------------------------------------------------------
     if (r.foldTo3Bet != null && p.foldTo3BetOpp >= 6) {
       if (s.foldTo3Bet > PA.foldTo3Bet + POOL_SPREAD.foldTo3Bet) {
-        add(85, '3-bet',
+        add('pre', 85, '3-bet',
           `Folds to 3-bets ${fmtPct(r.foldTo3Bet)} vs a ${PA.foldTo3Bet}% pool `
             + `(${p.foldTo3BetOpp} spots). 3-bet their opens light, especially in position.`,
           `You fold to 3-bets ${fmtPct(r.foldTo3Bet)} vs a ${PA.foldTo3Bet}% pool `
@@ -11198,7 +11302,7 @@
           '3-bet them light', 'defend your opens', ['preflop'],
           spreadEdge(s.foldTo3Bet, PA.foldTo3Bet, POOL_SPREAD.foldTo3Bet));
       } else if (s.foldTo3Bet < PA.foldTo3Bet - POOL_SPREAD.foldTo3Bet) {
-        add(60, '3-bet',
+        add('pre', 60, '3-bet',
           `Rarely folds to 3-bets (${fmtPct(r.foldTo3Bet)}). 3-bet for value only — `
             + 'a light 3-bet just builds a pot out of position with the worse hand.',
           `You rarely fold to a 3-bet (${fmtPct(r.foldTo3Bet)}) — you're probably continuing too wide when `
@@ -11217,7 +11321,7 @@
     // premium hand. Gated on volume because a 1.5% event needs many hands to
     // be absent meaningfully.
     if (r.threeBet != null && n >= 30 && s.threeBet > PA.threeBet + POOL_SPREAD.threeBet) {
-      add(72, '3-bettor',
+      add('pre', 72, '3-bettor',
         `3-bets ${fmtPct(r.threeBet)} of hands vs a ${PA.threeBet}% pool — wider than value. `
           + "Don't fold your good opens to them; 4-bet your strongest hands and call more in position.",
         `You 3-bet ${fmtPct(r.threeBet)} of hands vs a ${PA.threeBet}% pool — wide enough that observant `
@@ -11225,7 +11329,7 @@
         "don't fold to their 3-bet", 'watch your 3-bet width', ['preflop', 'facing'],
         spreadEdge(s.threeBet, PA.threeBet, POOL_SPREAD.threeBet));
     } else if (n >= THREE_BET_NIT_HANDS && (p.threeBetMade || 0) === 0) {
-      add(66, '3-bettor',
+      add('pre', 66, '3-bettor',
         `Has not 3-bet once in ${n} hands. If they 3-bet you now, it is the top of their range — `
           + 'fold everything but premium hands.',
         `You have not 3-bet once in ${n} hands — when you finally do, everyone knows what you hold. `
@@ -11234,7 +11338,7 @@
     }
     if (r.limpShareOfVpip != null && p.limpMade >= 5
         && s.limpShareOfVpip > PA.limpShareOfVpip + POOL_SPREAD.limpShareOfVpip) {
-      add(80, 'Isolate',
+      add('pre', 80, 'Isolate',
         `Limps into ${fmtPct(r.limpShareOfVpip)} of the pots they enter. `
           + 'Raise big to isolate them in position — their limping range is capped, and they will call too wide.',
         `You limp into ${fmtPct(r.limpShareOfVpip)} of the pots you enter — your limping range is capped, `
@@ -11245,7 +11349,7 @@
     }
     if (r.vpip != null && n >= 20) {
       if (s.vpip > PA.vpip + POOL_SPREAD.vpip) {
-        add(55, 'Range',
+        add('value', 55, 'Range',
           `Plays ${fmtPct(r.vpip)} of hands vs a ${PA.vpip.toFixed(0)}% pool — `
             + 'their range is wide and weak. Value bet thinner than feels comfortable and stop bluffing.',
           `You play ${fmtPct(r.vpip)} of hands vs a ${PA.vpip.toFixed(0)}% pool — that's wide. `
@@ -11254,7 +11358,7 @@
           'value bet thin', 'tighten your range', null,
           spreadEdge(s.vpip, PA.vpip, POOL_SPREAD.vpip));
       } else if (s.vpip < PA.vpip - POOL_SPREAD.vpip) {
-        add(65, 'Range',
+        add('pre', 65, 'Range',
           `Plays only ${fmtPct(r.vpip)} of hands vs a ${PA.vpip.toFixed(0)}% pool — `
             + 'genuinely tight for this table. Respect their raises and steal their blinds relentlessly.',
           `You play only ${fmtPct(r.vpip)} of hands vs a ${PA.vpip.toFixed(0)}% pool — genuinely `
@@ -11265,39 +11369,43 @@
       }
     }
     if (r.pfr != null && r.vpip > 0 && n >= 20) {
+      // Pool gap 37, SD 20 (v1.110.0, same backup as STREET_POOL): the bar is
+      // one spread above. A flat 40 sat at the pool's own middle and fired
+      // for 44% of players tracked.
       const gap = r.vpip - r.pfr;
-      if (gap > 40) {
-        add(50, 'Passive',
+      if (gap > PASSIVE_GAP_HIGH) {
+        add('theirs', 50, 'Passive',
           `Huge VPIP/PFR gap (${fmtPct(r.vpip)}/${fmtPct(r.pfr)}) — a caller, not a raiser. `
             + 'When they DO raise, believe it.',
           `Huge gap between how often you play (${fmtPct(r.vpip)}) and how often you raise (${fmtPct(r.pfr)}) `
             + "— you're a caller, not a raiser. Sharp opponents will play back at your flat-calls and fold "
             + 'correctly to your raises since they mean so much; raise more of your continuing range instead.',
           'believe their raises', 'raise more, call less', ['facing'],
-          thresholdEdge(gap, 40, 70));
+          thresholdEdge(gap, PASSIVE_GAP_HIGH, 80));
       }
     }
 
     // --- Showdown -----------------------------------------------------------
-    if (r.wtsd != null && r.wtsdSample >= 30) {
-      if (r.wtsd > 40) {
-        add(75, 'Showdown',
-          `Goes to showdown ${fmtPct(r.wtsd)} of hands played — a station. `
+    // Per hand PLAYED since v1.110.0 — see WTSD_PLAYED_POOL for why.
+    if (r.wtsdPlayed != null && r.wtsdPlayedSample >= WTSD_PLAYED_MIN) {
+      if (r.wtsdPlayed > WTSD_PLAYED_HIGH) {
+        add('value', 75, 'Showdown',
+          `Goes to showdown in ${fmtPct(r.wtsdPlayed)} of the hands they play (pool ${WTSD_PLAYED_POOL}%) — a station. `
             + 'Three-street value with anything decent; never try to bluff them off a made hand.',
-          `You reach showdown ${fmtPct(r.wtsd)} of hands played — you're a station. Sharp opponents will `
+          `You reach showdown in ${fmtPct(r.wtsdPlayed)} of the hands you play (pool ${WTSD_PLAYED_POOL}%) — you're a station. Sharp opponents will `
             + 'stop bluffing you (correctly) and value-bet you relentlessly (also correctly). Fold more when '
             + "you're beat instead of calling to find out.",
           'three-street value', 'fold more, call less', ['postflop'],
-          thresholdEdge(r.wtsd, 40, 65));
-      } else if (r.wtsd < 18) {
-        add(60, 'Showdown',
-          `Reaches showdown only ${fmtPct(r.wtsd)} of the time — they give up a lot. `
+          thresholdEdge(r.wtsdPlayed, WTSD_PLAYED_HIGH, 65));
+      } else if (r.wtsdPlayed < WTSD_PLAYED_LOW) {
+        add('bet', 60, 'Showdown',
+          `Reaches showdown in only ${fmtPct(r.wtsdPlayed)} of the hands they play (pool ${WTSD_PLAYED_POOL}%) — they give up a lot. `
             + 'Barrel more streets; they are folding somewhere before the river.',
-          `You reach showdown only ${fmtPct(r.wtsd)} of the time — you're giving up too much. Sharp `
+          `You reach showdown in only ${fmtPct(r.wtsdPlayed)} of the hands you play (pool ${WTSD_PLAYED_POOL}%) — you're giving up too much. Sharp `
             + 'opponents will bet you off pots relentlessly since they know you fold; call down more or '
             + 'barrel yourself rather than folding to every bet you face.',
           'barrel more', 'call down more', ['postflop'],
-          thresholdEdge(18 - r.wtsd, 0, 12));
+          thresholdEdge(WTSD_PLAYED_LOW - r.wtsdPlayed, 0, 12));
       }
     }
     // Won at showdown, off the showdowns whose cards were seen. Pairs with
@@ -11306,7 +11414,7 @@
     const WSD_MIN = 10;
     if (r.wsd != null && r.wsdSample >= WSD_MIN) {
       if (r.wsd <= 40) {
-        add(76, 'Won SD',
+        add('value', 76, 'Won SD',
           `Wins only ${fmtPct(r.wsd)} of the showdowns seen (${r.wsdSample}) — they call down with worse. `
             + 'Value-bet thinner against them, and do not bluff.',
           `You win only ${fmtPct(r.wsd)} of your showdowns (${r.wsdSample}) — you are calling down with `
@@ -11314,7 +11422,7 @@
           'value bet thinner', 'fold more rivers', ['river'],
           thresholdEdge(40 - r.wsd, 0, 20));
       } else if (r.wsd >= 65) {
-        add(74, 'Won SD',
+        add('theirs', 74, 'Won SD',
           `Wins ${fmtPct(r.wsd)} of the showdowns seen (${r.wsdSample}) — when they get there, they have it. `
             + 'Fold medium hands to their river bets.',
           `You win ${fmtPct(r.wsd)} of your showdowns (${r.wsdSample}) — you may be folding too much before `
@@ -11339,42 +11447,42 @@
 
       if (br.foldToBet != null && br.facedN >= BOARD_TEX_MIN) {
         if (br.foldToBet >= 65) {
-          add(85, 'Board',
+          add('bet', 85, 'Board',
             `Folds ${fmtPct(br.foldToBet)} of the time when bet into on a ${flag.label} board `
               + `(${br.facedN} spots) — bet it relentlessly, whatever you hold.`,
             `You fold ${fmtPct(br.foldToBet)} of the time when bet into on a ${flag.label} board `
               + `(${br.facedN} spots). Anyone paying attention can bet you off this texture `
               + 'with anything; call or raise more of them.',
-            `folds ${flag.label}`, `fold ${flag.label} too much`, tok,
+            `bet ${flag.label} boards`, `fold ${flag.label} too much`, tok,
             thresholdEdge(br.foldToBet, 65, 95));
         } else if (br.foldToBet <= 25) {
-          add(80, 'Board',
+          add('value', 80, 'Board',
             `Only folds ${fmtPct(br.foldToBet)} when bet into on a ${flag.label} board `
               + `(${br.facedN} spots) — a station here. Value bet thin, do not bluff.`,
             `You only fold ${fmtPct(br.foldToBet)} when bet into on a ${flag.label} board `
               + `(${br.facedN} spots) — you are calling too wide on this texture.`,
-            `calls ${flag.label}`, `too sticky on ${flag.label}`, tok,
+            `no bluffs on ${flag.label}`, `too sticky on ${flag.label}`, tok,
             thresholdEdge(25 - br.foldToBet, 0, 25));
         }
       }
 
       if (br.lead != null && br.leadN >= BOARD_TEX_MIN) {
         if (br.lead <= 20) {
-          add(70, 'Board',
+          add('bet', 70, 'Board',
             `Leads out only ${fmtPct(br.lead)} of the time on a ${flag.label} board `
               + `(${br.leadN} spots) — their check here means little, so take it away.`,
             `You lead only ${fmtPct(br.lead)} on a ${flag.label} board (${br.leadN} spots) — `
               + 'you are giving up the initiative on a texture you could be betting.',
-            `checks ${flag.label}`, `bet ${flag.label} more`, tok,
+            `stab ${flag.label} checks`, `bet ${flag.label} more`, tok,
             thresholdEdge(20 - br.lead, 0, 20));
         } else if (br.lead >= 60) {
-          add(70, 'Board',
+          add('theirs', 70, 'Board',
             `Leads out ${fmtPct(br.lead)} of the time on a ${flag.label} board `
               + `(${br.leadN} spots) — betting this texture is automatic for them, `
               + 'so their bet is far weaker than it looks.',
             `You lead ${fmtPct(br.lead)} on a ${flag.label} board (${br.leadN} spots) — `
               + 'so predictable that your bet here carries no information.',
-            `auto-bets ${flag.label}`, `too predictable on ${flag.label}`, tok,
+            `their ${flag.label} bet is weak`, `too predictable on ${flag.label}`, tok,
             thresholdEdge(br.lead, 60, 95));
         }
       }
@@ -11384,7 +11492,7 @@
     const szN = betSizeSample(p);
     if (r.medianBetPct != null && szN >= BET_SIZE_MIN) {
       if (r.medianBetPct > 85) {
-        add(45, 'Sizing',
+        add('theirs', 45, 'Sizing',
           `Typically bets ${r.medianBetPct.toFixed(0)}% of pot (median of ${szN} bets) — `
             + 'oversized. At this pool that usually means value, not a bluff.',
           `You typically bet ${r.medianBetPct.toFixed(0)}% of pot (median of ${szN} bets) — oversized. `
@@ -11393,7 +11501,7 @@
           'big bet = value', 'size down', ['facing'],
           thresholdEdge(r.medianBetPct, 85, 140));
       } else if (r.medianBetPct < 40) {
-        add(45, 'Sizing',
+        add('theirs', 45, 'Sizing',
           `Typically bets only ${r.medianBetPct.toFixed(0)}% of pot (median of ${szN} bets) — `
             + 'small sizing. Raise their weak bets; they are pricing you in.',
           `You typically bet only ${r.medianBetPct.toFixed(0)}% of pot (median of ${szN} bets) — undersized. `
@@ -11411,7 +11519,7 @@
         && r.betDrawPct != null && r.betMadePct != null
         && Math.abs(r.betMadePct - r.betDrawPct) >= 20) {
       if (r.betMadePct > r.betDrawPct) {
-        add(50, 'Sizing',
+        add('theirs', 50, 'Sizing',
           `Sizes up with a made hand (${r.betMadePct.toFixed(0)}% pot, ${r.betMadeSample} spots) vs a `
             + `draw (${r.betDrawPct.toFixed(0)}%, ${r.betDrawSample} spots) — their bet SIZE tells you which `
             + 'one you\'re facing. A bigger-than-usual bet from them is the goods; call their small ones down '
@@ -11422,7 +11530,7 @@
           'read their bet size', 'randomize your sizing', ['facing'],
           thresholdEdge(r.betMadePct - r.betDrawPct, 20, 60));
       } else {
-        add(50, 'Sizing',
+        add('theirs', 50, 'Sizing',
           `Sizes UP on a draw (${r.betDrawPct.toFixed(0)}% pot, ${r.betDrawSample} spots) vs down with a made `
             + `hand (${r.betMadePct.toFixed(0)}%, ${r.betMadeSample} spots) — backwards from the pool norm. `
             + 'A big bet from them is more likely a draw than the nuts; their small ones are where the value is.',
@@ -11444,7 +11552,7 @@
         && r.betBluffPct != null && r.betMadePct != null
         && Math.abs(r.betMadePct - r.betBluffPct) >= 20) {
       if (r.betMadePct > r.betBluffPct) {
-        add(55, 'Bluff',
+        add('theirs', 55, 'Bluff',
           `Bets smaller when caught bluffing (${r.betBluffPct.toFixed(0)}% pot, ${r.betBluffSample} spots) `
             + `than with a made hand (${r.betMadePct.toFixed(0)}%, ${r.betMadeSample} spots) — a small bet `
             + 'from them leans toward air. Call their small bets down lighter and give the big ones more respect.',
@@ -11454,7 +11562,7 @@
           'their small bet = air', 'match bluff/value sizing', ['facing'],
           thresholdEdge(r.betMadePct - r.betBluffPct, 20, 60));
       } else {
-        add(55, 'Bluff',
+        add('theirs', 55, 'Bluff',
           `Bets BIGGER when caught bluffing (${r.betBluffPct.toFixed(0)}% pot, ${r.betBluffSample} spots) `
             + `than with a made hand (${r.betMadePct.toFixed(0)}%, ${r.betMadeSample} spots) — backwards from `
             + 'the pool norm. Their overbet is more likely to be air than the nuts; their smaller bets are where the value is.',
@@ -11467,7 +11575,7 @@
     }
     if (r.bluffSample >= TEXTURE_MIN) {
       if (r.bluffRate >= 35) {
-        add(52, 'Bluff',
+        add('theirs', 52, 'Bluff',
           `Shows down with nothing ${fmtPct(r.bluffRate)} of the time after betting (${r.bluffSample} spots, `
             + 'floor only — a working bluff never reaches showdown, so the true rate is higher). '
             + 'Call down lighter against their bets; they are not always there.',
@@ -11485,7 +11593,7 @@
         // real showdown). This stat cannot tell those two apart, so it must
         // not claim to know their overall bluff frequency in either
         // direction — only what showing down with a bet actually means.
-        add(52, 'Bluff',
+        add('theirs', 52, 'Bluff',
           `Almost never shows down with nothing (${fmtPct(r.bluffRate)} of ${r.bluffSample} spots) — when `
             + 'their bet DOES reach showdown, it is essentially always real. Fold marginal hands to their '
             + 'bets rather than paying them off. This says nothing about how often they bluff overall — a '
@@ -11498,9 +11606,9 @@
       }
     }
 
-    if (r.trapSample >= TEXTURE_MIN) {
-      if (r.trapRate > 40) {
-        add(78, 'Trap',
+    if (r.trapSample >= TRAP_MIN) {
+      if (r.trapRate > TRAP_HIGH) {
+        add('theirs', 78, 'Trap',
           `Slowplays made hands — checks two pair+ instead of betting it ${fmtPct(r.trapRate)} of the time `
             + `(${r.trapSample} spots). Don't read their check as weakness; check back marginal hands rather `
             + 'than betting into a checked-through big hand, and expect a check-raise when you do bet.',
@@ -11508,17 +11616,17 @@
             + `(${r.trapSample} spots). It wins the occasional big pot but also lets a free card that could `
             + 'cost you the hand; make sure the trap line is actually the better line here, not just habit.',
           'their check ≠ weak', 'bet your big hands more', null,
-          thresholdEdge(r.trapRate, 40, 80));
-      } else if (r.trapRate < 10) {
-        add(58, 'Trap',
-          `Almost never slowplays — checks two pair+ only ${fmtPct(r.trapRate)} of the time `
-            + `(${r.trapSample} spots). A bet from them with a big hand is close to automatic, so treat a `
+          thresholdEdge(r.trapRate, TRAP_HIGH, 90));
+      } else if (r.trapRate < TRAP_LOW) {
+        add('bet', 58, 'Trap',
+          `Rarely slowplays — checks two pair+ only ${fmtPct(r.trapRate)} of the time `
+            + `(${r.trapSample} spots, pool 50%). A bet from them with a big hand is close to automatic, so treat a `
             + 'check as closer to genuine weakness and bet into it more freely.',
-          `You almost never slowplay (${fmtPct(r.trapRate)} of ${r.trapSample} made-hand spots) — your checks `
+          `You rarely slowplay (${fmtPct(r.trapRate)} of ${r.trapSample} made-hand spots, pool 50%) — your checks `
             + 'are read as weak because they always are. Mix in the occasional slowplay so a check doesn\'t '
             + 'give it away.',
           'their check = weak', 'mix in a slowplay', null,
-          thresholdEdge(10 - r.trapRate, 0, 10));
+          thresholdEdge(TRAP_LOW - r.trapRate, 0, 25));
       }
     }
 
@@ -11531,7 +11639,7 @@
     if (shownAll.length >= 3) {
       const total = shownAll.reduce((a, e) => a + e.n, 0);
       const top = shownAll.slice(0, 5).map((e) => e.cls).join(', ');
-      add(40, 'Range',
+      add('none', 40, 'Range',
         `Has shown down ${total} hand${total === 1 ? '' : 's'}: ${top}`
           + `${shownAll.length > 5 ? '…' : ''}. `
           + (shownRaised.length
@@ -11563,16 +11671,17 @@
     POSTFLOP_STREETS.forEach((st) => {
       const b = r.byStreet[st];
       if (!b || b.foldPct == null || b.faced < STREET_FOLD_MIN) return;
-      if (b.foldPct > STREET_FOLD_HIGH) {
-        add(84, 'Fold',
-          `Folds ${fmtPct(b.foldPct)} of the ${st} bets they face (${b.faced}) — `
-            + `they give up on the ${st} more than anyone should. Fire the ${st} whether or not you hit.`,
-          `You fold ${fmtPct(b.foldPct)} of the ${st} bets you face (${b.faced}) — you give up on `
+      const high = streetFoldHigh(st);
+      if (b.foldPct > high) {
+        add('bet', 84, 'Fold',
+          `Folds ${fmtPct(b.foldPct)} of the ${st} bets they face (${b.faced}, pool ${Math.round(STREET_POOL[st].fold)}%) — `
+            + `they give up on the ${st} far more than most. Fire the ${st} whether or not you hit.`,
+          `You fold ${fmtPct(b.foldPct)} of the ${st} bets you face (${b.faced}, pool ${Math.round(STREET_POOL[st].fold)}%) — you give up on `
             + `the ${st} more than you should. Bluff-catch or barrel through it more instead of folding on autopilot.`,
           `barrel the ${st}`, `stop over-folding the ${st}`, [st],
-          thresholdEdge(b.foldPct, STREET_FOLD_HIGH, 90));
+          thresholdEdge(b.foldPct, high, 90));
       } else if (b.foldPct < STREET_FOLD_LOW) {
-        add(74, 'Fold',
+        add('value', 74, 'Fold',
           `Rarely folds the ${st} — ${fmtPct(b.foldPct)} of ${b.faced} bets faced. `
             + `Even a half-pot bluff loses against that; bet for value and give up your air.`,
           `You rarely fold the ${st} — ${fmtPct(b.foldPct)} of ${b.faced} bets faced. Sharp `
@@ -11582,10 +11691,79 @@
       }
     });
 
+    // --- Calls the flop, folds the turn (v1.110.0) ---------------------------
+    // The approximation of foldToBarrel off per-street folds, for players with
+    // no barrel sample (the exact stat only exists from v1.82.0). Replaced by
+    // the exact read once it has its sample, same as the Turn rules above.
+    const fl = r.byStreet.flop;
+    const foldBarrelRead = r.foldToBarrel != null && r.foldToBarrelOpp >= FOLD_BARREL_MIN;
+    if (!foldBarrelRead && fl.foldPct != null && tn.foldPct != null
+        && fl.faced >= STREET_FOLD_MIN && tn.faced >= STREET_FOLD_MIN
+        && tn.foldPct - fl.foldPct >= FLOP_TURN_FOLD_GAP && tn.foldPct > STREET_POOL.turn.fold) {
+      add('bet', 86, 'Turn',
+        `Folds ${fmtPct(tn.foldPct)} of turn bets but only ${fmtPct(fl.foldPct)} on the flop `
+          + `(${tn.faced} and ${fl.faced} bets faced) — a flop call from them is not strength. `
+          + 'Bet the turn again when they call, and float their flop bets in position to take the turn.',
+        `You fold ${fmtPct(tn.foldPct)} of turn bets but only ${fmtPct(fl.foldPct)} on the flop `
+          + `(${tn.faced} and ${fl.faced} bets faced) — you call one street and give up on the next. `
+          + 'Fold more flops, or continue on more turns.',
+        'bet the turn, not the flop', 'call flops you keep', ['postflop'],
+        thresholdEdge(tn.foldPct - fl.foldPct, FLOP_TURN_FOLD_GAP, 40));
+    }
+
+    // --- Betting when nobody has (v1.110.0) ----------------------------------
+    // Turn and river only: on the flop the same spots are mostly c-bets, which
+    // the C-bettor rule already reads. Bars are the street's pool figure plus
+    // or minus one spread (turn 49 / 18, river 49 / 20).
+    ['turn', 'river'].forEach((st) => {
+      const b = r.byStreet[st];
+      if (!b || b.stab == null || b.unbet < STREET_FOLD_MIN) return;
+      const sp = STREET_POOL[st];
+      if (b.stab > sp.stab + sp.stabSd) {
+        add('theirs', 72, 'Stab',
+          `Bets ${fmtPct(b.stab)} of ${st}s when nobody has bet (${b.unbet} spots, pool ${Math.round(sp.stab)}%) — `
+            + `well past their value hands. Check medium hands to them and call their ${st} bet down lighter.`,
+          `You bet ${fmtPct(b.stab)} of ${st}s when nobody has bet (${b.unbet} spots, pool ${Math.round(sp.stab)}%) — `
+            + `observant players will check to you and call your ${st} bets down lighter.`,
+          `call their ${st} stab`, `stab the ${st} less`, [st, 'facing'],
+          thresholdEdge(b.stab, sp.stab + sp.stabSd, 85));
+      } else if (b.stab < sp.stab - sp.stabSd) {
+        add('theirs', 64, 'Stab',
+          `Rarely bets the ${st} when nobody has (${fmtPct(b.stab)} of ${b.unbet} spots, pool ${Math.round(sp.stab)}%) — `
+            + `a ${st} bet from them is a real hand. Fold weak hands to it, and bet when they check.`,
+          `You rarely bet the ${st} when nobody has (${fmtPct(b.stab)} of ${b.unbet} spots) — your ${st} bets `
+            + 'say you have it, and your checks give the pot away.',
+          `their ${st} bet = real`, `bet the ${st} more`, [st],
+          thresholdEdge(sp.stab - sp.stabSd - b.stab, 0, 15));
+      }
+    });
+
+    // --- Raising one street (v1.110.0) ---------------------------------------
+    // A street read under the whole-hand re-raise rule below. Skipped when
+    // that rule fires high, so the coach does not say the same thing twice.
+    const rrHigh = r.postflopRR != null && r.rrSample >= 8 && r.postflopRR > 18;
+    if (!rrHigh) {
+      POSTFLOP_STREETS.forEach((st) => {
+        const b = r.byStreet[st];
+        if (!b || b.rr == null || b.faced < STREET_FOLD_MIN) return;
+        const sp = STREET_POOL[st];
+        if (b.rr > sp.raise + sp.raiseSd) {
+          add('value', 77, 'Re-raise',
+            `Raises ${fmtPct(b.rr)} of the ${st} bets they face (${b.faced}, pool ${Math.round(sp.raise)}%) — `
+              + `they fight back on the ${st}. Bet it with hands happy to see a raise, and check back weak ones `
+              + 'rather than bluffing into them.',
+            `You raise ${fmtPct(b.rr)} of the ${st} bets you face (${b.faced}, pool ${Math.round(sp.raise)}%) — `
+              + `observant players will bet the ${st} into you only with hands that can stand it.`,
+            `they raise ${st} bets`, `raise the ${st} less`, [st],
+            thresholdEdge(b.rr, sp.raise + sp.raiseSd, 35));
+        }
+      });
+    }
+
     // --- Do they attack a bet? ----------------------------------------------
     if (r.postflopRR != null && r.rrSample >= 8) {
       if (r.postflopRR > 18) {
-        add(79, 'Re-raise',
+        add('value', 79, 'Re-raise',
           `Raises ${fmtPct(r.postflopRR)} of the bets they face (${r.rrSample} spots) — `
             + 'they attack bets rather than calling. Check your strong hands to induce it, and think twice '
             + 'about thin value bets that can only be raised off.',
@@ -11595,7 +11773,7 @@
           'they raise bets', 'raise less on autopilot', ['postflop'],
           thresholdEdge(r.postflopRR, 18, 45));
       } else if (r.postflopRR < 5) {
-        add(76, 'Re-raise',
+        add('theirs', 76, 'Re-raise',
           `Almost never raises a bet — ${fmtPct(r.postflopRR)} of ${r.rrSample} spots faced. `
             + 'So when they DO raise, it is the top of their range. Fold anything marginal to it, and '
             + 'bet thinner for value knowing you will rarely be blown off the hand.',
@@ -11612,7 +11790,7 @@
     // that turns a routine call into a fold, and it is dirt cheap to act on.
     // Never fires for hero — same shownHands gap as the range rule above.
     if (r.limpRaiseCount >= 2) {
-      add(106, 'Trap',
+      add('pre', 106, 'Trap',
         `Limp-3bets — limped then re-raised on ${r.limpRaiseCount} occasions. `
           + 'Almost nobody does that light. If they limp and then come back over the top, fold everything '
           + 'but the very top of your range, regardless of what their other numbers say.',
@@ -11628,9 +11806,27 @@
     // This one is narrower and far more useful: a 3-bet range is the read that
     // decides whether you can 4-bet or have to fold. Never fires for hero.
     const shown3 = shownRange(p, 'threebet');
-    if (shown3.length >= 2) {
+    const read3 = threeBetRangeRead(shown3);
+    const list3 = shown3.slice(0, 5).map((e) => e.cls).join(', ') + (shown3.length > 5 ? '…' : '');
+    if (read3 && read3.kind === 'light') {
+      add('pre', 74, 'Range',
+        `${read3.outside} of ${read3.n} hands shown after 3-betting are outside a standard 3-bet range `
+          + `(${read3.outsideList}) — their 3-bets are light. Don't fold good hands to them: call in `
+          + 'position with AJ, KQ, pairs and suited broadways, and 4-bet your best hands. A floor on their range.',
+        `${read3.outside} of ${read3.n} hands you showed after 3-betting are outside a standard 3-bet range `
+          + `(${read3.outsideList}) — observant players will stop folding to your 3-bets.`,
+        'their 3-bet is light', 'your 3-bets are light', ['preflop', 'facing'],
+        thresholdEdge(read3.outside / read3.n, 0.5, 1));
+    } else if (read3 && read3.kind === 'value') {
+      add('pre', 72, 'Range',
+        `Nearly every hand shown after 3-betting is a standard value hand (${list3}; ${read3.n} shown) — `
+          + 'their 3-bets are value. Fold all but strong hands to them.',
+        `Nearly every hand you showed after 3-betting is a standard value hand (${list3}) — `
+          + 'observant players will fold to your 3-bets without your best hands paying off.',
+        'their 3-bet = value', 'mix in a light 3-bet', ['preflop', 'facing']);
+    } else if (shown3.length >= 2) {
       const n3 = shown3.reduce((a, e) => a + e.n, 0);
-      add(62, 'Range',
+      add('pre', 62, 'Range',
         `Has shown ${n3} hand${n3 === 1 ? '' : 's'} after 3-betting: `
           + `${shown3.slice(0, 5).map((e) => e.cls).join(', ')}${shown3.length > 5 ? '…' : ''}. `
           + 'That is a floor on their 3-bet range, not all of it.',
@@ -11647,7 +11843,7 @@
     // or way up is exactly when YOUR OWN game tends to drift.
     const sw = stackSwingBB(p);
     if (sw && sw.downBB >= 50) {
-      add(88, 'Stuck',
+      add('state', 88, 'Stuck',
         `Down ${sw.downBB.toFixed(0)}bb from their high this sitting. `
           + 'Expect them to widen and to call lighter trying to get it back — '
           + 'value bet, and stop bluffing until they settle.',
@@ -11657,7 +11853,7 @@
         'stuck — value bet', 'stuck — tighten up', null,
         thresholdEdge(sw.downBB, 50, 200));
     } else if (sw && sw.upBB >= 100) {
-      add(35, 'Winning',
+      add('state', 35, 'Winning',
         `Up ${sw.upBB.toFixed(0)}bb this sitting. A big stack covers yours, `
           + 'so pots against them are for your whole stack — pick spots accordingly.',
         `You're up ${sw.upBB.toFixed(0)}bb this sitting. A big stack means your next pot could be for a lot `
@@ -11668,7 +11864,7 @@
 
     const tilt = tiltRead(p);
     if (tilt) {
-      add(110, 'Tilt',
+      add('state', 110, 'Tilt',
         `${tiltText(tilt)} Widen your value range against them right now and `
           + 'let them do the bluffing — this fades within an orbit or two.',
         `${tiltText(tilt)} This is the moment leaks actually happen — tighten back up rather than pressing, `
@@ -11829,11 +12025,16 @@
 
   function tipFatigueKey(xid, tag) { return xid + '|' + tag; }
 
-  function tipFatiguePenalty(xid, tag) {
+  // `spot`, when given, is the spot being ranked: a showing IN that spot does
+  // not count against itself. Without this the read shown on a spot's first
+  // render took a step of fatigue before its second render, and could swap
+  // out for a runner-up mid-decision whenever the two sat within one step.
+  function tipFatiguePenalty(xid, tag, spot) {
     const rec = tipFatigue.get(tipFatigueKey(xid, tag));
     if (!rec) return 0;
     if (Date.now() - rec.lastAt > TIP_FATIGUE_MS) return 0; // gone cold, reads fresh again
-    return Math.min(TIP_FATIGUE_MAX, TIP_FATIGUE_STEP * rec.spots);
+    const spots = spot != null && rec.lastSpot === spot ? rec.spots - 1 : rec.spots;
+    return Math.min(TIP_FATIGUE_MAX, TIP_FATIGUE_STEP * spots);
   }
 
   // One count per (hand, street), not per render — see above. Returns true when
@@ -11877,6 +12078,7 @@
     // on a fold, so the +1000 below used to keep pointing at a player who had
     // left the pot — see liveAggressor.
     const aggressor = liveAggressor(hand);
+    const spot = tipSpotKey(hand);
 
     const order = [];
     if (aggressor) order.push(aggressor);
@@ -11909,7 +12111,7 @@
         const score = entry.gain
           + (rel > 0 ? EXPLOIT_RELEVANT_BONUS : rel < 0 ? -EXPLOIT_IRRELEVANT_PENALTY : 0)
           + EXPLOIT_EDGE_SPAN * (edge - EXPLOIT_EDGE_NEUTRAL)
-          - tipFatiguePenalty(xid, entry.tag)
+          - tipFatiguePenalty(xid, entry.tag, spot)
           + (provisional ? -EXPLOIT_PROVISIONAL_PENALTY : 0)
           + (xid === aggressor ? 1000 : 0);
         scored.push({ xid, entry, score, relevant: rel > 0, provisional, hands: p.hands });
@@ -11917,7 +12119,6 @@
     }
 
     scored.sort((a, b) => b.score - a.score);
-    const spot = tipSpotKey(hand);
     const seen = new Set();
     const out = [];
     for (const cand of scored) {
@@ -11956,6 +12157,42 @@
     return `<div class="tph-plan-lead">Strongest adjustments first, each with the number it came from.</div>`
       + plan.map((e) => `<div class="tph-plan"><span class="tph-plan-tag">${escapeHtml(e.tag)}</span>`
         + `<span class="tph-plan-txt">${escapeHtml(e.text)}</span></div>`).join('');
+  }
+
+  // The player summary (v1.110.0): the exploit plan regrouped into a few
+  // lines, so the whole read fits on one screen. Asked for after a written
+  // analysis of real opponents was preferred to the HUD's list of separate
+  // reads: the list said every true thing, but not which line of play they
+  // add up to. Built from buildExploitPlan alone, so it cannot say anything
+  // the Exploit tab does not — it only orders and groups it.
+  const PLAN_LINES = [
+    { key: 'state', label: 'Right now' },
+    { key: 'pre', label: 'Before the flop' },
+    { key: 'bet', label: 'Bet into them' },
+    { key: 'value', label: 'Value, not bluffs' },
+    { key: 'theirs', label: 'Reading them' },
+  ];
+  const PLAN_ITEMS_PER_LINE = 3;
+
+  function buildPlayerSummary(xid) {
+    const p = STORE.players[xid];
+    if (!p || isHeroRecord(xid)) return null;
+    const plan = buildExploitPlan(p);
+    const lines = [];
+    PLAN_LINES.forEach((ln) => {
+      const items = plan.filter((e) => e.plan === ln.key)
+        .sort((a, b) => (b.gain - a.gain)
+          || ((b.edge == null ? EXPLOIT_EDGE_NEUTRAL : b.edge) - (a.edge == null ? EXPLOIT_EDGE_NEUTRAL : a.edge)))
+        .slice(0, PLAN_ITEMS_PER_LINE)
+        .map((e) => e.short);
+      if (items.length) lines.push({ label: ln.label, items });
+    });
+    const r = computeRates(p);
+    const head = `${classify(p)}`
+      + (r.vpip != null && r.pfr != null ? `, plays ${fmtPct(r.vpip)} / raises ${fmtPct(r.pfr)}` : '')
+      + ` · ${p.hands} hands`
+      + (p.plBBEst ? ` · you ${fmtBB(p.plBBEst)} (estimate)` : '');
+    return { head, lines, thin: p.hands < STORE.settings.minHands };
   }
 
   // The report as structured SECTIONS, rendered two ways: plain text for the
@@ -11998,21 +12235,42 @@
       });
     }
 
-    const pre = sec('Preflop');
-    if (r.vpip != null) {
-      add(pre, `Plays ${r.vpip > 30 ? 'very wide' : r.vpip > 20 ? 'moderately wide' : 'tight'} `
-        + `preflop (VPIP ${fmtPct(r.vpip)}, pool ${PA.vpip.toFixed(0)}%).`);
+    const summary = buildPlayerSummary(xid);
+    if (summary && summary.lines.length) {
+      const sm = sec('Summary');
+      add(sm, summary.head);
+      summary.lines.forEach((ln) => add(sm, `${ln.label}: ${ln.items.join(' · ')}`));
+      sm.items.push({ text: 'Each item is one read from the Exploit tab, strongest first.', act: null, note: true });
     }
+
+    const pre = sec('Preflop');
+    // Against this player's own pool anchor (v1.110.0). It used fixed 20/30
+    // bars, which at these tables called nearly everyone "very wide" — while
+    // printing a pool figure above their VPIP in the same sentence.
+    if (r.vpip != null) {
+      const d = r.vpip - PA.vpip;
+      const width = d > POOL_SPREAD.vpip ? 'much looser than'
+        : d > POOL_SPREAD.vpip / 2 ? 'looser than'
+          : d < -POOL_SPREAD.vpip ? 'much tighter than'
+            : d < -POOL_SPREAD.vpip / 2 ? 'tighter than' : 'about as many hands as';
+      add(pre, `Plays ${width} the pool (VPIP ${fmtPct(r.vpip)}, pool ${PA.vpip.toFixed(0)}%).`);
+    }
+    // Raises as a share of the hands they play, against the pool's own share
+    // — a fixed 0.6 bar called a 37/18 player "often just calls" at a table
+    // where the pool raises a quarter of what it plays.
     if (r.pfr != null && r.vpip) {
       const ratio = r.pfr / r.vpip;
-      add(pre, ratio > 0.6
-        ? `Mostly raises rather than limps or calls (PFR ${fmtPct(r.pfr)}).`
-        : `Often just calls preflop rather than raising (PFR ${fmtPct(r.pfr)}).`);
+      const poolRatio = PA.pfr / PA.vpip;
+      add(pre, ratio > poolRatio * 1.5
+        ? `Raises more of the hands they play than most (PFR ${fmtPct(r.pfr)} of ${fmtPct(r.vpip)}).`
+        : ratio < poolRatio * 0.6
+          ? `Mostly calls rather than raises (PFR ${fmtPct(r.pfr)} of ${fmtPct(r.vpip)}).`
+          : `Raises about as often as the pool (PFR ${fmtPct(r.pfr)} of ${fmtPct(r.vpip)}).`);
     }
     if (r.limpShareOfVpip != null && p.limpMade > 0) {
       const share = r.limpShareOfVpip;
       add(pre, `Limps ${fmtPct(r.limp)} of hands — ${fmtPct(share)} of the pots they enter `
-        + `(pool ${PA.limpShareOfVpip}%).`,
+        + `(pool ${Math.round(PA.limpShareOfVpip)}%).`,
       share > PA.limpShareOfVpip + 12
         ? 'Habitual limper: isolate wide in position, and expect a capped range when they only call.'
         : share < PA.limpShareOfVpip - 15
@@ -12026,7 +12284,7 @@
           : null);
     }
     if (r.foldTo3Bet != null) {
-      add(pre, `Folds to 3-bets ${fmtPct(r.foldTo3Bet)} (${p.foldTo3BetOpp} samples, pool ${PA.foldTo3Bet}%).`,
+      add(pre, `Folds to 3-bets ${fmtPct(r.foldTo3Bet)} (${p.foldTo3BetOpp} samples, pool ${Math.round(PA.foldTo3Bet)}%).`,
         r.foldTo3Bet > 65 ? '3-bet them light — their opens are close to free money.'
           : r.foldTo3Bet < 40 ? '3-bet for value only; they will not give up their opens.' : null);
     }
@@ -12046,7 +12304,7 @@
             : r.foldToBarrel <= 25 ? 'They do not fold the turn — value only.' : null);
     }
     if (r.foldToCbet != null) {
-      add(post, `Folds to c-bets ${fmtPct(r.foldToCbet)} (${p.foldToCbetOpp} samples, pool ${POOL_AVG.foldToCbet}%).`,
+      add(post, `Folds to c-bets ${fmtPct(r.foldToCbet)} (${p.foldToCbetOpp} samples, pool ${Math.round(POOL_AVG.foldToCbet)}%).`,
         r.foldToCbet > 60 ? 'C-betting into them prints — fire the flop with anything.'
           : r.foldToCbet < 40 ? 'They do not fold flops. C-bet for value, never as a bluff.' : null);
     }
@@ -12067,8 +12325,8 @@
     POSTFLOP_STREETS.forEach((st) => {
       const b = r.byStreet[st];
       if (!b || b.foldPct == null || b.faced < STREET_FOLD_MIN) return;
-      if (b.foldPct > STREET_FOLD_HIGH) {
-        add(post, `Folds ${fmtPct(b.foldPct)} of the ${st} bets they face (${b.faced}).`,
+      if (b.foldPct > streetFoldHigh(st)) {
+        add(post, `Folds ${fmtPct(b.foldPct)} of the ${st} bets they face (${b.faced}, pool ${Math.round(STREET_POOL[st].fold)}%).`,
           `Barrel the ${st} — they give it up more than anyone should.`);
       } else if (b.foldPct < STREET_FOLD_LOW) {
         add(post, `Folds only ${fmtPct(b.foldPct)} of the ${st} bets they face (${b.faced}).`,
@@ -12094,12 +12352,14 @@
           : r.wsd <= 40 ? 'Calls down with worse — value-bet thinner.'
             : r.wsd >= 65 ? 'Arrives with it — fold medium hands to river bets.' : null);
     }
-    if (r.wtsd != null) {
-      add(show, `Goes to showdown ${fmtPct(r.wtsd)} of hands played.`,
-        r.wtsd > 40 ? 'A station — three-street value, and never try to bluff them off a made hand.'
-          : r.wtsd < 18 ? 'Gives up a lot — barrel more; they fold before the river.' : null);
+    if (r.wtsdPlayed != null && r.wtsdPlayedSample >= WTSD_PLAYED_MIN) {
+      add(show, `Goes to showdown in ${fmtPct(r.wtsdPlayed)} of the hands they play (pool ${WTSD_PLAYED_POOL}%).`,
+        r.wtsdPlayed > WTSD_PLAYED_HIGH ? 'A station — three-street value, and never try to bluff them off a made hand.'
+          : r.wtsdPlayed < WTSD_PLAYED_LOW ? 'Gives up a lot — barrel more; they fold before the river.' : null);
     }
-    if ((r.betDrawCount + r.betMadeCount) >= TEXTURE_MIN) {
+    // Both medians, or no line: a record migrated in v1.29.0 keeps its counts
+    // with empty size windows, which printed "sizes — of pot".
+    if ((r.betDrawCount + r.betMadeCount) >= TEXTURE_MIN && r.betDrawPct != null && r.betMadePct != null) {
       add(show, `When shown down, sizes ${fmtPct(r.betDrawPct)} of pot betting a draw `
         + `(${r.betDrawCount}) vs ${fmtPct(r.betMadePct)} already made (${r.betMadeCount}).`,
         r.betDrawPct != null && r.betMadePct != null && Math.abs(r.betMadePct - r.betDrawPct) >= 20
@@ -12121,15 +12381,22 @@
     }
     if (r.trapSample >= TEXTURE_MIN) {
       add(show, `Slowplays a made hand (checks two pair+ instead of betting it) `
-        + `${fmtPct(r.trapRate)} of the time (${r.trapSample} spots).`,
-        r.trapRate > 40 ? "Don't read their check as weakness — they trap. Check back marginal hands instead of betting into it."
-          : r.trapRate < 10 ? 'Rarely slowplays — a bet from them with a big hand is close to automatic, so a check-through is closer to real weakness.' : null);
+        + `${fmtPct(r.trapRate)} of the time (${r.trapSample} spots, pool 50%).`,
+        r.trapSample < TRAP_MIN ? null
+        : r.trapRate > TRAP_HIGH ? "Don't read their check as weakness — they trap. Check back marginal hands instead of betting into it."
+          : r.trapRate < TRAP_LOW ? 'Rarely slowplays — a bet from them with a big hand is close to automatic, so a check-through is closer to real weakness.' : null);
     }
     const shown3 = shownRange(p, 'threebet');
     if (shown3.length) {
       const n3 = shown3.reduce((a, e) => a + e.n, 0);
       add(show, `Shown after 3-betting (${n3}): ${shown3.slice(0, 6).map((e) => e.cls).join(', ')}`
-        + `${shown3.length > 6 ? '…' : ''}. A floor on that range, not all of it.`);
+        + `${shown3.length > 6 ? '…' : ''}. A floor on that range, not all of it.`,
+        (() => {
+          const rd = threeBetRangeRead(shown3);
+          return !rd ? null : rd.kind === 'light'
+            ? "Light — most of it is outside a standard 3-bet range. Don't over-fold to them."
+            : 'Value — fold all but strong hands to their 3-bet.';
+        })());
     }
 
     const you = sec('Your results');
@@ -12768,6 +13035,12 @@
     /* Between hands. Says the panel is alive rather than leaving a blank box —
        the panel now stays mounted so it can be parked open all session. */
     .tph-coach-idle { color: #8d959c !important; font-style: italic; }
+    /* The expandable player summary under the advice. */
+    .tph-coach-plan { margin-top: 6px; padding-top: 5px; border-top: 1px solid #3d3d48;
+      color: #c9d1d9 !important; font-size: 11px; }
+    .tph-coach-plan-toggle { color: #8ec5f0 !important; cursor: pointer; font-weight: 700; }
+    .tph-coach-plan-l { color: #c9d1d9 !important; margin-top: 2px; }
+    .tph-coach-plan-k { color: #ffc94d !important; }
     /* The table-softness line, below the advice. Quiet grey; the verdict word
        carries the colour, and it is not red/green for the same reason the
        deviation shading is not: a tough table is not "bad", only harder. */
@@ -14113,6 +14386,23 @@
     renderCoachPanel();
   }
 
+  // "▸ Plan vs <name>", tap to open: the player summary for whoever the lead
+  // read is about. Closed by default — the panel is read mid-decision, and the
+  // summary is there for when you want it. Open/closed is remembered.
+  function coachPlanHtml(xid) {
+    const sum = xid ? buildPlayerSummary(xid) : null;
+    if (!sum || !sum.lines.length) return '';
+    const open = !!STORE.settings.coachPlanOpen;
+    return '<div class="tph-coach-plan">'
+      + `<span class="tph-coach-plan-toggle">${open ? '▾' : '▸'} Plan vs ${escapeHtml(playerDisplayName(xid))}</span>`
+      + (open
+        ? `<div class="tph-coach-plan-l">${escapeHtml(sum.head)}</div>`
+          + sum.lines.map((ln) => `<div class="tph-coach-plan-l"><span class="tph-coach-plan-k">`
+            + `${escapeHtml(ln.label)}:</span> ${escapeHtml(ln.items.join(' · '))}</div>`).join('')
+        : '')
+      + '</div>';
+  }
+
   function renderCoachPanel() {
     let el = document.querySelector('.tph-coach');
     let pill = document.querySelector('.tph-coach-pill');
@@ -14206,6 +14496,13 @@
 
       const head = el.querySelector('.tph-coach-head');
       const hide = el.querySelector('.tph-coach-hide');
+      // Delegated: the body is rewritten every render, the panel is not.
+      el.querySelector('.tph-coach-body').addEventListener('click', (e) => {
+        if (!e.target || !e.target.closest || !e.target.closest('.tph-coach-plan-toggle')) return;
+        STORE.settings.coachPlanOpen = !STORE.settings.coachPlanOpen;
+        saveStore();
+        renderCoachPanel();
+      });
       hide.addEventListener('click', (e) => { e.stopPropagation(); setCoachHidden(true); });
       // Drag the whole panel by its header; no tap action, so a stray tap on the
       // bar does nothing rather than firing something unexpected.
@@ -14227,7 +14524,7 @@
     const coachBody = el.querySelector('.tph-coach-body');
     coachBody.innerHTML = (idle
       ? '<div class="tph-coach-idle">No read for this decision.</div>'
-      : advice.map((line) => `<div>${line}</div>`).join(''))
+      : advice.map((line) => `<div>${line}</div>`).join('') + coachPlanHtml(coachPlanXid))
       + tableSoftnessHtml(Array.from(seatedXids()).filter((x) => !isHeroRecord(x)));
     pinTextColor(coachBody);
   }
@@ -17403,7 +17700,19 @@
       NOTABLE_PREFLOP_RAISE_BB,
       HISTORY_PINNED_CEILING,
       repairHeroShowdowns,
-      STREET_FOLD_HIGH,
+      streetFoldHigh,
+      STREET_POOL,
+      buildPlayerSummary,
+      buildReportHtml,
+      coachPlanHtml,
+      get coachPlanXid() { return coachPlanXid; },
+      threeBetRangeRead,
+      PLAN_LINES,
+      WTSD_PLAYED_HIGH,
+      WTSD_PLAYED_LOW,
+      TRAP_HIGH,
+      TRAP_LOW,
+      PASSIVE_GAP_HIGH,
       STREET_FOLD_LOW,
       STREET_FOLD_MIN,
       reachedShowdown,
