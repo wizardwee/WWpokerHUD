@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.113.0
+// @version      1.114.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,12 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.114.0 - Showdowns recorded twice before v1.113.0 are taken back out.
+ *            - Once, on load: each reveal that repeats the same player's
+ *              cards from the hand before is removed from History, and the
+ *              range, showdown rate, win-at-showdown and bet-texture counts
+ *              it added are given back. 111 reveals in 65 hands on the
+ *              reported backup. The deep scan reports what it removed.
  * 1.113.0 - A showdown is no longer recorded twice.
  *            - The cards stay face up for a moment after the next hand
  *              starts, and were recorded as that hand's showdown too: a
@@ -26,10 +32,6 @@
  *            - Those cards are now ignored until that seat's cards change.
  * 1.112.0 - Pool figures in the coach's reads are rounded.
  *            - A read could say "vs a 48.21206434316353% pool".
- * 1.111.0 - Gist sync goes through Torn PDA, so the backup can update.
- *            - The update was sent from the page, which refuses it ("Failed
- *              to fetch"). It now uses Torn PDA's own PATCH call.
- *            - The backup is uploaded without indentation: half the size.
  */
 
 /*
@@ -71,7 +73,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.113.0';
+  const HUD_VERSION = '1.114.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -8166,33 +8168,29 @@
   // same point (settlement, after hand.winners and hand.board are both final)
   // and for the same reason: a hand that never reaches settlement should not
   // pollute this any more than it pollutes the range.
-  function noteBetTexture(xid, holeCards, hand) {
-    if (!holeCards || holeCards.length !== 2) return;
+  // What noteBetTexture banks for one player's cards in one hand, as
+  // [{k, size}] with k one of made / draw / bluff / checkMade. Split out
+  // (v1.113.0) so the stale-showdown repair takes back EXACTLY what was
+  // banked, by the same classification, rather than a second copy of it.
+  function betTextureEvents(xid, holeCards, hand) {
+    const out = [];
     const board = (hand && hand.board) || [];
     const boardAt = { flop: board.slice(0, 3), turn: board.slice(0, 4), river: board.slice(0, 5) };
     const need = { flop: 3, turn: 4, river: 5 };
-    const p = getPlayer(xid);
-    if (!p.texture || typeof p.texture !== 'object') {
-      p.texture = {
-        drawBets: 0, drawSizes: [], madeBets: 0, madeSizes: [], bluffBets: 0, bluffSizes: [], checkMade: 0,
-      };
-    }
-    (hand.actions || []).forEach((a) => {
+    ((hand && hand.actions) || []).forEach((a) => {
       if (a.x !== xid) return;
       const bc = boardAt[a.s];
       if (!bc || bc.length < need[a.s]) return; // preflop, or a street the log never reached
       const cat = categoryAt(holeCards, bc);
       if (a.a === 'bet' || a.a === 'raise' || a.a === 'all-in') {
         if (cat >= 2) {
-          p.texture.madeBets += 1;
-          pushTextureSize(p.texture.madeSizes, a.p);
+          out.push({ k: 'made', size: a.p });
         } else if (TEXTURE_DRAW_STREETS.indexOf(a.s) >= 0 && hasDrawAt(holeCards, bc)) {
           // A draw has real equity — a semi-bluff, not the thing this stat
           // calls a bluff. Checked before the bluff branch below for exactly
           // that reason: a flush draw with nothing else must land here, not
           // get counted as air.
-          p.texture.drawBets += 1;
-          pushTextureSize(p.texture.drawSizes, a.p);
+          out.push({ k: 'draw', size: a.p });
         } else if (cat === 0) {
           // Genuinely nothing: worse than two pair, and no draw either (or
           // the river, where there is no draw left to have). This is the
@@ -8203,13 +8201,125 @@
           // a bluff either. Left unscored, same as the WTSD anchor: an honest
           // gap is better than forcing a middling hand into a bucket it
           // doesn't belong in.
-          p.texture.bluffBets += 1;
-          pushTextureSize(p.texture.bluffSizes, a.p);
+          out.push({ k: 'bluff', size: a.p });
         }
       } else if (a.a === 'check' && cat >= 2) {
-        p.texture.checkMade += 1;
+        out.push({ k: 'checkMade' });
       }
     });
+    return out;
+  }
+
+  function noteBetTexture(xid, holeCards, hand) {
+    if (!holeCards || holeCards.length !== 2) return;
+    const p = getPlayer(xid);
+    if (!p.texture || typeof p.texture !== 'object') {
+      p.texture = {
+        drawBets: 0, drawSizes: [], madeBets: 0, madeSizes: [], bluffBets: 0, bluffSizes: [], checkMade: 0,
+      };
+    }
+    betTextureEvents(xid, holeCards, hand).forEach((e) => {
+      if (e.k === 'checkMade') { p.texture.checkMade += 1; return; }
+      p.texture[e.k + 'Bets'] += 1;
+      pushTextureSize(p.texture[e.k + 'Sizes'], e.size);
+    });
+  }
+
+  // Once, from init (v1.113.0) - same flag discipline as the repairs above.
+  // Until v1.113.0 the seat poll read the previous hand's showdown, still face
+  // up as the next hand opened, into that next hand (see lingeringFaceUp). In
+  // the reported backup: 111 such reveals in 65 of 2,301 stored hands, 6.6%
+  // of all reveals, most by players who had folded that hand.
+  //
+  // A stale reveal is one the SEAT poll caught that repeats, card for card,
+  // the same player's reveal in the hand stored before it. A genuine repeat
+  // of the same two cards is ~1 in 1326 per pair, and a log-caught reveal is
+  // left alone (that path never had this fault). Hero is never seat-read.
+  //
+  // Each one is taken out of History and every counter it reached is given
+  // back by the same rules that banked it (noteShowdown, the seat poll's
+  // WTSD, betTextureEvents). Counters never go below zero, and a window entry
+  // that has since aged out is simply not there to remove. Reveals in hands
+  // no longer stored cannot be found, and stay counted.
+  //
+  // The repaired hand is a NEW object, not edited in place: handShardMemo
+  // keys the saved copy on the hand object, and an in-place edit would leave
+  // the old reveal on disk.
+  function repairStaleShowdowns() {
+    if (STORE.staleSdRepaired) return null;
+    const heroX = STORE.hero && STORE.hero.xid;
+    const stored = STORE.hands || [];
+    const order = stored.map((h, i) => i).filter((i) => stored[i])
+      // Oldest first; STORE.hands is newest first, so a same-millisecond
+      // tie goes to the higher index.
+      .sort((a, b) => ((stored[a].t || 0) - (stored[b].t || 0)) || (b - a));
+    const res = { hands: 0, reveals: 0, at: Date.now() };
+    order.forEach((idx, n) => {
+      const h = stored[idx];
+      const prev = n > 0 ? stored[order[n - 1]] : null;
+      if (!prev || !prev.shown || !h.shown || typeof h.shown !== 'object') return;
+      const via = h.shownVia || {};
+      const drop = Object.keys(h.shown).filter((xid) => {
+        if (xid === heroX || via[xid] !== 'seat' || !prev.shown[xid]) return false;
+        const a = parseCardsFromText(h.shown[xid]).slice(0, 2);
+        const b = parseCardsFromText(prev.shown[xid]).slice(0, 2);
+        return a.length === 2 && b.length === 2 && faceUpKey(a) === faceUpKey(b);
+      });
+      if (!drop.length) return;
+      const shown = { ...h.shown };
+      const shownVia = { ...via };
+      drop.forEach((xid) => {
+        unnoteStaleShowdown(xid, parseCardsFromText(h.shown[xid]).slice(0, 2), h);
+        delete shown[xid];
+        delete shownVia[xid];
+      });
+      stored[idx] = { ...h, shown, shownVia };
+      res.hands += 1;
+      res.reveals += drop.length;
+    });
+    STORE.staleSdRepaired = res;
+    if (res.hands) dirtyHands = true;
+    saveStore();
+    return res;
+  }
+
+  // Take back one seat-caught showdown, exactly as it was banked.
+  function unnoteStaleShowdown(xid, cards, hand) {
+    const p = STORE.players[xid];
+    const cls = handClassFromCards(cards);
+    if (!p || !cls) return;
+    const dec = (o, k) => { if (o && o[k] > 0) o[k] -= 1; };
+    const { tier, limpRaised } = preflopTiersFromActions(hand.actions);
+    const t = tier[xid] || 0;
+    const lr = limpRaised.has(xid);
+    const e = p.shownHands && p.shownHands[cls];
+    if (e) {
+      dec(e, 'seen');
+      if (t >= 1) dec(e, 'raised');
+      if ((hand.winners || []).some((w) => w && w.xid === xid)) dec(e, 'won');
+      if (t === 2) dec(e, 'r3');
+      else if (t >= 3) dec(e, 'r4');
+      if (lr) dec(e, 'lr');
+      // Optional fields are absent until first used; leave them that way.
+      ['r3', 'r4', 'lr'].forEach((k) => { if (e[k] === 0) delete e[k]; });
+      if (!(e.seen > 0)) delete p.shownHands[cls];
+    }
+    if (Array.isArray(p.sdRecent)) {
+      const at = p.sdRecent.lastIndexOf(String(Math.min(3, t)) + (lr ? 'L' : '') + cls);
+      if (at >= 0) p.sdRecent.splice(at, 1);
+    }
+    dec(p, 'wtsd');
+    const tx = p.texture;
+    if (tx && typeof tx === 'object') {
+      betTextureEvents(xid, cards, hand).forEach((ev) => {
+        if (ev.k === 'checkMade') { dec(tx, 'checkMade'); return; }
+        dec(tx, ev.k + 'Bets');
+        const sizes = tx[ev.k + 'Sizes'];
+        const at = Array.isArray(sizes) ? sizes.lastIndexOf(ev.size) : -1;
+        if (at >= 0) sizes.splice(at, 1);
+      });
+    }
+    markPlayerDirty(xid);
   }
 
   // Everything a player has shown down, newest counts first. Optionally split
@@ -16861,6 +16971,12 @@
     L.push('showdown ranges: ' + withShowdowns + ' player(s) with at least one shown hand'
       + '   recent windows (last ' + SD_RECENT_MAX + '): ' + withRecent
       + ', seeded from history: ' + (STORE.sdRecentBackfilled ? 'yes' : 'no'));
+    // v1.113.0's one-off repair changes how much showdown data there is, so
+    // it is in the scan, not only in a changelog.
+    const ssr = STORE.staleSdRepaired;
+    L.push('repeated-showdown repair: ' + (ssr && typeof ssr === 'object'
+      ? `${ssr.reveals} reveal(s) removed from ${ssr.hands} stored hand(s), ${shortAgo(ssr.at)}`
+      : 'not run'));
     // A reveal that parses but carries no cards is invisible: it never reaches
     // the unmatched list, and the Range tab just stays empty. Print the raw
     // reveal rows so the wording and the card shape can both be checked.
@@ -17752,6 +17868,8 @@
       NOTABLE_PREFLOP_RAISE_BB,
       HISTORY_PINNED_CEILING,
       repairHeroShowdowns,
+      repairStaleShowdowns,
+      betTextureEvents,
       streetFoldHigh,
       STREET_POOL,
       buildPlayerSummary,
@@ -17916,6 +18034,9 @@
     // After the seeding above, which would otherwise refill hero's window
     // from the same biased reveals.
     repairHeroShowdowns();
+    // Before anything can push the store: the gist copy should carry the
+    // cleaned History.
+    repairStaleShowdowns();
     // Discards affiliation timestamps written while the transport was broken,
     // so the badges do not stay dead for up to 24h after the fix. Once only.
     repairAffiliationCache();

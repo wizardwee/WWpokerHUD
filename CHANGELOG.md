@@ -9,6 +9,42 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.114.0
+Showdowns recorded twice before v1.113.0 are taken back out.
+
+- v1.113.0 stopped the seat poll reading the previous hand's showdown into
+  the next hand; this repairs what it had already recorded. Measured on the
+  user's backup (2,301 hands, 24 Sep to 28 Oct): 112 of 1,696 stored reveals
+  (6.6%) repeated, card for card, the same player's reveal in the hand
+  before - 69 by a player who had folded that hand, 22 credited to a player
+  who won it uncontested, 17 by a player with no action in it.
+- `repairStaleShowdowns()` runs once from `init()` (flag
+  `STORE.staleSdRepaired`, which also holds the counts). A reveal is removed
+  when the SEAT poll caught it and it matches the same player's reveal in the
+  hand stored before it; log-caught reveals and hero are left alone (one
+  log-caught repeat in the backup is a different fault: one hand apparently
+  stored twice, 6ms apart).
+- Every counter the reveal reached is given back by the rules that banked
+  it: `shownHands` (seen / raised / won / 3-bet / 4-bet / limp-raise, tier
+  re-read from the stored actions), the recent-showdowns window, WTSD, and
+  bet texture. `noteBetTexture`'s classification moved into
+  `betTextureEvents` so the undo uses the same code rather than a copy.
+  Nothing goes below zero; a window entry that has aged out is not there
+  to remove.
+- On the backup: 111 reveals out of 65 hands, showdowns 27,696 -> 27,585,
+  won at showdown 12,329 -> 12,307, 19 bet-texture entries, 107
+  recent-window entries, 11ms, no negative counter, second run a no-op.
+- Repeats in hands no longer stored cannot be found and stay counted
+  (lifetime showdowns run to 27,696 against 1,696 stored reveals). Where a
+  stale reveal blocked that player's real reveal in the same hand, the real
+  one was never recorded and cannot be recovered.
+- A repaired hand is stored as a new object: `handShardMemo` keys the saved
+  copy on the hand object, so an in-place edit would never be rewritten.
+- `test/stale-showdown-repair.test.js` builds the buggy state through the
+  real log parser and seat poll and requires the repaired records to equal a
+  run in which the repeat never happened. Each undo step was checked by
+  mutation.
+
 ## 1.113.0
 A showdown is no longer recorded twice.
 
