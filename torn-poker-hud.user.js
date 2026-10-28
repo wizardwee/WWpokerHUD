@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.112.0
+// @version      1.113.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,22 +18,18 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.113.0 - A showdown is no longer recorded twice.
+ *            - The cards stay face up for a moment after the next hand
+ *              starts, and were recorded as that hand's showdown too: a
+ *              hand everyone folded showed the AA and A5s from the hand
+ *              before, with the range and WTSD counted again.
+ *            - Those cards are now ignored until that seat's cards change.
  * 1.112.0 - Pool figures in the coach's reads are rounded.
  *            - A read could say "vs a 48.21206434316353% pool".
  * 1.111.0 - Gist sync goes through Torn PDA, so the backup can update.
  *            - The update was sent from the page, which refuses it ("Failed
  *              to fetch"). It now uses Torn PDA's own PATCH call.
  *            - The backup is uploaded without indentation: half the size.
- * 1.110.0 - A plan for each player, and sharper reads behind it.
- *            - New Summary at the top of a player's Report, and a "Plan vs
- *              <player>" line under the coach's advice: tap to open.
- *            - New reads: calls flops but folds turns, bets a lot (or little)
- *              when the turn or river is checked, raises one street, and
- *              whether their 3-bets are light or value.
- *            - Fixed reads that fired for most players: "barrel more",
- *              "turn bets are real", "believe their raises", slowplaying.
- *            - Report wording fixed (VPIP and PFR now compared with the
- *              pool, rounded pool figures, no empty sizing line).
  */
 
 /*
@@ -75,7 +71,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.112.0';
+  const HUD_VERSION = '1.113.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -4652,6 +4648,18 @@
     return hand.playersIn.size > 1;
   }
 
+  // xid -> the face-up pair that seat showed when the LAST hand settled
+  // (v1.113.0). A hand settles on the NEXT hand's "Game <hex> started" line,
+  // and Torn leaves the showdown's cards face up for a moment after that — so
+  // the poll was reading the previous showdown into the new hand. Reported
+  // from History: a hand where AA and A5s both folded preflop "showed" the
+  // same AA and A5s as the hand before it, with WTSD and the range credited a
+  // second time and the reveal scored against the new hand's winner. Those
+  // exact cards at that seat are skipped until the seat shows something else
+  // (a new deal is face down), so a real reveal later is never blocked.
+  const lingeringFaceUp = {};
+  const faceUpKey = (cards) => cards.map((c) => c.rank + c.suit).sort().join('');
+
   // `force` is for the settlement re-read, which gets exactly one look at the
   // table and must never land on a skipped tick.
   function harvestShownCards(force) {
@@ -4674,7 +4682,8 @@
       if (!xid || isHeroRecord(xid)) return;      // your own cards are always up
       if (currentHand.shownCards[xid]) return;    // already have this one
       const cards = readSeatFaceUpCards(seat);
-      if (cards.length !== 2) return;
+      if (cards.length !== 2) { delete lingeringFaceUp[xid]; return; }
+      if (lingeringFaceUp[xid] === faceUpKey(cards)) return;   // last hand's showdown
       currentHand.shownCards[xid] = cards;
       // Mirror into `shown` so the History tab shows it too — that path only
       // ever had log text, which is why History was blank as well.
@@ -5784,6 +5793,17 @@
     // applies ("nothing happened"), plus a harvested reveal, which is a real
     // observation of the hand even when its log lines were missed.
     if (currentHand && handWasObserved(currentHand)) applyHandResults(currentHand);
+    // Whatever this hand showed is still face up as the next one opens. Added
+    // to, never reset: an entry already here is still on the table (only a
+    // seat showing something else clears it), and a hand that settles before
+    // the deal turns it over must not hand it to the hand after. Memory only,
+    // one short string per seat that has shown.
+    if (currentHand) {
+      Object.keys(currentHand.shownCards || {}).forEach((xid) => {
+        const c = currentHand.shownCards[xid];
+        if (Array.isArray(c) && c.length === 2) lingeringFaceUp[xid] = faceUpKey(c);
+      });
+    }
     currentHand = freshHandState();
   }
 
@@ -17769,6 +17789,7 @@
       // Exposed as accessors because STORE and heroXid are rebound, not
       // mutated — a plain reference would freeze at whatever loaded first.
       applyHandResults,
+      applyHandResultsAndReset,
       freshHandState,
       handleLogLine,
       getPlayer,

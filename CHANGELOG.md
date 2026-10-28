@@ -9,6 +9,26 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.113.0
+A showdown is no longer recorded twice.
+
+- Reported from History: a hand where everyone folded to a preflop raise
+  (Mrinmay folding the big blind) showed `Mrinmay shows A♦ A♠` and
+  `Beltalowda shows A♥ 5♥`, the exact reveals from the hand before it.
+- Cause: a hand settles on the NEXT hand's `Game <hex> started` line, and
+  Torn leaves the showdown cards face up for a moment after that. The seat
+  poll (`harvestShownCards`) read them into the new hand, so the range got the
+  same holding a second time, scored against the new hand's winner, and WTSD
+  was credited to players who had folded.
+- Fix: at settlement, each seat's revealed pair is remembered
+  (`lingeringFaceUp`), and the poll skips those exact cards at that seat until
+  the seat shows something else (a new deal is face down). A later, genuine
+  reveal of the same pair is still caught. The guard carries over a hand that
+  settles before the deal turns the cards over.
+- Hands and stats already recorded this way are not repaired.
+- `test/showdown-seats.test.js` drives the reported sequence through the real
+  settlement. Removing the guard fails 5 of its checks.
+
 ## 1.112.0
 Pool figures in the coach's reads are rounded.
 

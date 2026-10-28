@@ -144,4 +144,55 @@ const down = () => { const c = cardEl('x', true); c.__down = true; return c; };
   t.eq('the hand history keeps the reveal', (T.STORE.hands[0].shown || {})['999'] !== undefined, true);
 }
 
+// --- Last hand's showdown is not this hand's (v1.113.0) ---------------------
+//
+// A hand settles on the NEXT hand's start line, while the showdown cards are
+// still face up. Reported: a hand everyone folded to a preflop raise showed
+// the AA and A5s from the hand before it. Driven through the real settlement.
+{
+  const cardsA = [up('ace of diamonds'), up('ace of spades')];
+  const cardsB = [up('ace of hearts'), up('5 of hearts')];
+  const mrin = seatEl('player-111', cardsA);
+  const belt = seatEl('player-222', cardsB);
+  const T = withSeats([mrin, belt]);
+  T.heroXid = '311421';
+  T.currentHand = T.freshHandState();
+  const h1 = T.currentHand;
+  h1.dealtInXids = new Set(['111', '222']);
+  h1.playersIn = new Set(['111', '222']);
+  h1.actions = [{ x: '111', a: 'raise', amt: 7500000, s: 'preflop' }];
+  h1.contributions = { 111: 7500000, 222: 7500000 };
+  h1.winners = [{ xid: '111', amount: 15000000 }];
+  h1.pot = 15000000;
+
+  T.applyHandResultsAndReset();   // the settlement re-read catches both reveals
+  t.eq('the showdown hand banks AA', T.STORE.players['111'].shownHands.AA.seen, 1);
+  t.eq('WTSD once for each', T.STORE.players['111'].wtsd + T.STORE.players['222'].wtsd, 2);
+
+  // The next hand opens with the cards still face up.
+  T.harvestShownCards();
+  T.harvestShownCards(true);
+  t.eq('lingering cards are not captured into the next hand',
+    Object.keys(T.currentHand.shownCards).length, 0);
+  t.eq('and WTSD is not credited again', T.STORE.players['111'].wtsd + T.STORE.players['222'].wtsd, 2);
+
+  // Settling that hand must not bank them a second time either.
+  T.currentHand.dealtInXids = new Set(['111', '222']);
+  T.currentHand.actions = [{ x: '222', a: 'raise', amt: 15000000, s: 'preflop' }, { x: '111', a: 'fold', amt: 0, s: 'preflop' }];
+  T.currentHand.winners = [{ xid: '222', amount: 18800000 }];
+  T.currentHand.pot = 18800000;
+  T.applyHandResultsAndReset();
+  t.eq('AA is still seen once', T.STORE.players['111'].shownHands.AA.seen, 1);
+  t.eq('the folded hand records no reveal', Object.keys(T.STORE.hands[0].shown || {}).length, 0);
+
+  // The new deal turns them face down, which clears the guard...
+  mrin.querySelectorAll = () => [];
+  T.harvestShownCards(true);
+  // ...so the same pair genuinely shown again later is a real reveal.
+  mrin.querySelectorAll = (sel) => (/front_/.test(sel) ? cardsA : []);
+  T.harvestShownCards(true);
+  t.ok('a later real reveal of the same cards is captured', !!T.currentHand.shownCards['111']);
+  t.ok('the other seat, never cleared, stays guarded', !T.currentHand.shownCards['222']);
+}
+
 process.exit(t.report());
