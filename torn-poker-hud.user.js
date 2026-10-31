@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.114.0
+// @version      1.115.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,18 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.115.0 - Table moves, a lost settings record, and duplicate players.
+ *            - Moving tables no longer replays the new table's log into
+ *              your old hand (one stored hand had 18 players and a $1.39B
+ *              pot); those lines also created most `name:` duplicates.
+ *            - Duplicate `name:` records are merged into the real player,
+ *              now and whenever a seat later names them.
+ *            - Settings, lifetime P/L and session are backed up; a load
+ *              that comes back without them restores the copy instead of
+ *              starting over (this happened on 27 Oct).
+ *            - Once: lifetime P/L is rebuilt from the P/L log (shown as
+ *              "Since 12 Sep"), and board-texture and barrel counts
+ *              counted twice that day are taken back out.
  * 1.114.0 - Showdowns recorded twice before v1.113.0 are taken back out.
  *            - Once, on load: each reveal that repeats the same player's
  *              cards from the hand before is removed from History, and the
@@ -30,8 +42,6 @@
  *              hand everyone folded showed the AA and A5s from the hand
  *              before, with the range and WTSD counted again.
  *            - Those cards are now ignored until that seat's cards change.
- * 1.112.0 - Pool figures in the coach's reads are rounded.
- *            - A read could say "vs a 48.21206434316353% pool".
  */
 
 /*
@@ -73,7 +83,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.114.0';
+  const HUD_VERSION = '1.115.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -888,6 +898,15 @@
 
   const SHARD_PREFIX = STORAGE_KEY + ':';
   const SHARD_CORE = SHARD_PREFIX + 'core';
+  // A copy of core, refreshed by the reconcile (v1.115.0). Core is ~2 KB and
+  // holds settings, hero's lifetime totals, the session and every one-off
+  // flag. On 27 Oct a load came back with every player, hand and ledger key
+  // but NO core, the HUD took that for a fresh install, and the next save
+  // wrote defaults over it: lifetime P/L restarted at zero, settings were
+  // lost, and the one-off backfills - whose flags live in core - ran again
+  // and double-counted. A load missing core but holding other keys is a
+  // broken read, not a fresh install; it restores this copy instead.
+  const SHARD_CORE_BAK = SHARD_PREFIX + 'core~bak';
   // Pre-v1.98.0 single-key sections. Read on load, never written.
   const SHARD_HANDS = SHARD_PREFIX + 'hands';
   const SHARD_PL = SHARD_PREFIX + 'pl';
@@ -1181,8 +1200,36 @@
   // Shared by BOTH loaders on purpose. Two code paths assembling a store
   // independently is how a field ends up handled on one backend and not the
   // other — the same reasoning that put finalizeStore in one place.
+  // A core record worth trusting: an object carrying settings, which every
+  // core ever written does (coreSnapshot copies STORE.settings).
+  function isCoreRecord(v) {
+    return !!(v && typeof v === 'object' && !Array.isArray(v)
+      && v.settings && typeof v.settings === 'object');
+  }
+
+  // Set at load when core was missing or unreadable: { at, from } where from
+  // is 'backup' (restored from SHARD_CORE_BAK) or 'none' (nothing to restore;
+  // started from defaults). Shown in the deep scan.
+  let coreRecovery = null;
+  // Size of the core copy last read or written, for storageBreakdown.
+  let coreBakChars = 0;
+
+  function readCoreShard(keys, read) {
+    const core = read(SHARD_CORE, null, 'core');
+    const bak = keys.indexOf(SHARD_CORE_BAK) !== -1 ? read(SHARD_CORE_BAK, null, 'core backup') : null;
+    if (bak) { try { coreBakChars = JSON.stringify(bak).length; } catch (e) { /* sized on next write */ } }
+    if (isCoreRecord(core)) return core;
+    const others = keys.some((k) => k !== SHARD_CORE && k !== SHARD_CORE_BAK);
+    if (!others) return core && typeof core === 'object' && !Array.isArray(core) ? core : {};
+    coreRecovery = { at: Date.now(), from: isCoreRecord(bak) ? 'backup' : 'none' };
+    console.warn('[TornPokerHUD] Core record missing or unreadable; '
+      + (coreRecovery.from === 'backup' ? 'restored from its backup copy.' : 'no backup to restore.'));
+    // A copy, so the store being assembled never writes through the backup.
+    return isCoreRecord(bak) ? JSON.parse(JSON.stringify(bak)) : {};
+  }
+
   function assembleShards(keys, read, onBad) {
-    const store = read(SHARD_CORE, {}, 'core');
+    const store = readCoreShard(keys, read);
     // Defence in depth: if a core shard somehow carries these (a hand-edited
     // store, a future format change), the dedicated shards still win, so a
     // stale copy inside core can never shadow the real one.
@@ -1526,6 +1573,7 @@
       writes: [],
       removes: [],
       after: [],
+      optional: [],   // best-effort writes, after the rest (the core copy)
       stats: { at: Date.now(), full: !!full, written: 0, skipped: 0, removed: 0, chars: 0 },
     };
     // Listed only if a section is planned: on localStorage it enumerates every
@@ -1622,6 +1670,21 @@
       want(key, p, () => { dirtyPlayers.add(xid); });
     });
 
+    // The core copy (SHARD_CORE_BAK) follows the reconcile, not every save:
+    // at most a minute behind, written only when core actually changed (the
+    // hash check), and LAST, so it never takes room a real write needed.
+    // Skipped while a migration is pending, which is when room is shortest,
+    // and never taken from a store whose core could not be restored: that
+    // would replace a good copy with the defaults the load started from.
+    if (full && !legacyBlobPending && !legacySectionsPending
+        && !(coreRecovery && coreRecovery.from === 'none')) {
+      const before = plan.writes.length;
+      want(SHARD_CORE_BAK, coreSnapshot(), () => {});
+      // Moved to `optional`: written only after every real write landed, and
+      // a refusal of it never fails the save.
+      if (plan.writes.length > before) plan.optional.push(plan.writes.pop());
+    }
+
     if (legacySectionsPending) plan.after.push(SHARD_HANDS, SHARD_PL);
     return plan;
   }
@@ -1674,6 +1737,11 @@
       plan.after.forEach((k) => shardRemove(k));
       legacySectionsPending = false;
     }
+    if (!firstError) {
+      plan.optional.forEach((w) => {
+        try { shardWrite(w.key, w.str, w.hash); coreBakChars = w.str.length; } catch (e) { /* next reconcile */ }
+      });
+    }
     noteFlushStats(plan.stats);
     if (firstError) throw firstError;
   }
@@ -1716,6 +1784,10 @@
 
     return Promise.all(deletions)
       .then(() => writeChunks(s, chunkWrites(plan.writes), 0, plan.stats))
+      .then(() => (plan.optional.length
+        ? writeChunks(s, [plan.optional], 0, null)
+          .then(() => { coreBakChars = plan.optional[0].str.length; }, () => { /* next reconcile */ })
+        : null))
       .then(() => {
         noteFlushStats(plan.stats);
         if (!plan.after.length) return null;
@@ -1974,7 +2046,8 @@
     // As the plan lays them out: a key per hand, the ledger in chunks.
     handShardEntries((STORE && STORE.hands) || []).forEach((e) => { out.hands += size(e.value); });
     ledgerShardEntries((STORE && STORE.plLedger) || [], ledgerBase).forEach((e) => { out.ledger += size(e.value); });
-    out.core = size(STORE ? coreSnapshot() : {});
+    // Core and its backup copy (SHARD_CORE_BAK), as stored.
+    out.core = size(STORE ? coreSnapshot() : {}) + coreBakChars;
     out.total = out.players + out.hands + out.ledger + out.core;
     return out;
   }
@@ -3620,8 +3693,8 @@
   // leak: it no longer grows. What it still does is sit in STORE.players,
   // skewing observedPoolAverages and occupying a prune slot.
   //
-  // DROPPED, never merged. mergePseudoPlayer deliberately bails when the real
-  // record already exists, and for good reason — hands and dealtInXids were
+  // DROPPED, never merged. mergePseudoPlayer folds an OPPONENT's pseudo-record
+  // into the real one (v1.115.0) but bails for hero, for good reason — hands and dealtInXids were
   // always counted through the seat path, so folding the ghost in would
   // double-count them. Its handful of log-derived stats are already orphaned
   // from the hands they describe; discarding them loses nothing that was not
@@ -4226,8 +4299,10 @@
   // never override a live reading or interfere with the table-switch detection
   // in noteBlindLevel. Reads the newest matching line, since the log may span
   // a table change.
-  function seedBlindFromVisibleLog(rows) {
-    if (lastSeenBB) return false;
+  // `swapped`: the log is another table's, so its blind replaces the one in
+  // hand, through noteBlindLevel so a stake change is handled as one.
+  function seedBlindFromVisibleLog(rows, swapped) {
+    if (lastSeenBB && !swapped) return false;
     const bbPattern = LOG_PATTERNS.find((p) => p.type === 'postBB');
     if (!bbPattern) return false;
     for (let i = (rows || []).length - 1; i >= 0; i--) {
@@ -4235,6 +4310,7 @@
       if (!m || !m[2]) continue;
       const amt = parseAmount(m[2]);
       if (!plausibleBB(amt)) continue;
+      if (swapped && currentHand) { noteBlindLevel(currentHand, amt); return true; }
       lastSeenBB = amt;
       currentTableBB = amt;
       return true;
@@ -4985,7 +5061,7 @@
   // why hand history showed ids instead of usernames — the name was known at
   // this exact point every time and simply thrown away.
   function noteResolvedName(xid, name) {
-    mergePseudoPlayer(xid, name); // must run first: it bails if the record exists
+    mergePseudoPlayer(xid, name); // first, so the name lands on the merged record
     if (!name) return;
     const p = getPlayer(xid);
     if (p.name !== name) { p.name = name; saveStore(); }
@@ -4995,17 +5071,178 @@
   // their seat's XID wasn't resolvable at the time), fold that record into the
   // real numeric-XID one now that it's available, instead of leaving two
   // separate, incomplete records for the same person.
+  //
+  // When BOTH exist (v1.115.0) the pseudo-record is folded in rather than
+  // left beside it. It used to bail, which is right only for hero's ghost
+  // (see dropStaleHeroGhost). An opponent's pseudo-record holds actions that
+  // were never counted anywhere else, and mostly hands too: in a real backup
+  // the real id was dealt into the same hand for only 21% of pseudo hands.
   function mergePseudoPlayer(xid, name) {
-    if (STORE.players[xid]) return;
     const pseudoKey = 'name:' + name;
     const pseudo = STORE.players[pseudoKey];
-    if (!pseudo) return;
-    pseudo.xid = xid;
-    STORE.players[xid] = pseudo;
+    if (!pseudo || pseudoKey === xid) return;
+    if (STORE.players[xid]) {
+      if (isHeroRecord(xid)) return;   // hero's ghost is dropped, never merged
+      foldPseudoRecord(STORE.players[xid], pseudo);
+    } else {
+      pseudo.xid = xid;
+      STORE.players[xid] = pseudo;
+    }
     markPlayerDirty(xid);
     delete STORE.players[pseudoKey];
     markPlayerRemoved(pseudoKey);
     saveStore();
+  }
+
+  // How each player field combines when a pseudo-record is folded into the
+  // real one. EXPLICIT per field, so a counter is never averaged and an id
+  // or timestamp is never summed; test/pseudo-merge.test.js fails on any
+  // field emptyPlayer has that this does not name, so a new field gets a
+  // decision rather than a default.
+  //   add     - counters, summed (objects of counters summed key by key;
+  //             arrays inside them are windows, see below)
+  //   window  - capped sample lists, combined oldest record first, then cut
+  //             to the cap from the front, as their own push does
+  //   latest  - the later of the two
+  //   manual  - the real record's, unless it has none (MANUAL_FIELDS rule)
+  //   real    - identity and live state: the real record's, the pseudo's
+  //             only where the real one has nothing
+  const PSEUDO_MERGE = {
+    add: ['hands', 'vpip', 'pfr', 'threeBetMade', 'foldTo3BetMade', 'foldTo3BetOpp', 'cbetMade',
+      'cbetOpp', 'foldToCbetMade', 'foldToCbetOpp', 'wtsd', 'limpMade', 'limpRaiseMade',
+      'plChipsEst', 'plBBEst', 'betSizeCount', 'betSizePctSum', 'streetActions', 'boardTex',
+      'shownHands', 'tables', 'texture', 'barrel', 'fcb3', 'fourBet'],
+    window: ['betSizes', 'recent', 'sdRecent', 'recentTables'],
+    latest: ['lastSeen'],
+    manual: ['tag', 'notes'],
+    real: ['xid', 'name', 'stack', 'lastBigLossHand', 'factionId', 'factionName', 'spouseXid',
+      'affilFetchedAt', 'sdSince'],
+  };
+
+  function pseudoWindowCap(field) {
+    if (field === 'betSizes') return BET_SIZE_HISTORY_MAX;
+    if (field === 'recent') return RECENT_MAX;
+    if (field === 'sdRecent') return SD_RECENT_MAX;
+    if (field === 'recentTables') return RECENT_TABLES_MAX;
+    return TEXTURE_BET_HISTORY_MAX;   // the size windows inside `texture`
+  }
+
+  function addCounters(into, from, field) {
+    Object.keys(from || {}).forEach((k) => {
+      const v = from[k];
+      if (typeof v === 'number') {
+        into[k] = (typeof into[k] === 'number' ? into[k] : 0) + v;
+      } else if (Array.isArray(v)) {
+        into[k] = joinWindows(Array.isArray(into[k]) ? into[k] : [], v, pseudoWindowCap(field), false);
+      } else if (v && typeof v === 'object') {
+        if (!into[k] || typeof into[k] !== 'object' || Array.isArray(into[k])) into[k] = {};
+        addCounters(into[k], v, field);
+      }
+    });
+  }
+
+  // `pseudoFirst`: the pseudo-record is the older of the two, so its entries
+  // go first and the real record's newest survive the cap.
+  function joinWindows(real, pseudo, cap, pseudoFirst) {
+    const all = pseudoFirst ? pseudo.concat(real) : real.concat(pseudo);
+    return all.slice(Math.max(0, all.length - cap));
+  }
+
+  function foldPseudoRecord(real, pseudo) {
+    const pseudoOlder = (pseudo.lastSeen || 0) <= (real.lastSeen || 0);
+    PSEUDO_MERGE.add.forEach((f) => {
+      const v = pseudo[f];
+      if (typeof v === 'number') real[f] = (typeof real[f] === 'number' ? real[f] : 0) + v;
+      else if (v && typeof v === 'object' && !Array.isArray(v)) {
+        if (!real[f] || typeof real[f] !== 'object') real[f] = {};
+        addCounters(real[f], v, f);
+      }
+    });
+    PSEUDO_MERGE.window.forEach((f) => {
+      if (!Array.isArray(pseudo[f]) || !pseudo[f].length) return;
+      const mine = Array.isArray(real[f]) ? real[f] : [];
+      if (f === 'recentTables') {
+        // Newest first, one entry per run of the same blind.
+        const all = mine.concat(pseudo[f]).filter((e) => e && typeof e === 'object')
+          .sort((a, b) => (b.at || 0) - (a.at || 0));
+        real[f] = all.filter((e, i) => i === 0 || e.bb !== all[i - 1].bb).slice(0, RECENT_TABLES_MAX);
+        return;
+      }
+      real[f] = joinWindows(mine, pseudo[f], pseudoWindowCap(f), pseudoOlder);
+    });
+    real.lastSeen = Math.max(real.lastSeen || 0, pseudo.lastSeen || 0);
+    PSEUDO_MERGE.manual.forEach((f) => { if (!real[f] && pseudo[f]) real[f] = pseudo[f]; });
+    PSEUDO_MERGE.real.forEach((f) => {
+      if (f === 'name' || f === 'xid') return;
+      if ((real[f] == null || real[f] === 0 || real[f] === '') && pseudo[f] != null) real[f] = pseudo[f];
+    });
+  }
+
+  // Once, from init (v1.115.0): fold every existing pseudo-record into the
+  // real record of the same name, and re-key it in stored hands so History
+  // and the per-hand repairs see one player. A name that matches no real
+  // record, or more than one, is left alone: there is nothing certain to
+  // fold it into. Hero's ghost is never merged (dropStaleHeroGhost).
+  function mergeExistingPseudoRecords() {
+    if (STORE.pseudoMerged) return null;
+    const heroX = STORE.hero && STORE.hero.xid;
+    const heroName = String((STORE.settings && STORE.settings.heroName) || '').trim().toLowerCase();
+    const byName = {};
+    Object.keys(STORE.players).forEach((x) => {
+      const p = STORE.players[x];
+      if (x.indexOf('name:') === 0 || !p || !p.name) return;
+      const k = String(p.name).toLowerCase();
+      (byName[k] = byName[k] || []).push(x);
+    });
+    const map = {};
+    Object.keys(STORE.players).forEach((k) => {
+      if (k.indexOf('name:') !== 0) return;
+      const n = k.slice(5).toLowerCase();
+      const real = byName[n];
+      if (!real || real.length !== 1 || n === heroName || real[0] === heroX) return;
+      foldPseudoRecord(STORE.players[real[0]], STORE.players[k]);
+      markPlayerDirty(real[0]);
+      delete STORE.players[k];
+      markPlayerRemoved(k);
+      map[k] = real[0];
+    });
+    const res = { players: Object.keys(map).length, hands: rekeyStoredHands(map), at: Date.now() };
+    STORE.pseudoMerged = res;
+    saveStore();
+    return res;
+  }
+
+  // Every xid a stored hand carries, renamed through `map`. A hand that
+  // changes is a NEW object, because handShardMemo keys the saved copy on
+  // the hand object. Returns how many hands changed.
+  function rekeyStoredHands(map) {
+    if (!Object.keys(map).length) return 0;
+    const to = (x) => (Object.prototype.hasOwnProperty.call(map, x) ? map[x] : x);
+    const hit = (x) => Object.prototype.hasOwnProperty.call(map, x);
+    const rekeyObj = (o) => {
+      if (!o || typeof o !== 'object') return o;
+      const out = {};
+      Object.keys(o).forEach((k) => { if (!(to(k) in out) || !hit(k)) out[to(k)] = o[k]; });
+      return out;
+    };
+    let changed = 0;
+    STORE.hands = (STORE.hands || []).map((h) => {
+      if (!h) return h;
+      const touches = (h.players || []).some(hit) || (h.actions || []).some((a) => a && hit(a.x))
+        || (h.winners || []).some((w) => w && hit(w.xid)) || Object.keys(h.shown || {}).some(hit);
+      if (!touches) return h;
+      changed += 1;
+      return {
+        ...h,
+        players: Array.from(new Set((h.players || []).map(to))),
+        actions: (h.actions || []).map((a) => (a && hit(a.x) ? { ...a, x: to(a.x) } : a)),
+        winners: (h.winners || []).map((w) => (w && hit(w.xid) ? { ...w, xid: to(w.xid) } : w)),
+        shown: rekeyObj(h.shown),
+        shownVia: rekeyObj(h.shownVia),
+      };
+    });
+    if (changed) dirtyHands = true;
+    return changed;
   }
 
   // Torn usernames are alphanumeric plus _ and -. Used to decide whether text
@@ -5529,7 +5766,9 @@
     return { b: 0, r: 0, c: 0, k: 0, f: 0 };
   }
 
-  function noteBoardTexture(p, action, street, board) {
+  // `delta` -1 takes a count back out (the core-loss repair); never below 0.
+  function noteBoardTexture(p, action, street, board, delta) {
+    const d = delta || 1;
     const need = BOARD_COUNT_FOR[street];
     if (!need) return;                       // preflop has no board
     const key = BOARD_TEX_KEY[action];
@@ -5541,7 +5780,7 @@
     if (!p.boardTex || typeof p.boardTex !== 'object') p.boardTex = {};
     boardFlags(showing).forEach((f) => {
       const cell = p.boardTex[f] || (p.boardTex[f] = emptyBoardTexCell());
-      cell[key] = (cell[key] || 0) + 1;
+      cell[key] = Math.max(0, (cell[key] || 0) + d);
     });
   }
 
@@ -7042,13 +7281,39 @@
     // a live table, so infer it and latch it. A tie means no usable overlap
     // (the list was replaced wholesale); reuse the direction already observed
     // rather than guessing again and replaying a hand backwards.
-    if (tailN > headN) return { fresh: cur.slice(tailN), orientation: 'append' };
-    if (headN > tailN) return { fresh: cur.slice(0, cur.length - headN).reverse(), orientation: 'prepend' };
+    if (tailN > headN) return { fresh: cur.slice(tailN), orientation: 'append', overlap: tailN };
+    if (headN > tailN) return { fresh: cur.slice(0, cur.length - headN).reverse(), orientation: 'prepend', overlap: headN };
     return {
       fresh: orientation === 'prepend' ? cur.slice(0, cur.length - headN).reverse() : cur.slice(tailN),
       orientation,
+      overlap: Math.max(tailN, headN),
     };
   }
+
+  // Is this a DIFFERENT log rather than new lines in the same one? (v1.115.0)
+  //
+  // Moving tables swaps in the new table's log, already full of its history.
+  // Nothing in it overlaps the old table's lines, so the diff read all of it
+  // as new and replayed it into the old table's hand in progress. Seen in a
+  // real backup: one stored "hand" with 18 players dealt in, three winners and
+  // a $1.39B pot, and the players named in those lines - not seated in front
+  // of you, or already gone - minted `name:` pseudo-records. 58 stored hands
+  // had more than nine players; 431 of 1,666 player records were pseudo-ids.
+  //
+  // A log cleared and refilled at the same table starts at a hand's own
+  // "Game <hex> started" line and arrives a few lines at a time. So: no
+  // overlap with a non-empty previous log, AND either its oldest line is not
+  // a hand's start (it begins mid-history) or it is too long to have arrived
+  // in one tick. Such a log is primed, exactly like the lines on screen at
+  // page load, never parsed. Wrongly priming costs the lines of one tick;
+  // wrongly parsing corrupts every player named in them.
+  const LOG_SWAP_MIN_LINES = 8;
+  function logWasSwapped(prevLen, diff) {
+    if (!prevLen || diff.overlap > 0 || !diff.fresh.length) return false;
+    if (diff.fresh.length >= LOG_SWAP_MIN_LINES) return true;
+    return !/^\s*game\s+[0-9a-f]{6,}\s+started/i.test(String(diff.fresh[0]).split('\n')[0]);
+  }
+  let lastLogSwap = null;   // { at, lines } for the deep scan
 
   // Returns true if the structured path handled this tick, false if there are no
   // log rows to read and the caller should fall back to parsing added nodes.
@@ -7074,21 +7339,22 @@
     // Lines already on screen when the script loads are history, not events —
     // parsing them would replay an arbitrary slice of a hand already over.
     if (!logSnapshotPrimed) {
-      logSnapshot = cur;
-      logSnapshotPrimed = true;
-      // But a BLIND LEVEL is not an event, it is a fact about the table, and
-      // reading one costs nothing and replays nothing. Without this the whole
-      // session ran with no blind until the next hand posted its blinds: a
-      // live scan showed "posted big blind $500,000" sitting right there in
-      // the log while the HUD reported "blind level not read yet". That gap
-      // matters — bbAmount is what prices P/L in big blinds, what decides
-      // whether a hand is notable, and what the effective-stack warnings read.
-      seedBlindFromVisibleLog(cur);
+      primeLogSnapshot(cur);
       return true;
     }
 
     const diff = diffLogRows(logSnapshot, cur, logOrientation);
     logOrientation = diff.orientation;
+    if (logWasSwapped(logSnapshot.length, diff)) {
+      // A new table. Its hand in progress is not the one we were in, and the
+      // old table's hand can no longer finish in front of us, so close it now
+      // (the same settlement its next "Game started" line would have run) and
+      // let the new table's lines start a hand of their own.
+      lastLogSwap = { at: Date.now(), lines: diff.fresh.length };
+      applyHandResultsAndReset();
+      primeLogSnapshot(cur, true);
+      return true;
+    }
     const fresh = diff.fresh;
 
     // Snapshot before parsing: handleLogLine can render panels, and a re-entrant
@@ -7106,6 +7372,21 @@
       });
     });
     return true;
+  }
+
+  // Take lines already on screen as history: remembered, never parsed. At page
+  // load, and when the log is swapped for another table's.
+  function primeLogSnapshot(cur, swapped) {
+    logSnapshot = cur;
+    logSnapshotPrimed = true;
+    // But a BLIND LEVEL is not an event, it is a fact about the table, and
+    // reading one costs nothing and replays nothing. Without this the whole
+    // session ran with no blind until the next hand posted its blinds: a
+    // live scan showed "posted big blind $500,000" sitting right there in
+    // the log while the HUD reported "blind level not read yet". That gap
+    // matters — bbAmount is what prices P/L in big blinds, what decides
+    // whether a hand is notable, and what the effective-stack warnings read.
+    seedBlindFromVisibleLog(cur, swapped);
   }
 
   // Coalesce a burst of mutations into one scan per frame. Safe to drop extra
@@ -7726,14 +8007,16 @@
   // Sparse per player, `{m, o, fm, fo}` — made/opportunities, and folded/faced.
   // Absent until a player is first seen in a barrel spot, because this rides
   // on every record forever (open finding #2's growth shape).
-  function noteBarrels(actions, resolve) {
+  // `delta` -1 takes a count back out (the core-loss repair); never below 0.
+  function noteBarrels(actions, resolve, delta) {
     const ev = barrelEventsFor(actions);
     if (!ev) return false;
+    const d = delta || 1;
     const bump = (xid, field) => {
       const p = resolve(xid);
       if (!p) return;
       if (!p.barrel || typeof p.barrel !== 'object') p.barrel = {};
-      p.barrel[field] = (p.barrel[field] || 0) + 1;
+      p.barrel[field] = Math.max(0, (p.barrel[field] || 0) + d);
     };
     bump(ev.xid, 'o');
     if (ev.made) bump(ev.xid, 'm');
@@ -8125,6 +8408,91 @@
     STORE.heroSdRepaired = true;
     saveStore();
     return !!p;
+  }
+
+  // "Lifetime", or "Since 12 Sep" once the core-loss repair rebuilt the
+  // totals from the ledger: they cannot reach further back than its first row.
+  function lifetimeLabel() {
+    const r = STORE.coreLossRepaired;
+    if (!(r && r.found && r.since)) return 'Lifetime';
+    return 'Since ' + new Date(r.since).toLocaleDateString([], { day: 'numeric', month: 'short' });
+  }
+
+  // The signature of a lost core record (v1.115.0): more ledger rows than
+  // hero hands, AND the newest rows - one per hand hero has played since -
+  // adding up exactly to the lifetime total. Each hero hand writes one row
+  // beside the total, and every reset clears both, so the only way to get
+  // here is the total starting again while the ledger kept going: what a
+  // load missing core did on 27 Oct. The exact-sum test is what keeps an old
+  // store whose ledger was counted a few percent wider (before v1.78.0) out.
+  // Returns when the new era began (the first hand counted since), or null.
+  function coreLossSignature() {
+    const L = STORE.plLedger || [];
+    const n = (STORE.hero && STORE.hero.hands) || 0;
+    if (L.length <= n || !L.length) return null;
+    let tail = 0;
+    for (let i = L.length - n; i < L.length; i += 1) tail += Number(L[i].d) || 0;
+    if (Math.abs(tail - ((STORE.hero && STORE.hero.netChips) || 0)) > 1) return null;
+    return { at: n ? L[L.length - n].t : Date.now(), rows: L.length, heroHands: n };
+  }
+
+  // Once, from init (v1.115.0), and only on that signature. Two repairs:
+  //
+  // 1. Hero's totals are rebuilt from the ledger: every row is one hero hand
+  //    with its result and blind, so netChips, hands, netBB and bbHands are
+  //    their sums - from the ledger's first row, since anything older has
+  //    aged out of it and is gone. The ledger and the total agree again, so
+  //    the CSV export's running total starts from zero rather than from the
+  //    gap between them.
+  // 2. The one-off board-texture and barrel backfills, whose flags live in
+  //    core, ran a second time at the load that lost it, counting every hand
+  //    then stored twice. Each stored hand from before that load is taken out
+  //    once, by the same functions run with delta -1. Hands that have aged out
+  //    of history since stay double-counted.
+  //
+  // Runs BEFORE the pseudo-record merge, because the backfill counted those
+  // hands against whatever ids they held then.
+  function repairCoreLoss() {
+    if (STORE.coreLossRepaired) return null;
+    const sig = coreLossSignature();
+    if (!sig) { STORE.coreLossRepaired = { at: Date.now(), found: false }; saveStore(); return null; }
+    const L = STORE.plLedger;
+    const before = { hands: STORE.hero.hands, netChips: STORE.hero.netChips };
+    let netChips = 0;
+    let netBB = 0;
+    let bbHands = 0;
+    L.forEach((r) => {
+      const d = Number(r.d) || 0;
+      netChips += d;
+      if (plausibleBB(r.b)) { netBB += d / r.b; bbHands += 1; }
+    });
+    STORE.hero.netChips = netChips;
+    STORE.hero.netBB = netBB;
+    STORE.hero.hands = L.length;
+    STORE.hero.bbHands = bbHands;
+
+    let boardTex = 0;
+    let barrels = 0;
+    const res = (xid) => { const p = STORE.players[xid]; if (p) markPlayerDirty(xid); return p || null; };
+    (STORE.hands || []).forEach((h) => {
+      if (!h || !(h.t < sig.at)) return;
+      if (STORE.boardTexBackfilled && Array.isArray(h.board) && h.board.length) {
+        (h.actions || []).forEach((a) => {
+          if (!a || !a.x || !a.s || a.s === 'preflop' || !BOARD_TEX_KEY[a.a]) return;
+          const p = res(a.x);
+          if (!p) return;
+          noteBoardTexture(p, a.a, a.s, h.board, -1);
+          boardTex += 1;
+        });
+      }
+      if (STORE.barrelBackfilled && noteBarrels(h.actions, res, -1)) barrels += 1;
+    });
+    STORE.coreLossRepaired = {
+      at: Date.now(), found: true, lostAt: sig.at, since: L[0].t, before,
+      after: { hands: L.length, netChips }, boardTex, barrels,
+    };
+    saveStore();
+    return STORE.coreLossRepaired;
   }
 
   // Hand category of hole+board at a given point in the hand, {r,s} numeric
@@ -15247,7 +15615,7 @@
           ${isHeroRecord(openPlayerXid) ? `
           <tr class="tph-stat-head"><td colspan="3"><b>Your results</b></td></tr>
           <tr>
-            <td class="tph-stat-l">Lifetime</td>
+            <td class="tph-stat-l">${lifetimeLabel()}</td>
             <td class="tph-stat-v" style="color:${STORE.hero.netChips >= 0 ? '#7ed957' : '#ff6b6b'} !important">
               <b>${fmtBB(STORE.hero.netBB)}</b></td>
             <td class="tph-stat-n" style="color:${STORE.hero.netChips >= 0 ? '#7ed957' : '#ff6b6b'} !important">${fmtSignedMoney(STORE.hero.netChips)}</td>
@@ -15856,7 +16224,7 @@
       <div style="opacity:.75;margin-top:10px;border-top:1px solid #444;padding-top:8px">
         <b>This sitting:</b> ${STORE.session.hands} hands, ${fmtSignedMoney(STORE.session.net)}
         ${STORE.session.startedAt ? ' (since ' + new Date(STORE.session.startedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + ')' : ''}<br>
-        <b>Lifetime:</b> ${STORE.hero.hands} hands, ${fmtSignedMoney(STORE.hero.netChips)}
+        <b>${lifetimeLabel()}:</b> ${STORE.hero.hands} hands, ${fmtSignedMoney(STORE.hero.netChips)}
         &nbsp;|&nbsp; <b>${fmtBB(STORE.hero.netBB)}</b> ${fmtBB100(STORE.hero.netBB, STORE.hero.bbHands)}
         <br>${(STORE.hands || []).length} hands in history
         &nbsp;|&nbsp; ${(() => {
@@ -16726,10 +17094,14 @@
       // A marker that shouts forever at 5 hands in 18,070 trains you to ignore
       // markers, which costs the one it was written for.
       const heroGap = real ? Math.abs(STORE.hero.hands - real.hands) : 0;
-      const heroGapBad = real && heroGap > 2 && heroGap > real.hands * 0.01;
+      // After the core-loss repair STORE.hero counts from the ledger's first
+      // row, so it is SHORTER than the record by design: not a split.
+      const rebuilt = STORE.coreLossRepaired && STORE.coreLossRepaired.found;
+      const heroGapBad = real && heroGap > 2 && heroGap > real.hands * 0.01 && !rebuilt;
       L.push('STORE.hero: ' + STORE.hero.hands + ' hands, bbHands ' + STORE.hero.bbHands
         + (heroGapBad ? '   <-- DISAGREES WITH heroRecord' : '')
-        + (real && heroGap && !heroGapBad
+        + (rebuilt && real && heroGap ? `   (record ${real.hands}: totals rebuilt from the ledger, which starts later)` : '')
+        + (real && heroGap && !heroGapBad && !rebuilt
           ? `   (record +${real.hands - STORE.hero.hands}: settled before identity bound)` : ''));
       // bbHands must never exceed hands: it is the subset of hero's hands whose
       // blind level could be read. Any excess is residue from before v1.78.0,
@@ -16973,6 +17345,19 @@
       + ', seeded from history: ' + (STORE.sdRecentBackfilled ? 'yes' : 'no'));
     // v1.113.0's one-off repair changes how much showdown data there is, so
     // it is in the scan, not only in a changelog.
+    // v1.115.0's one-off repairs and the core guard, same reason.
+    const clr = STORE.coreLossRepaired;
+    if (clr && clr.found) {
+      L.push(`core-loss repair: hero totals rebuilt from the ledger (since ${new Date(clr.since).toISOString().slice(0, 10)}): `
+        + `${clr.before.hands} hands ${fmtSignedMoney(clr.before.netChips)} -> ${clr.after.hands} hands ${fmtSignedMoney(clr.after.netChips)}; `
+        + `double count undone: ${clr.boardTex} board-texture actions, ${clr.barrels} barrel spots`);
+    } else L.push('core-loss repair: ' + (clr ? 'not needed' : 'not run'));
+    L.push('core record: ' + (coreRecovery ? `MISSING at load, ${coreRecovery.from === 'backup' ? 'restored from backup copy' : 'NO BACKUP - started from defaults'}` : 'read normally')
+      + '   backup copy: ' + (coreBakChars ? coreBakChars + ' chars' : 'none yet'));
+    const pm = STORE.pseudoMerged;
+    L.push('name: record merge: ' + (pm ? `${pm.players} merged into real records, ${pm.hands} stored hand(s) re-keyed` : 'not run')
+      + '   name: records now: ' + Object.keys(STORE.players).filter((k) => k.indexOf('name:') === 0).length
+      + '   last table move: ' + (lastLogSwap ? `${lastLogSwap.lines} line(s) not replayed, ${shortAgo(lastLogSwap.at)}` : 'none this session'));
     const ssr = STORE.staleSdRepaired;
     L.push('repeated-showdown repair: ' + (ssr && typeof ssr === 'object'
       ? `${ssr.reveals} reveal(s) removed from ${ssr.hands} stored hand(s), ${shortAgo(ssr.at)}`
@@ -17439,6 +17824,9 @@
       readSeatStack,
       readDomPot,
       diffLogRows,
+      scanLogRows,
+      logWasSwapped,
+      get lastLogSwap() { return lastLogSwap; },
       logLineKey,
       RFI_RANGES,
       THREE_BET_RANGES,
@@ -17869,6 +18257,11 @@
       HISTORY_PINNED_CEILING,
       repairHeroShowdowns,
       repairStaleShowdowns,
+      repairCoreLoss,
+      coreLossSignature,
+      mergeExistingPseudoRecords,
+      mergePseudoPlayer,
+      PSEUDO_MERGE,
       betTextureEvents,
       streetFoldHigh,
       STREET_POOL,
@@ -17927,6 +18320,7 @@
       chunkWrites,
       PDA_WRITE_CHUNK,
       flushShardsAsync,
+      get coreRecovery() { return coreRecovery; },
       clearLocalStorageCopy,
       get pdaBackend() { return pdaBackend; },
       set pdaBackend(v) { pdaBackend = v; },
@@ -18037,6 +18431,10 @@
     // Before anything can push the store: the gist copy should carry the
     // cleaned History.
     repairStaleShowdowns();
+    // Core-loss repair BEFORE the merge: it undoes counts keyed by the ids
+    // stored hands held at the time, which the merge then re-keys.
+    repairCoreLoss();
+    mergeExistingPseudoRecords();
     // Discards affiliation timestamps written while the transport was broken,
     // so the badges do not stay dead for up to 24h after the fix. Once only.
     repairAffiliationCache();

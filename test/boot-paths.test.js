@@ -140,4 +140,26 @@ boots('native backend falling back to a legacy blob', {
   },
 });
 
+
+// --- Core missing, with and without its backup copy (v1.115.0) -------------
+//
+// readCoreShard and the coreRecovery/coreBakChars bindings run inside
+// bootStore, at module evaluation.
+
+{
+  const noCore = shards();
+  delete noCore[KEY + ':core'];
+  boots('core missing, backup present', {
+    seedKeys: Object.assign(noCore, { [KEY + ':core~bak']: JSON.stringify({ version: 3, settings: { heroName: 'Wonkawee' }, hero: { hands: 7, netChips: 70, netBB: 7, bbHands: 7 } }) }),
+  }, (T) => {
+    t.eq('hero comes back from the copy', T.STORE.hero.hands, 7);
+    t.eq('and the players still load', T.STORE.players.b1.hands, 40);
+  });
+  const bare = shards();
+  delete bare[KEY + ':core'];
+  boots('core missing, no backup', { seedKeys: bare }, (T) => {
+    t.eq('the players still load', T.STORE.players.b1.hands, 40);
+  });
+}
+
 process.exit(t.report());

@@ -2177,8 +2177,9 @@ Two sources feed names now, and both must keep working:
 
 1. `noteResolvedName(xid, name)` at the point `nameToXidGuess` matches a log name
    to a seat — the name was already in hand there and was being thrown away. It
-   merges any `name:` pseudo-record *first* (that function bails when the real
-   record already exists) and then writes the name.
+   merges any `name:` pseudo-record *first* (since v1.115.0 it FOLDS an
+   opponent's into an existing real record — see "Moving tables" below — and
+   still bails for hero's) and then writes the name.
 2. `harvestSeatNames()` reads the seat's own name element on the 3s watcher tick.
    `SELECTORS.seatName` had been declared and read by nothing. This names players
    who are sitting there but haven't acted, and repairs records stored under the
@@ -2919,6 +2920,70 @@ counted against itself, so the lead read could swap for a runner-up between a
 spot's first and second render. `tipFatiguePenalty(xid, tag, spot)` excludes
 it; `test/coach-fatigue.test.js`'s same-spot test caught it once a new read
 narrowed the margin.
+
+## Moving tables, a lost core, and `name:` records (v1.115.0)
+
+Found by checking a real backup's invariants rather than by review — the same
+habit that found the stale showdowns. Three faults, one of them data loss.
+
+**A swapped log is primed, never parsed.** Moving tables swaps in the new
+table's log, already full of its history. It shares no line with the old log,
+so the diff read all of it as new and replayed it into the old table's hand:
+one stored "hand" had 18 players dealt in, three winners and a $1.39B pot, and
+58 stored hands had more than nine players. `logWasSwapped` calls it a swap when
+there is no overlap with a non-empty previous log AND the oldest new line is not
+a hand's `Game <hex> started` (or there are `LOG_SWAP_MIN_LINES`+ of them at
+once). The old table's hand is settled there and the new log primed exactly
+like the lines on screen at load, its blind taken through `noteBlindLevel`.
+Wrongly priming costs one tick's lines; wrongly parsing corrupts every player
+named. **The swap is what minted most `name:` records** — those lines name
+people not seated in front of you. `test/log-swap.test.js` drives the real
+`scanLogRows`; switched off, it reproduces the mixed hand.
+
+**Opponent `name:` records are FOLDED into the real record, summed.** 431 of
+1,666 records in the backup were pseudo-ids. Unlike hero's ghost, an opponent's
+pseudo-record holds actions counted nowhere else, and mostly hands too: the
+real id was dealt into the same hand for only 21% of pseudo hands. So
+`mergePseudoPlayer` now folds instead of bailing when both exist (hero still
+bails — `dropStaleHeroGhost`), and `mergeExistingPseudoRecords` did the store
+once (403 merged; a name with no real record, or two, is left alone) and
+re-keyed stored hands. `PSEUDO_MERGE` names a rule for EVERY player field —
+add / window / latest / manual / real — and `test/pseudo-merge.test.js` fails
+on a field it does not name. **Adding a player field means adding it there.**
+The ~21% overlap is double-counted hands that cannot be told apart afterwards.
+
+**Core has a backup copy, and a load missing core restores it.** On 27 Oct a
+load came back with every player, hand and ledger key but no `:core`. The HUD
+took that for a fresh install and saved defaults over it: lifetime P/L restarted
+at zero, settings were lost, and the one-off backfills — **their flags live in
+core** — ran again and double-counted board texture and barrels. Likely a
+partial `loadAll` on the native bridge; nothing guarded a PARTIAL read, only a
+failed one.
+- `SHARD_CORE_BAK` is refreshed by the reconcile (hash-skipped, so written only
+  when core changed), as a best-effort `plan.optional` write AFTER every real
+  write — it never fails a save and never takes room a real write needed.
+  Skipped while a migration is pending, and never taken from a store whose core
+  could not be restored (that would overwrite a good copy with defaults).
+- `readCoreShard`: core missing or not an object with `settings`, but other keys
+  present → the backup; no backup → defaults, flagged `coreRecovery.from:
+  'none'` for the scan. Both are in `test/boot-paths.test.js` (load path).
+- **Anything else a one-off flag guards is exposed the same way.** A flag in
+  core is lost with core, so an ADDITIVE backfill guarded only by its flag
+  re-runs after a core loss. The backup is what protects them now.
+
+**The repair (`repairCoreLoss`) runs only on an exact signature**: more ledger
+rows than `hero.hands`, AND the newest `hero.hands` rows summing to
+`hero.netChips` (within a chip). Each hero hand writes one row beside the total
+and every reset clears both, so only a lost core produces that; the exact sum
+keeps out pre-v1.78.0 stores whose ledger ran a few percent wider. It rebuilds
+hero's totals from the ledger (so they start at its first row, and the UI's
+"Lifetime" label reads "Since <date>" via `lifetimeLabel`), and takes each
+pre-loss stored hand back out of board texture and barrels once, through
+`noteBoardTexture`/`noteBarrels` with `delta -1`. It runs BEFORE the pseudo
+merge, because the double count was keyed by the ids hands held then.
+`test/core-loss-repair.test.js` produces the double count with the real
+backfills run twice. On the backup: −$126M/297 hands → +$19.5B/20,000 hands;
+12,161 board-texture actions and 350 barrel spots taken back out.
 
 ## Feature use is counted on the device (v1.92.0)
 

@@ -9,6 +9,50 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.115.0
+Table moves, a lost settings record, and duplicate players.
+
+Found by checking the invariants of the user's backup (2,301 hands, 1,666
+players) rather than by reading code.
+
+- **Moving tables replayed the new table's log.** The new table's log arrives
+  full of history and shares no line with the old one, so the diff read all of
+  it as new and parsed it into the old table's hand in progress: one stored
+  "hand" had 18 players dealt in, three winners and a $1.39B pot, and 58 stored
+  hands had more than nine players. `logWasSwapped` now calls it a swap when
+  there is no overlap with a non-empty previous log and the oldest new line is
+  not a hand's start (or 8+ arrive at once); the old hand is settled and the
+  new log primed like the lines on screen at load, its blind taken through
+  `noteBlindLevel`. `test/log-swap.test.js` drives the real `scanLogRows`.
+- **Duplicate `name:` records are merged.** 431 of 1,666 records were
+  pseudo-ids, most minted by that replay. An opponent's pseudo-record holds
+  actions counted nowhere else, and mostly hands too (the real id was dealt
+  into the same hand for only 21% of pseudo hands), so it is summed into the
+  real record: `mergePseudoPlayer` folds instead of bailing when both exist
+  (hero's ghost still bails), and `mergeExistingPseudoRecords` ran once over
+  the store and re-keyed stored hands. `PSEUDO_MERGE` names a rule for every
+  player field; `test/pseudo-merge.test.js` fails on one it does not name. On
+  the backup: 403 merged, 28 left (no single real record by that name).
+- **Core is backed up.** On 27 Oct at 19:19 a load returned every player,
+  hand and ledger key but not `:core` (settings, lifetime totals, session, and
+  the one-off flags). The HUD took that for a fresh install and saved defaults
+  over it. `SHARD_CORE_BAK` is now refreshed by the reconcile, as a
+  best-effort write after every real one, and a load missing core but holding
+  other keys restores it (`readCoreShard`, `test/core-backup.test.js`, two new
+  `test/boot-paths.test.js` cases). The deep scan reports both.
+- **One-off repair of that loss** (`repairCoreLoss`), only on an exact
+  signature: more ledger rows than hero hands AND the newest rows summing to
+  the current total. Hero's totals are rebuilt from the ledger, so they now
+  start at its first row and the UI labels them "Since 12 Sep" (−$126M / 297
+  hands → +$19.5B / 20,000 hands, +7,720bb). The board-texture and barrel
+  backfills, which re-ran because their flags were in core, are taken back out
+  for every stored hand from before the loss (12,161 actions, 350 spots); about
+  300 hands that have since aged out of history stay double-counted.
+  `test/core-loss-repair.test.js` makes the double count with the real
+  backfills run twice and requires the repair to match a single run.
+- The deep scan's hero-gap marker no longer flags the rebuilt total against
+  hero's own record (which counts from before the ledger began).
+
 ## 1.114.0
 Showdowns recorded twice before v1.113.0 are taken back out.
 
