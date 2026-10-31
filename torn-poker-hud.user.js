@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.115.0
+// @version      1.115.1
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,9 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.115.1 - A gist sync no longer brings merged duplicates back.
+ *            - The gist holds the store from before v1.115.0's merge until
+ *              the next push; a pull re-added all 403 `name:` records.
  * 1.115.0 - Table moves, a lost settings record, and duplicate players.
  *            - Moving tables no longer replays the new table's log into
  *              your old hand (one stored hand had 18 players and a $1.39B
@@ -36,12 +39,6 @@
  *              range, showdown rate, win-at-showdown and bet-texture counts
  *              it added are given back. 111 reveals in 65 hands on the
  *              reported backup. The deep scan reports what it removed.
- * 1.113.0 - A showdown is no longer recorded twice.
- *            - The cards stay face up for a moment after the next hand
- *              starts, and were recorded as that hand's showdown too: a
- *              hand everyone folded showed the AA and A5s from the hand
- *              before, with the range and WTSD counted again.
- *            - Those cards are now ignored until that seat's cards change.
  */
 
 /*
@@ -83,7 +80,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.115.0';
+  const HUD_VERSION = '1.115.1';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -2512,7 +2509,19 @@
     // solved: two devices that both tag the same player differently keep
     // disagreeing until one is cleared.
     const MANUAL_FIELDS = ['tag', 'notes'];
+    // A remote `name:` record whose name a local real record carries is NOT
+    // adopted (v1.115.0). After the pseudo-record merge the gist still holds
+    // them until the next push; adopting them would bring every merged record
+    // back, and a seat naming one later would fold it in a second time. Known
+    // gap: a pseudo-record that exists only on ANOTHER device, never merged
+    // here, is dropped by this rather than folded.
+    const realNames = new Set();
+    Object.keys(merged.players).forEach((x) => {
+      const p = merged.players[x];
+      if (x.indexOf('name:') !== 0 && p && p.name) realNames.add(String(p.name).toLowerCase());
+    });
     for (const xid of Object.keys(remote.players || {})) {
+      if (xid.indexOf('name:') === 0 && realNames.has(xid.slice(5).toLowerCase())) continue;
       const remotePlayer = remote.players[xid];
       const localPlayer = merged.players[xid];
       const manual = {};

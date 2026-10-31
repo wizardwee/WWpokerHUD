@@ -122,4 +122,23 @@ function rec(T, xid, over) {
   t.eq('runs once', T.mergeExistingPseudoRecords(), null);
 }
 
+// A gist pull must not bring merged records back. The gist holds the store as
+// it was before the merge until the next push.
+{
+  const T = load();
+  const local = T.emptyStore();
+  local.players = { 1: rec(T, '1', { name: 'Ann', hands: 15 }) };
+  local.pseudoMerged = { players: 1, hands: 0, at: 1 };
+  const remote = T.emptyStore();
+  remote.players = {
+    1: rec(T, '1', { name: 'Ann', hands: 10 }),
+    'name:Ann': rec(T, 'name:Ann', { hands: 5 }),
+    'name:Zed': rec(T, 'name:Zed', { hands: 3 }),
+  };
+  const m = T.mergeStores(local, remote);
+  t.ok('a merged pseudo-record does not come back from the gist', !m.players['name:Ann']);
+  t.ok('one with no real record here still does', !!m.players['name:Zed']);
+  t.eq('the real record is untouched', m.players['1'].hands, 15);
+}
+
 process.exit(t.report());

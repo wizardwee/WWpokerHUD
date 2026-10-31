@@ -9,6 +9,19 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.115.1
+A gist sync no longer brings merged duplicates back.
+
+- Found simulating the next sync after v1.115.0: the gist still holds the
+  store from before the pseudo-record merge, and `mergeStores` adopts any
+  remote player this device lacks, so a pull re-added all 403 merged `name:`
+  records, and a seat naming one later would have folded it in a second time.
+  A remote `name:` record is now skipped when a local real record carries
+  that name. Known gap: a pseudo-record that exists only on another device is
+  dropped rather than folded. Simulated on the real backup: 28 `name:`
+  records and the rebuilt totals survive the pull. Pinned in
+  `test/pseudo-merge.test.js`.
+
 ## 1.115.0
 Table moves, a lost settings record, and duplicate players.
 
