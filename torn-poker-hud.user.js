@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.115.1
+// @version      1.116.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,12 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.116.0 - Bet sizing reads postflop bets only; cut-off hands count.
+ *            - "Typically bets X% of pot" included preflop raises, so the
+ *              "oversized" read fired for 37% of players (now 5%).
+ *            - Leaving the page settles and saves the hand in progress.
+ *            - Once: impossible counts (more VPIP than hands) fixed, sizing
+ *              rebuilt from stored hands, pots raised to what was won.
  * 1.115.1 - A gist sync no longer brings merged duplicates back.
  *            - The gist holds the store from before v1.115.0's merge until
  *              the next push; a pull re-added all 403 `name:` records.
@@ -33,12 +39,6 @@
  *            - Once: lifetime P/L is rebuilt from the P/L log (shown as
  *              "Since 12 Sep"), and board-texture and barrel counts
  *              counted twice that day are taken back out.
- * 1.114.0 - Showdowns recorded twice before v1.113.0 are taken back out.
- *            - Once, on load: each reveal that repeats the same player's
- *              cards from the hand before is removed from History, and the
- *              range, showdown rate, win-at-showdown and bet-texture counts
- *              it added are given back. 111 reveals in 65 hands on the
- *              reported backup. The deep scan reports what it removed.
  */
 
 /*
@@ -80,7 +80,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.115.1';
+  const HUD_VERSION = '1.116.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -5417,8 +5417,8 @@
     if (type === 'bet') {
       const xid = nameToXidGuess(cleanName(m[1]));
       const amt = logAmount(m[2], hand);
-      const potBefore = hand.pot;
-      noteBetSizing(xid, amt, potBefore);
+      const potBefore = sizingPot(hand);
+      noteBetSizing(xid, amt, potBefore, hand);
       addContribution(hand, xid, amt);
       recordStreetAction(xid, 'bet', hand);
       logAction(hand, xid, 'bet', amt, { p: betSizePctOf(amt, potBefore) });
@@ -5431,8 +5431,8 @@
     if (type === 'raise') {
       const xid = nameToXidGuess(cleanName(m[1]));
       const amt = logAmount(m[2], hand);
-      const potBefore = hand.pot;
-      noteBetSizing(xid, amt, potBefore);
+      const potBefore = sizingPot(hand);
+      noteBetSizing(xid, amt, potBefore, hand);
       // `amt` is the "to $Y" figure: the raiser's TOTAL for this street, not
       // what this line added. Chips they already had in on the street — a
       // blind, a limp, the open they are now 4-betting over — were counted
@@ -5449,8 +5449,8 @@
     if (type === 'allin') {
       const xid = nameToXidGuess(cleanName(m[1]));
       const amt = logAmount(m[2], hand);
-      const potBefore = hand.pot;
-      if (amt) { noteBetSizing(xid, amt, potBefore); addContribution(hand, xid, amt); }
+      const potBefore = sizingPot(hand);
+      if (amt) { noteBetSizing(xid, amt, potBefore, hand); addContribution(hand, xid, amt); }
       recordStreetAction(xid, 'raise', hand);
       logAction(hand, xid, 'all-in', amt, { p: betSizePctOf(amt, potBefore) });
       markAsPreflopRaiseAction(xid, hand);
@@ -5621,7 +5621,14 @@
     if (arr.length > TEXTURE_BET_HISTORY_MAX) arr.shift();
   }
 
-  function noteBetSizing(xid, amt, potBefore) {
+  // POSTFLOP only (v1.116.0). Preflop raises were in this window too, sized
+  // against the blinds: an ordinary open to 3bb into 1.5bb reads 200%, so a
+  // player's "typically bets X% of pot" and the oversized/polarised read
+  // that hangs off it were inflated by their opens. The per-action `p` is
+  // still recorded on every street; only the sizing-habit window is
+  // postflop.
+  function noteBetSizing(xid, amt, potBefore, hand) {
+    if (hand && hand.street === 'preflop') return;
     const sizePct = betSizePctOf(amt, potBefore);
     if (sizePct == null) return;
     const p = getPlayer(xid);
@@ -5635,6 +5642,16 @@
   // ACTION (rounded, on the action record itself via logAction's `extra`)
   // rather than only ever summed — noteBetTexture needs to know what a
   // SPECIFIC bet cost, at settlement, without replaying the whole pot.
+  // Was the start of this hand seen, so its pot is whole? A hand joined part
+  // way (after a reload, or a table move) is missing the chips that went in
+  // before, and every bet in it would measure too big against that pot.
+  function handPotKnown(hand) {
+    return !!(hand && (hand.gameId || hand.g
+      || (hand.actions || []).some((a) => a && (a.a === 'bb' || a.a === 'sb'))));
+  }
+  // The pot a bet is sized against: 0, meaning "not sized", when it is short.
+  function sizingPot(hand) { return handPotKnown(hand) ? hand.pot : 0; }
+
   function betSizePctOf(amt, potBefore) {
     return (amt && potBefore > 0) ? Math.round((amt / potBefore) * 100) : null;
   }
@@ -6272,6 +6289,12 @@
     // From the finished action list — see barrelEventsFor.
     noteBarrels(hand.actions, (xid) => getPlayer(xid));
 
+    // A pot is never smaller than what was won from it (v1.116.0). The log
+    // pot misses whatever went in before a hand joined part way, and History
+    // printed "pot $8.75M ... wins $12.5M". P/L reads the winner lines, so
+    // only the recorded figure was wrong.
+    const wonTotal = (hand.winners || []).reduce((n, w) => n + ((w && w.amount) || 0), 0);
+    if (wonTotal > hand.pot) hand.pot = wonTotal;
     recordHandHistory(hand);
     saveStore();
     finalizeHand();
@@ -8502,6 +8525,70 @@
     };
     saveStore();
     return STORE.coreLossRepaired;
+  }
+
+  // Once, from init (v1.116.0). Three residues the fixes in this version stop
+  // at the source:
+  // - Counters ahead of their denominators. VPIP, WTSD and the fold-to-3-bet
+  //   and fold-to-c-bet counts are taken live, as the action happens; hands
+  //   and those opportunities at settlement. A hand cut off by the page
+  //   closing kept the first and lost the second, leaving records reading
+  //   more VPIP than hands. Each denominator is raised to at least its count:
+  //   those hands and spots did happen.
+  // - Bet-sizing windows held preflop raises (see noteBetSizing). Each window
+  //   is rebuilt from stored hands, postflop bets in hands whose start was
+  //   seen, oldest first, to its cap. A player with none stored gets an empty
+  //   window, and the sizing read waits for BET_SIZE_MIN new bets rather than
+  //   quoting a figure built from opens.
+  // - Stored pots smaller than what was won from them.
+  function repairCountsAndSizing() {
+    if (STORE.countsSizingRepaired) return null;
+    const res = { players: 0, windows: 0, pots: 0, at: Date.now() };
+    const sizes = {};
+    (STORE.hands || []).slice().reverse().forEach((h) => {
+      if (!h || !handPotKnown(h)) return;
+      (h.actions || []).forEach((a) => {
+        if (!a || a.s === 'preflop' || typeof a.p !== 'number') return;
+        if (a.a !== 'bet' && a.a !== 'raise' && a.a !== 'all-in') return;
+        (sizes[a.x] = sizes[a.x] || []).push(a.p);
+      });
+    });
+    Object.keys(STORE.players).forEach((xid) => {
+      const p = STORE.players[xid];
+      if (!p) return;
+      let changed = false;
+      const floor = Math.max(p.vpip || 0, p.wtsd || 0);
+      if ((p.hands || 0) < floor) { p.hands = floor; changed = true; }
+      if ((p.foldTo3BetOpp || 0) < (p.foldTo3BetMade || 0)) { p.foldTo3BetOpp = p.foldTo3BetMade; changed = true; }
+      if ((p.foldToCbetOpp || 0) < (p.foldToCbetMade || 0)) { p.foldToCbetOpp = p.foldToCbetMade; changed = true; }
+      if (changed) res.players += 1;
+      const w = (sizes[xid] || []).slice(-BET_SIZE_HISTORY_MAX);
+      if (Array.isArray(p.betSizes) && p.betSizes.length + w.length) {
+        if (p.betSizes.join() !== w.join()) res.windows += 1;
+        p.betSizes = w;
+      }
+      markPlayerDirty(xid);
+    });
+    STORE.hands = (STORE.hands || []).map((h) => {
+      if (!h) return h;
+      const won = (h.winners || []).reduce((n, w) => n + ((w && w.amount) || 0), 0);
+      if (!(won > (h.pot || 0))) return h;
+      res.pots += 1;
+      return { ...h, pot: won };   // a new object: handShardMemo keys on it
+    });
+    if (res.pots) dirtyHands = true;
+    STORE.countsSizingRepaired = res;
+    saveStore();
+    return res;
+  }
+
+  // Write now, not after saveStore's debounce: for the moment the page is
+  // going away, when a timer may never fire. Same guard as every write path.
+  function flushNow() {
+    if (storeLoadFailed) return;
+    dirtyCore = true;
+    if (pdaBackend) { flushShardsAsync(); return; }
+    try { flushShards(false); } catch (e) { /* the next load replays nothing worse */ }
   }
 
   // Hand category of hole+board at a given point in the hand, {r,s} numeric
@@ -17363,6 +17450,8 @@
     } else L.push('core-loss repair: ' + (clr ? 'not needed' : 'not run'));
     L.push('core record: ' + (coreRecovery ? `MISSING at load, ${coreRecovery.from === 'backup' ? 'restored from backup copy' : 'NO BACKUP - started from defaults'}` : 'read normally')
       + '   backup copy: ' + (coreBakChars ? coreBakChars + ' chars' : 'none yet'));
+    const csr = STORE.countsSizingRepaired;
+    L.push('counts/sizing repair: ' + (csr ? `${csr.players} record(s) with counts ahead of hands fixed, ${csr.windows} sizing window(s) rebuilt postflop-only, ${csr.pots} stored pot(s) raised to what was won` : 'not run'));
     const pm = STORE.pseudoMerged;
     L.push('name: record merge: ' + (pm ? `${pm.players} merged into real records, ${pm.hands} stored hand(s) re-keyed` : 'not run')
       + '   name: records now: ' + Object.keys(STORE.players).filter((k) => k.indexOf('name:') === 0).length
@@ -18267,6 +18356,9 @@
       repairHeroShowdowns,
       repairStaleShowdowns,
       repairCoreLoss,
+      repairCountsAndSizing,
+      handPotKnown,
+      flushNow,
       coreLossSignature,
       mergeExistingPseudoRecords,
       mergePseudoPlayer,
@@ -18444,6 +18536,18 @@
     // stored hands held at the time, which the merge then re-keys.
     repairCoreLoss();
     mergeExistingPseudoRecords();
+    repairCountsAndSizing();
+    // Leaving the page settles the hand in progress, so the live counters
+    // already taken for it get their hands and opportunities too, and saves
+    // at once (v1.116.0). Hiding the page (switching apps) only saves: the
+    // hand may still be running when you come back.
+    window.addEventListener('pagehide', () => {
+      try { if (currentHand && handWasObserved(currentHand)) applyHandResultsAndReset(); } catch (e) { /* save anyway */ }
+      flushNow();
+    });
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') flushNow();
+    });
     // Discards affiliation timestamps written while the transport was broken,
     // so the badges do not stay dead for up to 24h after the fix. Once only.
     repairAffiliationCache();

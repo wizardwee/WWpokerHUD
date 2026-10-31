@@ -2985,6 +2985,28 @@ merge, because the double count was keyed by the ids hands held then.
 backfills run twice. On the backup: −$126M/297 hands → +$19.5B/20,000 hands;
 12,161 board-texture actions and 350 barrel spots taken back out.
 
+## Bet sizing is postflop, and live counts need their settlement (v1.116.0)
+
+**`betSizes` (the "typically bets X% of pot" window) is POSTFLOP only.** It
+held preflop raises too, sized against the blinds — an open to 3bb reads 200% —
+so the oversized read fired for 37% of players; on clean data it fires for 5%,
+and its 85/40 bars sit at the pool's p90/p10, so they were kept. The per-action
+`a.p` is still recorded on every street. A hand whose start was not seen
+(`handPotKnown`: game id or a blind line) is not sized at all: its pot is short.
+
+**Counters taken live run ahead of denominators taken at settlement** — VPIP,
+WTSD, fold-to-3-bet/c-bet are counted as the action happens; hands and those
+opportunities when the hand settles. A hand cut off by the page closing kept
+the first and lost the second. `pagehide` now settles the hand in progress and
+`flushNow()`s (no debounce; same `storeLoadFailed` guard); `visibilitychange`
+to hidden only flushes, because switching apps does not end the hand. Adding a
+live counter whose denominator is counted at settlement inherits this.
+
+`repairCountsAndSizing` (init, once) raised each denominator to its count,
+rebuilt every sizing window from stored hands, and raised stored pots to what
+was won from them (settlement now floors the pot the same way).
+`test/counts-sizing.test.js`.
+
 ## Feature use is counted on the device (v1.92.0)
 
 `STORE.usage` counts panel opens, taps on the HUD's own controls, a few

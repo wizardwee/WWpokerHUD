@@ -9,6 +9,32 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.116.0
+Bet sizing reads postflop bets only; cut-off hands count.
+
+- **The sizing read was mostly preflop opens.** `noteBetSizing` put every bet
+  and raise in the window, preflop included, sized against the blinds (an open
+  to 3bb reads 200%). On the user's backup the "oversized, usually value" read
+  fired for 211 of 563 eligible players (37%); rebuilt postflop-only it fires
+  for 4 of 73 (5%), with the pool's p10/p90 at 40/75%, so the 85/40 bars stay.
+  Rukinos 98.5% -> 60%, Beltalowda 141% -> 75%. The v1.115.0 review's ">2000%
+  sizes" finding was wrong about the cause: those were real preflop shoves in
+  fully seen hands, and are now simply out of the postflop window.
+- **A hand whose start was not seen is not sized** (`handPotKnown`): its pot
+  misses whatever went in before.
+- **Leaving the page settles the hand in progress and saves at once.** VPIP,
+  WTSD and the fold-to-3-bet/c-bet counts are taken as the action happens;
+  hands and opportunities at settlement. A hand cut off by closing the page
+  kept the first and lost the second (13 records read more VPIP than hands).
+  `pagehide` settles and `flushNow()`s; hiding the page only saves.
+- **A recorded pot is never below what was won from it** (165 stored hands
+  read e.g. "pot $8.75M ... wins $12.5M" after a mid-hand join). P/L was
+  unaffected; it reads the winner lines.
+- **Once** (`repairCountsAndSizing`): each denominator raised to its count (19
+  records), every sizing window rebuilt from stored hands, postflop and
+  start-seen only (players without 12 such bets stored wait for new ones
+  before a sizing read), and stored pots raised. `test/counts-sizing.test.js`.
+
 ## 1.115.1
 A gist sync no longer brings merged duplicates back.
 
