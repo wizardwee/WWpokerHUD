@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.116.0
+// @version      1.117.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,12 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.117.0 - All-in raises are read as the amount added.
+ *            - Torn writes a shove as "raised $X" with no "to", $X being
+ *              what it added. It was read as the total, so every shove was
+ *              stored short and a shove for less read as a smaller raise.
+ *            - A shove that does not top the bet faced is now a call.
+ *            - Hands already stored keep their old figures.
  * 1.116.0 - Bet sizing reads postflop bets only; cut-off hands count.
  *            - "Typically bets X% of pot" included preflop raises, so the
  *              "oversized" read fired for 37% of players (now 5%).
@@ -27,18 +33,6 @@
  * 1.115.1 - A gist sync no longer brings merged duplicates back.
  *            - The gist holds the store from before v1.115.0's merge until
  *              the next push; a pull re-added all 403 `name:` records.
- * 1.115.0 - Table moves, a lost settings record, and duplicate players.
- *            - Moving tables no longer replays the new table's log into
- *              your old hand (one stored hand had 18 players and a $1.39B
- *              pot); those lines also created most `name:` duplicates.
- *            - Duplicate `name:` records are merged into the real player,
- *              now and whenever a seat later names them.
- *            - Settings, lifetime P/L and session are backed up; a load
- *              that comes back without them restores the copy instead of
- *              starting over (this happened on 27 Oct).
- *            - Once: lifetime P/L is rebuilt from the P/L log (shown as
- *              "Since 12 Sep"), and board-texture and barrel counts
- *              counted twice that day are taken back out.
  */
 
 /*
@@ -80,7 +74,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.116.0';
+  const HUD_VERSION = '1.117.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -4114,7 +4108,14 @@
     // so match this shape ahead of the generic raise below, which would
     // otherwise capture the increment and understate every raise.
     { type: 'raise', re: /^(.+?)\s+raise[sd]?\s+\$?[\d,]+(?:\.\d+)?(?:\s*BB|[kmb])?\s+to\s+\$?([\d,]+(?:\.\d+)?(?:\s*BB|[kmb]\b)?)/i },
-    { type: 'raise', re: /^(.+?)\s+raise[sd]?\b(?:\s+to)?(?:\s*\$?([\d,]+(?:\.\d+)?(?:\s*BB|[kmb]\b)?))?/i },
+    { type: 'raise', re: /^(.+?)\s+raise[sd]?\s+to\s+\$?([\d,]+(?:\.\d+)?(?:\s*BB|[kmb]\b)?)/i },
+    // An ALL-IN raise has no "to": Torn writes "raised $93,000,000", and the
+    // figure is what the shove ADDED, not the street total (confirmed by the
+    // user, v1.117.0). Read as a total it understated every shove by the chips
+    // already in, and a shove for less than the bet faced read as a raise to
+    // LESS than the last one. dispatchLogEvent works the total out, and calls a
+    // shove that does not top the bet what it is: a call for less.
+    { type: 'raiseBy', re: /^(.+?)\s+raise[sd]?\b(?:\s*\$?([\d,]+(?:\.\d+)?(?:\s*BB|[kmb]\b)?))?/i },
     { type: 'bet', re: /^(.+?)\s+bet(?:s|ted)?\b(?:\s*\$?([\d,]+(?:\.\d+)?(?:\s*BB|[kmb]\b)?))?/i },
     // Torn writes "The flop:  5♣, 7♦, A♦" — the definite article and the double
     // space both defeated an anchor on the bare street name, so the board was
@@ -5403,14 +5404,23 @@
       return;
     }
 
+    if (type === 'raiseBy') {
+      const xid = nameToXidGuess(cleanName(m[1]));
+      const added = logAmount(m[2], hand);
+      const street = hand.streetContributions || {};
+      const total = (street[xid] || 0) + added;
+      let facing = 0;
+      Object.keys(street).forEach((k) => { if (k !== xid && street[k] > facing) facing = street[k]; });
+      // Not above the bet faced: all-in for a call or less. Counting it as a
+      // raise would credit a PFR/3-bet the player never made.
+      if (added && total <= facing) { recordCall(xid, added, hand); return; }
+      recordRaise(xid, total, hand);
+      return;
+    }
+
     if (type === 'call') {
       const xid = nameToXidGuess(cleanName(m[1]));
-      const amt = logAmount(m[2], hand);
-      addContribution(hand, xid, amt);
-      recordStreetAction(xid, 'call', hand);
-      logAction(hand, xid, 'call', amt);
-      maybeCountVpip(xid, hand);
-      maybeCountLimp(xid, hand);
+      recordCall(xid, logAmount(m[2], hand), hand);
       return;
     }
 
@@ -5429,20 +5439,7 @@
     }
 
     if (type === 'raise') {
-      const xid = nameToXidGuess(cleanName(m[1]));
-      const amt = logAmount(m[2], hand);
-      const potBefore = sizingPot(hand);
-      noteBetSizing(xid, amt, potBefore, hand);
-      // `amt` is the "to $Y" figure: the raiser's TOTAL for this street, not
-      // what this line added. Chips they already had in on the street — a
-      // blind, a limp, the open they are now 4-betting over — were counted
-      // when they went in, so only the difference is new money. Adding the
-      // whole figure charged those chips twice: a big-blind raise to 7.5M
-      // read as 10M, and hero's P/L and every opponent's net moved with it.
-      addContribution(hand, xid, Math.max(0, amt - ((hand.streetContributions || {})[xid] || 0)));
-      recordStreetAction(xid, 'raise', hand);
-      logAction(hand, xid, 'raise', amt, { p: betSizePctOf(amt, potBefore) });
-      markAsPreflopRaiseAction(xid, hand);
+      recordRaise(nameToXidGuess(cleanName(m[1])), logAmount(m[2], hand), hand);
       return;
     }
 
@@ -5654,6 +5651,32 @@
 
   function betSizePctOf(amt, potBefore) {
     return (amt && potBefore > 0) ? Math.round((amt / potBefore) * 100) : null;
+  }
+
+  // One place each for a call and a raise, because an all-in line ("raised
+  // $X", no "to") can be either once its total is worked out.
+  function recordCall(xid, amt, hand) {
+    addContribution(hand, xid, amt);
+    recordStreetAction(xid, 'call', hand);
+    logAction(hand, xid, 'call', amt);
+    maybeCountVpip(xid, hand);
+    maybeCountLimp(xid, hand);
+  }
+
+  // `amt` is the raiser's TOTAL for this street.
+  function recordRaise(xid, amt, hand) {
+    const potBefore = sizingPot(hand);
+    noteBetSizing(xid, amt, potBefore, hand);
+    // `amt` is the "to $Y" figure: the raiser's TOTAL for this street, not
+    // what this line added. Chips they already had in on the street — a
+    // blind, a limp, the open they are now 4-betting over — were counted
+    // when they went in, so only the difference is new money. Adding the
+    // whole figure charged those chips twice: a big-blind raise to 7.5M
+    // read as 10M, and hero's P/L and every opponent's net moved with it.
+    addContribution(hand, xid, Math.max(0, amt - ((hand.streetContributions || {})[xid] || 0)));
+    recordStreetAction(xid, 'raise', hand);
+    logAction(hand, xid, 'raise', amt, { p: betSizePctOf(amt, potBefore) });
+    markAsPreflopRaiseAction(xid, hand);
   }
 
   function addContribution(hand, xid, amt) {

@@ -9,9 +9,10 @@
 //
 // Torn's wording, confirmed by the user (v1.92.1):
 //   - "called $X" is the amount ADDED, not the street total.
-//   - "raised $X to $Y": $Y is the street total. There is no separate all-in
-//     line — a shove is just a raise to the player's stack, so it is generated
-//     here the same way, at stack-sized amounts.
+//   - "raised $X to $Y": $Y is the street total.
+//   - An ALL-IN raise has no "to": "raised $X", and $X is what the shove
+//     ADDED (v1.117.0). Generated both as a real raise and as a shove for
+//     less than the bet faced, which is a call for less, not a raise.
 //
 // What this does NOT cover: the phantom placeholder hand. Its dealt-in list
 // is a seat snapshot and the harness has no seats, so the placeholder here
@@ -52,6 +53,8 @@ function genHand(g, rnd, BB = 2500000, fmt = usd) {
   const contrib = {};
   order.forEach((p) => { contrib[p] = 0; });
   const inHand = new Set(order);
+  const allIn = new Set();
+  const canAct = (q) => inHand.has(q) && !allIn.has(q);
   L.push(`${order[0]} posted small blind ${fmt(BB / 2)}`); contrib[order[0]] = BB / 2;
   L.push(`${order[1]} posted big blind ${fmt(BB)}`); contrib[order[1]] = BB;
 
@@ -66,23 +69,29 @@ function genHand(g, rnd, BB = 2500000, fmt = usd) {
     order.forEach((p) => { street[p] = 0; });
     if (si === 0) { street[order[0]] = BB / 2; street[order[1]] = BB; }
     const actOrder = si === 0 ? order.slice(2).concat(order.slice(0, 2)) : order.slice();
-    let toAct = actOrder.filter((p) => inHand.has(p));
+    let toAct = actOrder.filter(canAct);
     let raises = 0;
     const raiseTo = (p, to) => {
       L.push(`${p} raised ${fmt(to - bet)} to ${fmt(to)}`);
       contrib[p] += to - street[p]; street[p] = to; bet = to; raises++;
-      toAct = actOrder.filter((q) => inHand.has(q) && q !== p);
+      toAct = actOrder.filter((q) => canAct(q) && q !== p);
+    };
+    const shove = (p, add) => { // Torn's all-in line: the amount ADDED, no "to"
+      L.push(`${p} raised ${fmt(add)}`);
+      contrib[p] += add; street[p] += add; allIn.add(p);
+      if (street[p] > bet) { bet = street[p]; raises++; toAct = actOrder.filter((q) => canAct(q) && q !== p); }
     };
     for (let guard = 0; toAct.length && guard < 60; guard++) {
       const p = toAct.shift();
-      if (!inHand.has(p)) continue;
+      if (!canAct(p)) continue;
       const owe = bet - street[p];
       const r = rnd();
       if (owe > 0) {
         if (r < 0.35) { L.push(`${p} folded`); inHand.delete(p); }
         else if (r < 0.82 || raises >= 3) { L.push(`${p} called ${fmt(owe)}`); street[p] += owe; contrib[p] += owe; }
-        else if (r < 0.95) raiseTo(p, bet * 3);
-        else raiseTo(p, bet + BB * (20 + Math.floor(rnd() * 60))); // a shove: still a raise line
+        else if (r < 0.92) raiseTo(p, bet * 3);
+        else if (r < 0.96 || owe <= BB / 2) shove(p, owe + BB * (20 + Math.floor(rnd() * 60)));
+        else shove(p, (BB / 2) * (1 + Math.floor(rnd() * (owe / (BB / 2) - 1)))); // all-in for less
       } else if (r < 0.6) {
         L.push(`${p} checked`);
       } else if (si === 0) {
@@ -90,7 +99,7 @@ function genHand(g, rnd, BB = 2500000, fmt = usd) {
       } else {
         const amt = BB * 2;
         L.push(`${p} bet ${fmt(amt)}`); contrib[p] += amt; street[p] = amt; bet = amt; raises++;
-        toAct = actOrder.filter((q) => inHand.has(q) && q !== p);
+        toAct = actOrder.filter((q) => canAct(q) && q !== p);
       }
       if (inHand.size === 1) { done = true; break; }
     }

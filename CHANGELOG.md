@@ -9,6 +9,32 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.117.0
+All-in raises are read as the amount added.
+
+- **Reported from History:** a hand showed `WinnerWinnerMO raise $426.8M` right
+  after `Pete raise $741.3M`, a raise to less than the bet it faced, and a
+  `call $85.5M` that didn't square with the `raise $93M` before it.
+- **Cause:** Torn writes an all-in raise as `raised $X` with no "to", and `$X`
+  is what the shove ADDED (confirmed by the user). The no-"to" fallback pattern
+  read it as the street total, so `recordRaise` subtracted the chips already in
+  a second time: every shove was stored and added to the pot short. The
+  reported hand's pot ($1.4B) and its two winners ($1.1B, $287.8M) add up
+  exactly with the added-amount reading (95.5M / 775.1M / 522.3M).
+- **Fix:** a new `raiseBy` pattern catches `raised $X` (no "to"), and the total
+  is worked out as the chips already in on the street plus `$X`. `raises to $X`
+  is still read as a total.
+- **A shove for less than the bet faced is a call.** Torn still says "raised",
+  but counting it as a raise credited a PFR/3-bet that never happened. It is now
+  recorded as a call for the amount added.
+- `recordCall`/`recordRaise` are shared by the plain and all-in lines.
+  `test/allin-raise.test.js` replays the reported hand; the settlement fuzz now
+  generates Torn's real all-in wording, including shoves for less, and fails 12
+  assertions with the old reading.
+- **Hands already stored keep their old figures.** The settled P/L is unaffected
+  for hands hero folded. For hands where hero shoved or called a shove, the
+  misread figures can't be told apart afterwards, so they stay as they are.
+
 ## 1.116.0
 Bet sizing reads postflop bets only; cut-off hands count.
 

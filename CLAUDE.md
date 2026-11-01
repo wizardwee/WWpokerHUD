@@ -442,10 +442,13 @@ of #1 is still true and worth knowing: `hand.pot` (log-summed, not the DOM
 figure) is what P/L falls back to when a winner line carries no amount.
 
 3. ~~All-in is counted as a raise~~ — **closed v1.92.1, by the user's word
-   rather than a fix.** Torn writes no all-in line: a shove is `raised $X to
-   $Y` and an all-in call is `called $X`. So a call is never counted as a raise,
-   and the hazard this described does not occur. The `allin` pattern stays as a
-   fallback for wording nobody has seen.
+   rather than a fix.** Torn writes no all-in line, but **a shove is `raised
+   $X` with no "to", and `$X` is the amount ADDED** (corrected v1.117.0 — the
+   v1.92.1 note said `raised $X to $Y`, and every shove was stored short by the
+   chips already in). The `raiseBy` pattern works the total out; a shove that
+   does not top the bet faced is Torn's "raised" for an all-in for LESS, and is
+   recorded as a call. The `allin` pattern stays as a fallback for wording
+   nobody has seen. `test/allin-raise.test.js` replays the hand that showed it.
 5. ~~`tableMax` only drives the equity quote~~ — **closed v1.99.0.** The quote
    has used the seats seen each hand since v0.18.0; the setting only reached a
    fallback, so it was removed (`TABLE_SEATS_FALLBACK` = 9). A test fails if
@@ -1703,8 +1706,8 @@ hero's P/L on every such hand. `a.amt` in `hand.actions` still stores `$Y`
 (History prints "raise $Y"); only the money added to the pot is the delta.
 
 **`called $X` is the amount ADDED — confirmed by the user (v1.92.1)**, so calls
-are added as written. There is no all-in line: a shove is a raise to the
-stack. `test/bb-display`'s fixture (the BB "called $22,500,000" into a raise to
+are added as written. There is no all-in line: a shove is `raised $X` with
+NO "to", `$X` being what it ADDED (v1.117.0; see finding #3). `test/bb-display`'s fixture (the BB "called $22,500,000" into a raise to
 $22.5M) is therefore not real wording and says nothing about semantics.
 
 **How these were found: an end-to-end fuzz, not review.** Random legal hands
