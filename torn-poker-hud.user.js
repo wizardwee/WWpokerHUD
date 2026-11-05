@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.119.0
+// @version      1.120.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,11 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.120.0 - Rebuys in the last 4 hours, inferred from stacks.
+ *            - Torn logs no rebuy, so a stack rise of 10bb+ that no pot won
+ *              and no returned bet explains is counted, one sweep late.
+ *            - Stats tab "Rebuys 4h"; deep scan lists who reloaded.
+ *            - Only what the HUD watched: a floor.
  * 1.119.0 - Opening by position, steal, and fold to steal.
  *            - Stats tab: open-raise % when folded to, early/middle/late;
  *              steal % (CO/BTN/SB); how often a blind folds to a steal.
@@ -32,12 +37,6 @@
  *              only for hands you took part in.
  *            - Once: those cards are removed from stored hands and your
  *              showdown stats rebuilt from the hands you played.
- * 1.117.0 - All-in raises are read as the amount added.
- *            - Torn writes a shove as "raised $X" with no "to", $X being
- *              what it added. It was read as the total, so every shove was
- *              stored short and a shove for less read as a smaller raise.
- *            - A shove that does not top the bet faced is now a call.
- *            - Hands already stored keep their old figures.
  */
 
 /*
@@ -79,7 +78,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.119.0';
+  const HUD_VERSION = '1.120.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -4843,7 +4842,125 @@
       }
       dirty = true;
     });
+    if (noteRebuys(stacks, bb, now)) dirty = true;
     if (dirty) saveStore();
+  }
+
+  // --- Rebuys, inferred from stacks (v1.120.0) ------------------------------
+  //
+  // Asked for: how many times a player has bought in over the last 4 hours.
+  // Torn writes no log line for a rebuy or top-up (confirmed by the user), so
+  // it is inferred: a stack only ever GROWS by winning a pot or by a bet
+  // coming back, so a rise neither explains is chips added from outside.
+  //
+  // - Judged per sweep against the last stack read for that player (p.rb,
+  //   persisted so a reload does not lose the baseline). A rise of
+  //   REBUY_MIN_BB or more is a candidate.
+  // - Explained, and not counted: the player won the current hand or the one
+  //   settled before it; or the rise is no more than the uncalled excess the
+  //   hand's biggest contributor gets back (a shove bigger than the call),
+  //   which is the only way a loser's stack goes up.
+  // - Judged ONE SWEEP LATE: the DOM can show a pot awarded before the
+  //   log's win line is parsed, so a fresh candidate waits a sweep for the
+  //   win to land before it counts.
+  // - A bust: the seat shows $0 or empties, which no read reports, so the
+  //   last read would still be the stack before the all-in. At settlement a
+  //   player who put chips in, did not win and now shows no stack is set to 0,
+  //   so the rebuy that follows is measured from nothing.
+  // - A first sit-down is a baseline, never a rebuy: only chips added AFTER
+  //   we have seen them seated count. After STACK_SESSION_GAP_MS unseen, or a
+  //   blind change, the baseline restarts.
+  //
+  // Counts only what this HUD watched, so it is a floor - the UI says so.
+  // Stored as p.rebuys, [time, size in bb] pairs, capped at REBUYS_MAX.
+  const REBUY_MIN_BB = 10;
+  const REBUY_WINDOW_MS = 4 * 60 * 60 * 1000;
+  const REBUYS_MAX = 20;
+  const pendingRebuys = {};
+  let lastSettledRebuyCtx = null;   // { winners: [xid], excess: {xid: chips} }
+
+  // What a hand's biggest contributor gets back uncalled: their contribution
+  // above the second-largest. Every other player gets nothing back.
+  function uncalledExcess(contributions) {
+    const ent = Object.keys(contributions || {}).map((x) => [x, contributions[x] || 0])
+      .sort((a, b) => b[1] - a[1]);
+    if (!ent.length) return {};
+    const second = ent.length > 1 ? ent[1][1] : 0;
+    return ent[0][1] > second ? { [ent[0][0]]: ent[0][1] - second } : {};
+  }
+
+  function rebuyCtxOf(hand) {
+    return {
+      winners: ((hand && hand.winners) || []).map((w) => String(w && w.xid)),
+      excess: uncalledExcess(hand && hand.contributions),
+    };
+  }
+
+  function rebuyExplained(xid, rise) {
+    const x = String(xid);
+    return [currentHand ? rebuyCtxOf(currentHand) : null, lastSettledRebuyCtx].some((c) => c
+      && (c.winners.indexOf(x) >= 0 || rise <= (c.excess[x] || 0) + 1));
+  }
+
+  function noteRebuys(stacks, bb, now) {
+    let changed = false;
+    if (!(bb > 0)) return false;
+    Object.keys(stacks).forEach((xid) => {
+      const v = stacks[xid];
+      if (!(v > 0)) return;
+      const p = getPlayer(xid);
+      const rb = p.rb;
+      const fresh = !rb || (now - (rb.t || 0)) > STACK_SESSION_GAP_MS || rb.bb !== bb;
+      if (!fresh) {
+        const rise = v - rb.v;
+        const pend = pendingRebuys[xid];
+        if (pend) {
+          delete pendingRebuys[xid];
+          if (!rebuyExplained(xid, pend.rise)) {
+            if (!Array.isArray(p.rebuys)) p.rebuys = [];
+            p.rebuys.push([pend.at, Math.round(pend.rise / bb)]);
+            if (p.rebuys.length > REBUYS_MAX) p.rebuys.splice(0, p.rebuys.length - REBUYS_MAX);
+            changed = true;
+          }
+        } else if (rise >= REBUY_MIN_BB * bb && !rebuyExplained(xid, rise)) {
+          // Hold the baseline: the next sweep judges this rise again.
+          pendingRebuys[xid] = { rise, at: now };
+          return;
+        }
+      }
+      p.rb = { v, t: now, bb };
+      changed = true;
+    });
+    return changed;
+  }
+
+  // At settlement: remember who won and who got chips back, for the sweeps
+  // after the hand resets; and set a busted player's baseline to 0.
+  function noteRebuySettlement(hand) {
+    lastSettledRebuyCtx = rebuyCtxOf(hand);
+    const stacks = readAllStacks();
+    Object.keys(hand.contributions || {}).forEach((xid) => {
+      if (!(hand.contributions[xid] > 0) || stacks[xid] > 0) return;
+      if (lastSettledRebuyCtx.winners.indexOf(String(xid)) >= 0) return;
+      const p = STORE.players[xid];
+      if (p && p.rb) { p.rb = { ...p.rb, v: 0 }; markPlayerDirty(xid); }
+    });
+  }
+
+  // Rebuys within REBUY_WINDOW_MS: { n, bb } (bb summed).
+  function recentRebuys(p, now) {
+    const t0 = (now || Date.now()) - REBUY_WINDOW_MS;
+    const rows = (Array.isArray(p && p.rebuys) ? p.rebuys : []).filter((r) => r && r[0] >= t0);
+    return { n: rows.length, bb: rows.reduce((a, r) => a + (r[1] || 0), 0) };
+  }
+
+  function rebuyRowHtml(p) {
+    const r = recentRebuys(p);
+    if (!r.n && !(Array.isArray(p && p.rebuys) && p.rebuys.length)) return '';
+    return '<tr title="Chips added after they were already seated - a rebuy after busting or a top-up - inferred from their stack, because Torn logs neither. Only what this HUD watched, so the real number can be higher.">'
+      + '<td class="tph-stat-l">Rebuys 4h</td>'
+      + `<td class="tph-stat-v"><b>${r.n}</b></td>`
+      + `<td class="tph-stat-n"><span class="tph-stat-norm">${r.n ? r.bb + 'bb added' : 'none lately'}</span></td></tr>`;
   }
 
   // How far below their session high this player is sitting, in big blinds.
@@ -5130,7 +5247,7 @@
     window: ['betSizes', 'recent', 'sdRecent', 'recentTables'],
     latest: ['lastSeen'],
     manual: ['tag', 'notes'],
-    real: ['xid', 'name', 'stack', 'lastBigLossHand', 'factionId', 'factionName', 'spouseXid',
+    real: ['xid', 'name', 'stack', 'rb', 'rebuys', 'lastBigLossHand', 'factionId', 'factionName', 'spouseXid',
       'affilFetchedAt', 'sdSince'],
   };
 
@@ -6319,6 +6436,7 @@
     // From the finished action list — see barrelEventsFor.
     noteBarrels(hand.actions, (xid) => getPlayer(xid));
     notePositions(hand.actions, (xid) => getPlayer(xid));
+    noteRebuySettlement(hand);
 
     // A pot is never smaller than what was won from it (v1.116.0). The log
     // pot misses whatever went in before a hand joined part way, and History
@@ -15981,6 +16099,7 @@
               + `<i>pool</i> is this HUD's own measured average for that texture, not a published reference.</td></tr>`;
           })()}
           ${stackBarHtml(p)}
+          ${rebuyRowHtml(p)}
           ${(() => {
             const tabs = tablesPlayed(p);
             const recent = recentTablesOf(p);
@@ -17759,6 +17878,12 @@
         ? `your cards removed from ${shr.hands} hand(s) you were not in; showdowns rebuilt from ${shr.rebuilt} stored, ${shortAgo(shr.at)}`
         : `none found, ${shortAgo(shr.at)}`)
       : 'not run'));
+    {
+      const rebuyers = Object.keys(STORE.players).map((x) => [x, recentRebuys(STORE.players[x])])
+        .filter((e) => e[1].n > 0);
+      L.push(`rebuys (4h, inferred from stacks): ${rebuyers.length} player(s)`
+        + (rebuyers.length ? ' — ' + rebuyers.slice(0, 8).map((e) => `${playerDisplayName(e[0])} ${e[1].n}x/${e[1].bb}bb`).join(', ') : ''));
+    }
     const pbf = STORE.posBackfilled;
     L.push('position stats backfill: ' + (pbf && typeof pbf === 'object'
       ? `${pbf.hands} stored hand(s) placed, ${shortAgo(pbf.at)}` : (pbf ? 'done' : 'not run')));
@@ -18494,6 +18619,12 @@
       entryRelevance,
       buildCoachAdvice,
       trackStacks,
+      noteRebuys,
+      noteRebuySettlement,
+      recentRebuys,
+      rebuyRowHtml,
+      uncalledExcess,
+      REBUY_MIN_BB,
       stackSwingBB,
       stackBarHtml,
       BET_SIZE_MIN,

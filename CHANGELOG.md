@@ -9,6 +9,31 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.120.0
+Rebuys in the last 4 hours, inferred from stacks.
+
+- **Asked for:** the number of buy-ins a player has made in the last 4 hours.
+  Torn writes no log line for a rebuy or a top-up (confirmed by the user), so
+  it is inferred from stacks.
+- **Rule:** a stack only grows by winning a pot or by a bet coming back. Each
+  stack sweep compares a player's stack with the last one read; a rise of 10bb
+  or more that is not explained by a win (current hand, or the one just
+  settled) or by an uncalled excess returned to the hand's biggest contributor
+  is counted as chips added.
+- **Judged one sweep late**, because the table can show a pot awarded before
+  the log's win line is parsed.
+- **Bust then rebuy:** a seat at $0 or empty reports no stack, so the last read
+  was the stack before the all-in, and a same-size rebuy would read as no rise.
+  At settlement a player who put chips in, did not win and shows no stack is set
+  to 0.
+- A first sit-down is the baseline, never a rebuy; a gap past the 2-hour sitting
+  rule or a blind change restarts it.
+- Stored as `p.rebuys` (time, size in bb; last 20) and `p.rb` (baseline).
+  Stats tab row "Rebuys 4h" with the bb added; the deep scan lists players with
+  rebuys in the window. Counts only what the HUD watched, so it is a floor.
+- **Unconfirmed on the device.** `test/rebuys.test.js` drives the rule; whether
+  Torn's stack display behaves as assumed is what the scan line will show.
+
 ## 1.119.0
 Opening by position, steal, and fold to steal.
 

@@ -3010,6 +3010,29 @@ rebuilt every sizing window from stored hands, and raised stored pots to what
 was won from them (settlement now floors the pot the same way).
 `test/counts-sizing.test.js`.
 
+## Position stats and rebuys (v1.119.0, v1.120.0)
+
+**Positions come from the preflop action order, not the seat ring.**
+`positionEventsFor(actions)` places every dealt player: first actions in
+UTG..BTN order, then SB, then BB; a hand that does not add up is skipped, not
+guessed. One pure function serves settlement and the backfill, the barrel
+stat's discipline. Open-raise counts only when folded to (a limp ends the
+spot), steal is CO/BTN/SB opens, fold to steal needs no re-raise before the
+blind. No pool figure, so no verdict and no coach read yet: **measure the bars
+from the pool export before adding a read.**
+
+**Rebuys are inferred, because Torn logs none (confirmed by the user).** A
+stack grows only by a win or a returned bet, so `noteRebuys` counts a rise of
+`REBUY_MIN_BB`+ that neither explains — winners of the current hand or the one
+just settled, or the biggest contributor's uncalled excess (the only way a
+loser's stack rises). Three things hold it up: the judgement is **one sweep
+late**, because the DOM can show a pot awarded before the win line is parsed;
+a loser who now shows no stack is **set to 0 at settlement**, or a same-size
+rebuy after a bust reads as no rise; a first sit-down is a baseline, never a
+rebuy. Counts only what the HUD watched, a floor, 4h window by the user's
+choice. **Unconfirmed on the device**: the deep scan's `rebuys (4h...)` line
+should name someone you saw reload; a name you did not is a false positive.
+
 ## Feature use is counted on the device (v1.92.0)
 
 `STORE.usage` counts panel opens, taps on the HUD's own controls, a few
