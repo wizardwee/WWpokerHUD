@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.117.0
+// @version      1.118.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,14 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.118.0 - Hands you watched no longer show your cards.
+ *            - With no seat of yours, the card read fell back to any face-up
+ *              card on the page, so History printed "<you> shows" with the
+ *              winner's cards and they were banked as your showdown.
+ *            - Your cards are read only from your own seat; showdowns bank
+ *              only for hands you took part in.
+ *            - Once: those cards are removed from stored hands and your
+ *              showdown stats rebuilt from the hands you played.
  * 1.117.0 - All-in raises are read as the amount added.
  *            - Torn writes a shove as "raised $X" with no "to", $X being
  *              what it added. It was read as the total, so every shove was
@@ -30,9 +38,6 @@
  *            - Leaving the page settles and saves the hand in progress.
  *            - Once: impossible counts (more VPIP than hands) fixed, sizing
  *              rebuilt from stored hands, pots raised to what was won.
- * 1.115.1 - A gist sync no longer brings merged duplicates back.
- *            - The gist holds the store from before v1.115.0's merge until
- *              the next push; a pull re-added all 403 `name:` records.
  */
 
 /*
@@ -74,7 +79,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.117.0';
+  const HUD_VERSION = '1.118.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -6294,7 +6299,9 @@
     // 856 showdowns on a winning player, and the leak plan told them to fold
     // more rivers. Hero's cards are known all hand, so every showdown hero
     // reaches is banked from them, won or lost, unbiased.
-    if (!heroUnresolved() && hand.shownCards && Array.isArray(hand.heroCards)
+    // heroInHand (v1.118.0): a hand you watched from the rail has no
+    // showdown of yours in it, whatever card read reached hand.heroCards.
+    if (heroInHand && !heroUnresolved() && hand.shownCards && Array.isArray(hand.heroCards)
         && hand.heroCards.length === 2 && !hand.shownCards[heroXid] && reachedShowdown(hand, heroXid)) {
       hand.shownCards[heroXid] = hand.heroCards;
       if (hand.countedShowdown && !inSet(hand.countedShowdown, heroXid)) {
@@ -6433,7 +6440,10 @@
       winners: hand.winners,
       shown: hand.shown,
       shownVia: hand.shownVia || {},
-      heroCards: hand.heroCards || null,
+      // Only for a hand hero took part in (v1.118.0) - see heroTookPart.
+      heroCards: (hand.heroCards && (heroUnresolved() || heroTookPart({
+        players: Array.from(hand.dealtInXids), actions: hand.actions,
+      }, heroXid))) ? hand.heroCards : null,
       // Community cards as they stood at the end of the hand — was tracked
       // live on hand.board (see the flop/turn/river log handler) but never
       // persisted until v1.17.0 (for the replayer, removed in v1.79.0). A hand
@@ -6534,9 +6544,22 @@
     const cards = cardsGlyphText(h.heroCards);
     if (heroUnresolved()) return { where: 'line', cards };
     const hx = String(heroXid);
+    // A record from before v1.118.0 can carry somebody else's cards as
+    // hero's, read while watching. Not in the hand, not your cards.
+    if (!heroTookPart(h, hx)) return null;
     const shown = h.shown || {};
     if (Object.keys(shown).some((x) => String(x) === hx)) return null;
     return { where: reachedShowdown(h, hx) ? 'showdown' : 'line', cards };
+  }
+
+  // Was hero in this hand at all - dealt in, or acted? On a stored record
+  // (players/actions) or a live one adapted to that shape. The v1.118.0
+  // guard against hands watched from the rail: those have neither.
+  function heroTookPart(h, hx) {
+    if (!h || hx == null) return false;
+    const x = String(hx);
+    return (h.players || []).some((p) => String(p) === x)
+      || (h.actions || []).some((a) => a && String(a.x) === x);
   }
 
   // Did `xid` reach a showdown in this hand? Someone ELSE revealed, and they
@@ -8465,6 +8488,71 @@
     return !!p;
   }
 
+  // Once, from init (v1.118.0). Until then, watching a table read the
+  // winner's revealed cards as hero's (readHeroCards' document-wide
+  // fallback), so stored hands hero never sat in carry heroCards, History
+  // printed "<you> shows" in them, and since v1.103.0 each such showdown was
+  // banked into hero's range, W$SD and WTSD - with no hand to divide by.
+  //
+  // Which banked showdowns came from those hands cannot be told apart in the
+  // counters, so when any are found hero's showdown record is REBUILT from
+  // the stored hands hero took part in, oldest first, by the same rules
+  // settlement uses: a log reveal of hero, or hero's cards at a showdown
+  // hero reached. sdSince is set so WTSD reads over the same stored hands.
+  // A store with no such hand is left exactly as it is.
+  //
+  // Hands are replaced with NEW objects, not edited in place: handShardMemo
+  // keys the saved copy on the object (see repairStaleShowdowns).
+  function repairSpectatedHeroCards() {
+    if (STORE.spectatedHeroRepaired) return null;
+    const hx = STORE.hero && STORE.hero.xid;
+    const stored = STORE.hands || [];
+    const res = { hands: 0, rebuilt: 0, at: Date.now() };
+    if (hx) {
+      stored.forEach((h, i) => {
+        if (!h || !Array.isArray(h.heroCards) || !h.heroCards.length || heroTookPart(h, hx)) return;
+        stored[i] = { ...h, heroCards: null };
+        res.hands += 1;
+      });
+    }
+    const p = hx ? STORE.players[hx] : null;
+    if (res.hands && p) {
+      p.shownHands = {};
+      p.sdRecent = [];
+      p.wtsd = 0;
+      p.texture = {
+        drawBets: 0, drawSizes: [],
+        madeBets: 0, madeSizes: [],
+        bluffBets: 0, bluffSizes: [],
+        checkMade: 0,
+      };
+      let dealt = 0;
+      stored.filter(Boolean).slice().sort((a, b) => (a.t || 0) - (b.t || 0)).forEach((h) => {
+        if ((h.players || []).some((x) => String(x) === String(hx))) dealt += 1;
+        let cards = (h.shown && h.shown[hx]) ? parseCardsFromText(h.shown[hx]).slice(0, 2) : [];
+        if (cards.length !== 2 && heroTookPart(h, hx) && Array.isArray(h.heroCards)
+            && h.heroCards.length === 2 && reachedShowdown(h, hx)) cards = h.heroCards;
+        if (cards.length !== 2) return;
+        const { tier, limpRaised } = preflopTiersFromActions(h.actions);
+        noteShowdown(hx, cards, {
+          winners: h.winners || [],
+          countedPfr: new Set(Object.keys(tier)),
+          preflopTier: tier,
+          limpRaised,
+        });
+        noteBetTexture(hx, cards, h);
+        p.wtsd += 1;
+        res.rebuilt += 1;
+      });
+      p.sdSince = Math.max(0, (p.hands || 0) - dealt);
+      markPlayerDirty(hx);
+    }
+    STORE.spectatedHeroRepaired = res;
+    if (res.hands) dirtyHands = true;
+    saveStore();
+    return res;
+  }
+
   // "Lifetime", or "Since 12 Sep" once the core-loss repair rebuilt the
   // totals from the ledger: they cannot reach further back than its first row.
   function lifetimeLabel() {
@@ -10369,10 +10457,22 @@
     return out.slice(0, 5);
   }
 
+  // No seat of your own means you are not at the table, so you hold no cards
+  // (v1.118.0). The document-wide fallback used to run regardless, and while
+  // watching it read a showdown on someone else's seat as yours: History
+  // printed "Wonkawee shows A♠ K♠" (the winner's cards) in hands hero never
+  // sat in, and settlement banked them as hero's showdown. The fallback now
+  // also skips cards inside any other player's seat, for the same reason.
   function readHeroCards() {
     const seat = document.querySelector(SELECTORS.heroSeat);
-    let els = seat ? seat.querySelectorAll(SELECTORS.heroCards) : [];
-    if (!els.length) els = document.querySelectorAll(SELECTORS.heroCards);
+    if (!seat) return [];
+    let els = seat.querySelectorAll(SELECTORS.heroCards);
+    if (!els.length) {
+      els = Array.from(document.querySelectorAll(SELECTORS.heroCards)).filter((el) => {
+        const owner = el.closest ? el.closest(SELECTORS.seatContainer) : null;
+        return !owner || owner === seat;
+      });
+    }
     const cards = [];
     els.forEach((el) => { const c = parseCardEl(el); if (c) cards.push(c); });
     return cards.slice(0, 2);
@@ -17483,6 +17583,12 @@
     L.push('repeated-showdown repair: ' + (ssr && typeof ssr === 'object'
       ? `${ssr.reveals} reveal(s) removed from ${ssr.hands} stored hand(s), ${shortAgo(ssr.at)}`
       : 'not run'));
+    const shr = STORE.spectatedHeroRepaired;
+    L.push('watched-hand cards repair: ' + (shr && typeof shr === 'object'
+      ? (shr.hands
+        ? `your cards removed from ${shr.hands} hand(s) you were not in; showdowns rebuilt from ${shr.rebuilt} stored, ${shortAgo(shr.at)}`
+        : `none found, ${shortAgo(shr.at)}`)
+      : 'not run'));
     // A reveal that parses but carries no cards is invisible: it never reaches
     // the unmatched list, and the Range tab just stays empty. Print the raw
     // reveal rows so the wording and the card shape can both be checked.
@@ -18377,6 +18483,9 @@
       NOTABLE_PREFLOP_RAISE_BB,
       HISTORY_PINNED_CEILING,
       repairHeroShowdowns,
+      repairSpectatedHeroCards,
+      heroTookPart,
+      readHeroCards,
       repairStaleShowdowns,
       repairCoreLoss,
       repairCountsAndSizing,
@@ -18552,6 +18661,9 @@
     // After the seeding above, which would otherwise refill hero's window
     // from the same biased reveals.
     repairHeroShowdowns();
+    // After it: rebuilds hero's showdown record without the hands watched
+    // from the rail, which the restart above would otherwise not know about.
+    repairSpectatedHeroCards();
     // Before anything can push the store: the gist copy should carry the
     // cleaned History.
     repairStaleShowdowns();

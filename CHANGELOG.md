@@ -9,6 +9,30 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.118.0
+Hands you watched no longer show your cards.
+
+- **Reported with a screenshot:** History printed `showdown: Wonkawee shows A♠ K♠`
+  in a hand the user was not seated in. A♠ K♠ were the winner's cards.
+- **Cause:** `readHeroCards` looked in hero's seat first, but with no seat of
+  yours (watching) it fell back to every face-up card on the page, and a
+  showdown on someone else's seat read as hero's hand. `reachedShowdown` (v1.103.0)
+  needs only "someone else revealed, hero never folded", which a hand hero never
+  sat in meets, so settlement also banked it as hero's showdown: range, W$SD and
+  WTSD, with no hand counted to divide by.
+- **Fix:** no seat of yours, no cards; the fallback skips cards inside any other
+  player's seat. Settlement banks hero's showdown only under `heroInHand`, a
+  stored hand keeps hero's cards only if hero was dealt in or acted
+  (`heroTookPart`), and History prints no hero line for an older record that
+  fails it.
+- **Repair (once, `repairSpectatedHeroCards`):** hero's cards are removed from
+  stored hands hero was not in. If any were found, hero's showdown record is
+  rebuilt from the stored hands hero played, by settlement's rules, and
+  `sdSince` is set so WTSD reads over those same hands. A store with none is
+  left as it is. The deep scan prints `watched-hand cards repair:`.
+- `test/spectated-hand.test.js`; mutations of the seat check and the settlement
+  gate both fail it.
+
 ## 1.117.0
 All-in raises are read as the amount added.
 

@@ -114,7 +114,7 @@ const heroSd = (T) => {
 // --- History placement and banking share one rule --------------------------
 {
   const T = fresh();
-  const h = { shown: { [VILLAIN]: '9♥ 7♣' }, actions: [], heroCards: [{ rank: 'A', suit: 's' }, { rank: 'K', suit: 's' }] };
+  const h = { players: [HERO, VILLAIN], shown: { [VILLAIN]: '9♥ 7♣' }, actions: [], heroCards: [{ rank: 'A', suit: 's' }, { rank: 'K', suit: 's' }] };
   t.ok('reachedShowdown: someone else revealed, hero still in', T.reachedShowdown(h, HERO));
   t.eq('History prints hero among the reveals', T.heroCardsPlacement(h).where, 'showdown');
   h.actions.push({ x: HERO, a: 'fold', s: 'turn' });
