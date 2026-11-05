@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.118.0
+// @version      1.119.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,12 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.119.0 - Opening by position, steal, and fold to steal.
+ *            - Stats tab: open-raise % when folded to, early/middle/late;
+ *              steal % (CO/BTN/SB); how often a blind folds to a steal.
+ *            - Positions come from the preflop action order, so every
+ *              player is covered, spectating included.
+ *            - Once: seeded from stored hands. No pool figure yet.
  * 1.118.0 - Hands you watched no longer show your cards.
  *            - With no seat of yours, the card read fell back to any face-up
  *              card on the page, so History printed "<you> shows" with the
@@ -32,12 +38,6 @@
  *              stored short and a shove for less read as a smaller raise.
  *            - A shove that does not top the bet faced is now a call.
  *            - Hands already stored keep their old figures.
- * 1.116.0 - Bet sizing reads postflop bets only; cut-off hands count.
- *            - "Typically bets X% of pot" included preflop raises, so the
- *              "oversized" read fired for 37% of players (now 5%).
- *            - Leaving the page settles and saves the hand in progress.
- *            - Once: impossible counts (more VPIP than hands) fixed, sizing
- *              rebuilt from stored hands, pots raised to what was won.
  */
 
 /*
@@ -79,7 +79,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.118.0';
+  const HUD_VERSION = '1.119.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -5126,7 +5126,7 @@
     add: ['hands', 'vpip', 'pfr', 'threeBetMade', 'foldTo3BetMade', 'foldTo3BetOpp', 'cbetMade',
       'cbetOpp', 'foldToCbetMade', 'foldToCbetOpp', 'wtsd', 'limpMade', 'limpRaiseMade',
       'plChipsEst', 'plBBEst', 'betSizeCount', 'betSizePctSum', 'streetActions', 'boardTex',
-      'shownHands', 'tables', 'texture', 'barrel', 'fcb3', 'fourBet'],
+      'shownHands', 'tables', 'texture', 'barrel', 'fcb3', 'fourBet', 'pos'],
     window: ['betSizes', 'recent', 'sdRecent', 'recentTables'],
     latest: ['lastSeen'],
     manual: ['tag', 'notes'],
@@ -6318,6 +6318,7 @@
     });
     // From the finished action list — see barrelEventsFor.
     noteBarrels(hand.actions, (xid) => getPlayer(xid));
+    notePositions(hand.actions, (xid) => getPlayer(xid));
 
     // A pot is never smaller than what was won from it (v1.116.0). The log
     // pot misses whatever went in before a hand joined part way, and History
@@ -8105,6 +8106,149 @@
     return true;
   }
 
+  // The three Stats-tab rows. Plain figures with spot counts: no pool
+  // figure yet, so no tick and no verdict, same as Turn barrel.
+  function positionRowsHtml(r) {
+    const spots = (n, min) => `${n} spot${n === 1 ? '' : 's'}${n > 0 && n < min ? ', low' : ''}`;
+    const cell = (label, v, n) => `<span title="${n} spot${n === 1 ? '' : 's'}"`
+      + `${n > 0 && n < OPEN_POS_MIN ? ' class="tph-stat-low"' : ''}>${label} ${v == null ? '—' : Math.round(v)}</span>`;
+    const openN = r.openEOpp + r.openMOpp + r.openLOpp;
+    return `<tr title="Open-raise % when the pot is folded to them, by seat: early (UTG..), middle (MP/LJ/HJ), late (CO/BTN). A limp is not an open. No pool figure yet, so no tick and no verdict.">`
+      + '<td class="tph-stat-l">Open E/M/L</td>'
+      + `<td class="tph-stat-v">${cell('E', r.openE, r.openEOpp)} ${cell('M', r.openM, r.openMOpp)} ${cell('L', r.openL, r.openLOpp)}</td>`
+      + `<td class="tph-stat-n"><span class="tph-stat-norm">${spots(openN, 0)}</span></td></tr>`
+      + '<tr title="Opens from CO, BTN or SB when the pot is folded to them — a steal attempt.">'
+      + '<td class="tph-stat-l">Steal</td>'
+      + `<td class="tph-stat-v"><b>${fmtPct(r.steal)}</b></td>`
+      + `<td class="tph-stat-n"><span class="tph-stat-norm">${spots(r.stealOpp, STEAL_MIN)}</span></td></tr>`
+      + '<tr title="In the small or big blind, facing an open from CO, BTN or SB with no re-raise before them: how often they fold.">'
+      + '<td class="tph-stat-l">Fold v steal</td>'
+      + `<td class="tph-stat-v"><b>${fmtPct(r.foldToSteal)}</b></td>`
+      + `<td class="tph-stat-n"><span class="tph-stat-norm">${spots(r.foldToStealOpp, FOLD_STEAL_MIN)}</span></td></tr>`;
+  }
+
+  // --- Opening by position, steals, fold to steal (v1.119.0) ---------------
+  //
+  // Asked for: how often a player raises from early vs late position. The
+  // standard trio: open-raise % per position when the pot is folded to them
+  // (the only spot where an open says something about their range for that
+  // seat), steal % (CO, BTN and SB opens when folded to), and how often a
+  // blind folds to one.
+  //
+  // Positions come from the hand's preflop action order, not from the
+  // seat ring: every dealt player acts preflop (folds are logged), first in
+  // UTG..BTN order, then SB, then BB. So it works for every opponent and
+  // while spectating, and backfills from STORE.hands with no second
+  // implementation - the barrel stat's discipline. A hand whose order does
+  // not add up (no blind lines, a blind acting before a seat that should
+  // precede it) is skipped rather than labelled wrong.
+  //
+  // No pool figure exists for any of these, so no tick and no verdict; the
+  // pool export carries them so the bars can be measured before any read
+  // fires off them. The gates below only mark a figure "low".
+  const OPEN_POS_MIN = 15;
+  const STEAL_MIN = 15;
+  const FOLD_STEAL_MIN = 10;
+  const POS_AGG = { raise: 1, 'all-in': 1 };
+
+  // Position label -> bucket: E(arly), M(iddle), L(ate: CO/BTN), S(mall blind).
+  function positionBucket(label) {
+    if (label === 'BTN' || label === 'CO') return 'L';
+    if (label === 'SB') return 'S';
+    if (label === 'BB') return null;
+    if (label === 'MP' || label === 'HJ' || label === 'LJ') return 'M';
+    return 'E';
+  }
+
+  // Returns null when the hand cannot be placed, otherwise
+  // { opens: [{ xid, b, open }], fts: [{ xid, folded }] }.
+  function positionEventsFor(actions) {
+    const pre = (Array.isArray(actions) ? actions : []).filter((a) => a && a.s === 'preflop' && a.x);
+    const same = (a, b) => String(a) === String(b);
+    const sbA = pre.find((a) => a.a === 'sb');
+    const bbA = pre.find((a) => a.a === 'bb');
+    if (!sbA || !bbA || same(sbA.x, bbA.x)) return null;
+    const sb = sbA.x;
+    const bb = bbA.x;
+    const vol = pre.filter((a) => a.a !== 'sb' && a.a !== 'bb');
+    const firstAt = [];
+    const seen = [];
+    vol.forEach((a, i) => { if (!seen.some((x) => same(x, a.x))) { seen.push(a.x); firstAt.push(i); } });
+    const others = seen.filter((x) => !same(x, sb) && !same(x, bb));
+    // Every seat before the blinds must have acted before either blind did.
+    const firstOf = (x) => firstAt[seen.findIndex((y) => same(y, x))];
+    const lastOther = others.length ? Math.max(...others.map(firstOf)) : -1;
+    const blindFirst = [sb, bb].filter((x) => seen.some((y) => same(y, x))).map(firstOf);
+    if (blindFirst.some((i) => i < lastOther)) return null;
+    const n = others.length + 2;
+    const bucketOf = (x) => {
+      if (same(x, sb)) return 'S';
+      if (same(x, bb)) return null;
+      return positionBucket(seatLabel(others.findIndex((y) => same(y, x)) + 2, n));
+    };
+    const opens = [];
+    const fts = [];
+    const acted = [];
+    let raised = false;
+    let limped = false;
+    let steal = null;     // { at } when the open came from CO/BTN/SB
+    vol.forEach((a, i) => {
+      const first = !acted.some((x) => same(x, a.x));
+      if (first) {
+        acted.push(a.x);
+        const b = bucketOf(a.x);
+        if (!raised && !limped && b) opens.push({ xid: a.x, b, open: !!POS_AGG[a.a] });
+        if (steal && (same(a.x, sb) || same(a.x, bb)) && !same(a.x, steal.xid)
+            && !vol.slice(steal.at + 1, i).some((x) => POS_AGG[x.a])) {
+          fts.push({ xid: a.x, folded: a.a === 'fold' });
+        }
+      }
+      if (POS_AGG[a.a]) {
+        if (!raised && !limped && first) {
+          const b = bucketOf(a.x);
+          if (b === 'L' || b === 'S') steal = { xid: a.x, at: i };
+        }
+        raised = true;
+      } else if (a.a === 'call' && !raised) limped = true;
+    });
+    return { opens, fts };
+  }
+
+  // Sparse per player, flat short keys: <bucket>o / <bucket>r (opportunities,
+  // opens) for E, M, L, S, and fo / ff (faced a steal in a blind / folded).
+  // Absent until first seen, like `barrel`.
+  function notePositions(actions, resolve) {
+    const ev = positionEventsFor(actions);
+    if (!ev) return false;
+    const bump = (xid, k) => {
+      const p = resolve(xid);
+      if (!p) return;
+      if (!p.pos || typeof p.pos !== 'object') p.pos = {};
+      p.pos[k] = (p.pos[k] || 0) + 1;
+    };
+    ev.opens.forEach((o) => { bump(o.xid, o.b + 'o'); if (o.open) bump(o.xid, o.b + 'r'); });
+    ev.fts.forEach((f) => { bump(f.xid, 'fo'); if (f.folded) bump(f.xid, 'ff'); });
+    return true;
+  }
+
+  // Once, from init - the barrel backfill's flag discipline: it ADDS.
+  function backfillPositions() {
+    if (STORE.posBackfilled) return 0;
+    let hands = 0;
+    (STORE.hands || []).forEach((h) => {
+      if (!h) return;
+      if (notePositions(h.actions, (xid) => {
+        const p = STORE.players[xid];
+        if (!p) return null;
+        markPlayerDirty(xid);
+        return p;
+      })) hands += 1;
+    });
+    STORE.posBackfilled = { hands, at: Date.now() };
+    saveStore();
+    return hands;
+  }
+
   // Once, from init — same shape and same flag discipline as
   // backfillBoardTexture: it ADDS, so the flag is what makes it safe, and it
   // runs before the watchers so no live hand can be counted twice.
@@ -8230,6 +8374,8 @@
     // 4-bet+ and fold to flop c-bet in a 3-bet+ pot (v1.102.0), both sparse.
     const fb = (p.fourBet && typeof p.fourBet === 'object') ? p.fourBet : {};
     const f3 = (p.fcb3 && typeof p.fcb3 === 'object') ? p.fcb3 : {};
+    // Opening by position (v1.119.0), sparse - see positionEventsFor.
+    const po = (p.pos && typeof p.pos === 'object') ? p.pos : {};
     // Won at showdown, off the showdowns whose cards were SEEN — the same
     // sample shownHands already holds, so it needs no collection of its own.
     // It inherits that sample's bias: a showdown loser who mucks unseen is not
@@ -8285,6 +8431,16 @@
       fourBetOpp: fb.o || 0,
       foldToCbet3: pct(f3.m || 0, f3.o || 0),
       foldToCbet3Opp: f3.o || 0,
+      openE: pct(po.Er || 0, po.Eo || 0),
+      openEOpp: po.Eo || 0,
+      openM: pct(po.Mr || 0, po.Mo || 0),
+      openMOpp: po.Mo || 0,
+      openL: pct(po.Lr || 0, po.Lo || 0),
+      openLOpp: po.Lo || 0,
+      steal: pct((po.Lr || 0) + (po.Sr || 0), (po.Lo || 0) + (po.So || 0)),
+      stealOpp: (po.Lo || 0) + (po.So || 0),
+      foldToSteal: pct(po.ff || 0, po.fo || 0),
+      foldToStealOpp: po.fo || 0,
       medianBetPct: median(p.betSizes),
       // Median bet/raise size as % of pot, split by what they were caught
       // holding at showdown: two pair+, a live draw, or nothing at all. A
@@ -9680,6 +9836,13 @@
       // facts on their own, same as everywhere else AFq/WTSD appear.
       afq: mean((r) => r.afq),
       wtsd: mean((r) => r.wtsd),
+      // Opening by position (v1.119.0): no pool figure yet. Carried here so
+      // the export can measure one before any read fires off these.
+      openE: mean((r) => r.openE),
+      openM: mean((r) => r.openM),
+      openL: mean((r) => r.openL),
+      steal: mean((r) => r.steal),
+      foldToSteal: mean((r) => r.foldToSteal),
     };
   }
 
@@ -9765,6 +9928,11 @@
       row('Limp share of VPIP', 'limpShareOfVpip', true),
       row('AFq (aggression, folds excluded)', 'afq', false),
       row('WTSD', 'wtsd', false),
+      row('Open-raise, early position', 'openE', false),
+      row('Open-raise, middle position', 'openM', false),
+      row('Open-raise, late position', 'openL', false),
+      row('Steal (CO/BTN/SB)', 'steal', false),
+      row('Fold to steal (blinds)', 'foldToSteal', false),
     ];
     const stakesBlock = (() => {
       const sb = poolStakesBreakdown();
@@ -13502,6 +13670,7 @@
     .tph-trend-last { width: 40px; flex: 0 0 auto; text-align: right; font-weight: 700; }
     .tph-trend-table { font-size: 11px; }
     .tph-stat-norm { color: #8d959c !important; font-size: 10px; }
+    .tph-stat-low { color: #8d959c !important; }
     .tph-dev-n { font-size: 10px; opacity: .85; margin-left: 2px; }
     .tph-dev-typical { color: #9fb2c4 !important; }
     .tph-dev-notable { color: #ffc046 !important; }
@@ -15696,6 +15865,7 @@
           })()}
           ${statRow('3-Bet', r.threeBet, s.threeBet, 'threeBet', null, s.anchor)}
           ${statRow('Fold v 3B', r.foldTo3Bet, s.foldTo3Bet, 'foldTo3Bet', null, s.anchor)}
+          ${positionRowsHtml(r)}
           <tr title="How often they re-raise again (4-bet, 5-bet…) when facing a 3-bet or bigger preflop. Counted from v1.102.0 on. No pool figure yet, so no tick and no verdict.">
             <td class="tph-stat-l">4-Bet+</td>
             <td class="tph-stat-v"><b>${fmtPct(r.fourBet)}</b></td>
@@ -17589,6 +17759,9 @@
         ? `your cards removed from ${shr.hands} hand(s) you were not in; showdowns rebuilt from ${shr.rebuilt} stored, ${shortAgo(shr.at)}`
         : `none found, ${shortAgo(shr.at)}`)
       : 'not run'));
+    const pbf = STORE.posBackfilled;
+    L.push('position stats backfill: ' + (pbf && typeof pbf === 'object'
+      ? `${pbf.hands} stored hand(s) placed, ${shortAgo(pbf.at)}` : (pbf ? 'done' : 'not run')));
     // A reveal that parses but carries no cards is invisible: it never reaches
     // the unmatched list, and the Range tab just stays empty. Print the raw
     // reveal rows so the wording and the card shape can both be checked.
@@ -18439,6 +18612,13 @@
       heroCardsPlacement,
       barrelEventsFor,
       noteBarrels,
+      positionEventsFor,
+      positionRowsHtml,
+      notePositions,
+      backfillPositions,
+      OPEN_POS_MIN,
+      STEAL_MIN,
+      FOLD_STEAL_MIN,
       backfillBarrels,
       backfillRecentShowdowns,
       preflopTiersFromActions,
@@ -18656,6 +18836,7 @@
     // history-seeded figures behind it rather than starting from zero.
     backfillBoardTexture();
     backfillBarrels();
+    backfillPositions();
     backfillRecentShowdowns();
     raiseHistoryDefault();
     // After the seeding above, which would otherwise refill hero's window

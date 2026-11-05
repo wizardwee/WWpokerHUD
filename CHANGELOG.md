@@ -9,6 +9,31 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.119.0
+Opening by position, steal, and fold to steal.
+
+- **Asked for:** how often a player raises from early vs late position.
+- **What's recorded**, per player, from each finished hand:
+  - open-raise % when the pot is folded to them, by seat: early (UTG..),
+    middle (MP/LJ/HJ), late (CO/BTN). A limp is not an open, and a raise after
+    a limp is not an open either;
+  - steal %: opens from CO, BTN or SB when folded to them;
+  - fold to steal: in a blind, facing such an open with no re-raise before
+    them.
+- **Positions come from the preflop action order**, not the seat ring: every
+  dealt player acts preflop (folds are logged), first in UTG..BTN order, then
+  SB, then BB. So it covers every opponent, works while spectating, and
+  backfills from stored hands through the same function (`positionEventsFor`),
+  the barrel stat's discipline. A hand whose order does not add up (no blind
+  lines, a blind acting before a seat that precedes it) is skipped rather than
+  labelled wrong.
+- Stored sparsely as `p.pos` (flat short keys), summed by the pseudo-record
+  merge. Stats tab rows "Open E/M/L", "Steal", "Fold v steal" with spot counts;
+  no pool figure exists, so no tick and no verdict. The pool export carries all
+  five, so bars can be measured before any coach read fires off them.
+- Once at init (`backfillPositions`, flag `posBackfilled`), shown in the deep
+  scan. `test/position-stats.test.js`.
+
 ## 1.118.0
 Hands you watched no longer show your cards.
 
