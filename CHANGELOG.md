@@ -9,6 +9,32 @@ behaviour change: nothing automates it, and userscript managers compare
 `@version` to decide whether an update exists, so a stale value means a
 reinstall won't see new code as newer.
 
+## 1.121.0
+A hand that never happened is taken back out of your P/L.
+
+- **Found** analysing the gist archive: lifetime P/L read about **-5.56M bb**,
+  and CunningCat's "your P/L vs them" read the same. Both came from one ledger
+  row: game `29a241df…`, 31 Oct 00:51:57, -$166,875,000 at a **$30** blind.
+- **Cause:** the table-move replay that v1.115.0 fixed, ninety minutes before
+  that fix shipped. The 00:51:16 hand (hero lost $166,875,000 at $2.5M) was
+  replayed with a $15/$30 tournament's log lines mixed in, and settled as a
+  second hand: the loss counted twice, priced at the tournament's blind.
+- **Repair (once, from init):** the row is removed from the ledger; hero's
+  chips, bb, hands and bbHands give it back; CunningCat and the tournament
+  player MaxDamage give back the share of it they were credited; the 31 Oct
+  session it landed in loses it, and its blind goes back to $2.5M (-$300M,
+  -120 bb). On the backup: lifetime -5,561,566 bb -> +934 bb, CunningCat
+  -5.56M bb -> -575 bb.
+- **Named, not detected.** The hand has aged out of history, so only its
+  ledger row remains, and that row cannot say who it was split across: the
+  opponents' nets come from an archived copy of the stored hand. The row is
+  undone only if game id, amount and blind all match, so it is a no-op on any
+  other store. Per-player hand and VPIP counts from the replay stay (one hand
+  each, not recoverable).
+- Deep scan: `phantom-hand repair`. `test/phantom-hands.test.js`.
+- **Not fixed here:** tournament hands still go into the cash P/L as if their
+  chips were dollars.
+
 ## 1.120.0
 Rebuys in the last 4 hours, inferred from stacks.
 

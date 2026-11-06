@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Poker HUD
 // @namespace    torn-poker-hud
-// @version      1.120.0
+// @version      1.121.0
 // @description  Opponent tendency HUD, GTO-inspired coach prompts, per-player P/L, and tendency reports for Torn holdem, built for Torn PDA custom scripts.
 // @author       wizardwee
 // @license      MIT
@@ -18,6 +18,12 @@
  * @version to decide whether an update exists. A stale value means a reinstall
  * won't see new code as newer.
  *
+ * 1.121.0 - A hand that never happened is taken back out.
+ *            - 31 Oct: a table move replayed a real hand mixed with a
+ *              tournament's lines, so a $166.9M loss counted twice, priced at
+ *              a $30 blind: lifetime read about -5.56M bb.
+ *            - Once: that row leaves the P/L ledger, totals, CunningCat's
+ *              estimate and the 31 Oct session. Deep scan reports it.
  * 1.120.0 - Rebuys in the last 4 hours, inferred from stacks.
  *            - Torn logs no rebuy, so a stack rise of 10bb+ that no pot won
  *              and no returned bet explains is counted, one sweep late.
@@ -29,14 +35,6 @@
  *            - Positions come from the preflop action order, so every
  *              player is covered, spectating included.
  *            - Once: seeded from stored hands. No pool figure yet.
- * 1.118.0 - Hands you watched no longer show your cards.
- *            - With no seat of yours, the card read fell back to any face-up
- *              card on the page, so History printed "<you> shows" with the
- *              winner's cards and they were banked as your showdown.
- *            - Your cards are read only from your own seat; showdowns bank
- *              only for hands you took part in.
- *            - Once: those cards are removed from stored hands and your
- *              showdown stats rebuilt from the hands you played.
  */
 
 /*
@@ -78,7 +76,7 @@
   // metadata comment and can't be read from JS, so this is a second place to
   // bump — it exists so a pasted deep scan says which build produced it, which
   // is otherwise unknowable when diagnosing from a phone.
-  const HUD_VERSION = '1.120.0';
+  const HUD_VERSION = '1.121.0';
 
   // ===========================================================================
   // 0. SHARED UTILITIES
@@ -8963,6 +8961,78 @@
     });
     if (res.pots) dirtyHands = true;
     STORE.countsSizingRepaired = res;
+    saveStore();
+    return res;
+  }
+
+  // Hands that never happened, recorded before v1.115.0 stopped a table
+  // move replaying the old log into the new hand. Each one is a real hand's
+  // actions replayed with another table's lines mixed in, so hero's result
+  // was counted twice, and priced at the other table's blind.
+  //
+  // Found in a real backup: game 29a241df… (31 Oct 00:51:57) replays the
+  // 00:51:16 hand, where hero lost $166,875,000 at a $2.5M blind, mixed with
+  // a $15/$30 tournament's lines. The ledger holds both rows; the second is
+  // priced at $30, which alone put hero.netBB at about -5.56M.
+  //
+  // Named one by one, NOT detected by a rule: the hand has aged out of
+  // history, so only its ledger row is left, and that row cannot say which
+  // opponents its result was split across. `opp` is each opponent's net in
+  // that hand (what applyHandResults weighted by), read from an archived copy
+  // of the stored hand; their shares are re-derived here exactly as they were
+  // taken. A row is undone only if game id, amount AND blind all match, so
+  // this is a no-op on any other store.
+  const PHANTOM_HANDS = [
+    { g: '29a241df2fa710d1c2d71840c9c2fe', d: -166875000, b: 30, realBB: 2500000,
+      opp: { 4390971: 179375000, 'name:MaxDamage': 15 } },
+  ];
+
+  // Once, from init (v1.121.0). For each named phantom whose ledger row is
+  // present: the row is removed, hero's totals and hand counts give it back,
+  // each opponent's P/L estimate gives back the share it took, and the
+  // archived session it landed in is corrected (its net, and its blind,
+  // which the phantom's blind had overwritten). Player hand and VPIP counts
+  // from the replay stay: one hand per player, and not recoverable.
+  function repairPhantomHands() {
+    if (STORE.phantomHandsRepaired) return null;
+    const res = { at: Date.now(), hands: 0, chips: 0, bb: 0 };
+    const L = STORE.plLedger || [];
+    PHANTOM_HANDS.forEach((ph) => {
+      const i = L.findIndex((r) => r && r.g === ph.g && r.d === ph.d && r.b === ph.b);
+      if (i < 0) return;
+      const row = L[i];
+      L.splice(i, 1);
+      dirtyPl = true;
+      const priced = plausibleBB(row.b);
+      const deltaBB = priced ? row.d / row.b : 0;
+      const h = STORE.hero;
+      h.netChips -= row.d;
+      h.hands = Math.max(0, (h.hands || 0) - 1);
+      if (priced) {
+        h.netBB -= deltaBB;
+        h.bbHands = Math.max(0, (h.bbHands || 0) - 1);
+      }
+      const pool = Object.keys(ph.opp).reduce((n, x) => n + ph.opp[x], 0);
+      Object.keys(ph.opp).forEach((x) => {
+        const p = STORE.players[x];
+        if (!p || !(pool > 0)) return;
+        const share = ph.opp[x] / pool;
+        p.plChipsEst = (p.plChipsEst || 0) - row.d * share;
+        if (priced) p.plBBEst = (p.plBBEst || 0) - deltaBB * share;
+        markPlayerDirty(x);
+      });
+      (STORE.sessionHistory || []).forEach((s) => {
+        if (!s || !(s.startedAt <= row.t && row.t <= (s.endedAt || 0) + 1000)) return;
+        s.netChips = (s.netChips || 0) - row.d;
+        s.hands = Math.max(0, (s.hands || 0) - 1);
+        if (s.bb === row.b && ph.realBB) s.bb = ph.realBB;
+        s.netBB = s.bb > 0 ? s.netChips / s.bb : null;
+      });
+      res.hands += 1;
+      res.chips -= row.d;
+      res.bb -= deltaBB;
+    });
+    STORE.phantomHandsRepaired = res;
     saveStore();
     return res;
   }
@@ -17864,6 +17934,10 @@
       + '   backup copy: ' + (coreBakChars ? coreBakChars + ' chars' : 'none yet'));
     const csr = STORE.countsSizingRepaired;
     L.push('counts/sizing repair: ' + (csr ? `${csr.players} record(s) with counts ahead of hands fixed, ${csr.windows} sizing window(s) rebuilt postflop-only, ${csr.pots} stored pot(s) raised to what was won` : 'not run'));
+    const phr = STORE.phantomHandsRepaired;
+    L.push('phantom-hand repair: ' + (phr ? (phr.hands
+      ? `${phr.hands} replayed hand(s) removed from the ledger and totals: ${fmtSignedMoney(phr.chips)}, ${phr.bb >= 0 ? '+' : ''}${Math.round(phr.bb)} bb given back`
+      : 'none found') : 'not run'));
     const pm = STORE.pseudoMerged;
     L.push('name: record merge: ' + (pm ? `${pm.players} merged into real records, ${pm.hands} stored hand(s) re-keyed` : 'not run')
       + '   name: records now: ' + Object.keys(STORE.players).filter((k) => k.indexOf('name:') === 0).length
@@ -18800,6 +18874,8 @@
       repairStaleShowdowns,
       repairCoreLoss,
       repairCountsAndSizing,
+      repairPhantomHands,
+      PHANTOM_HANDS,
       handPotKnown,
       flushNow,
       coreLossSignature,
@@ -18984,6 +19060,8 @@
     repairCoreLoss();
     mergeExistingPseudoRecords();
     repairCountsAndSizing();
+    // After the pseudo merge, so the opponent ids it names are the current ones.
+    repairPhantomHands();
     // Leaving the page settles the hand in progress, so the live counters
     // already taken for it get their hands and opportunities too, and saves
     // at once (v1.116.0). Hiding the page (switching apps) only saves: the
